@@ -1,0 +1,156 @@
+//! FrameAnchor 主程式（PLAN §4 架構）。
+//! 單一 exe、requireAdministrator、tray 常駐、watcher + usage 兩個背景 task。
+
+// 不用 windows_subsystem="windows"：實測在部分機器（含本機）會讓
+// WebView2 environment 建立失敗（0x8007139F）→ 白面板。
+// 改用 console subsystem + 啟動即 FreeConsole 隱藏視窗。
+
+mod autostart;
+mod commands;
+mod config;
+mod error;
+mod model;
+mod priority;
+mod process;
+mod topology;
+mod tray;
+mod usage;
+mod watcher;
+mod windows_enum;
+
+use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, RwLock};
+
+use tauri::Manager;
+
+use model::Config;
+use topology::Topology;
+use watcher::{AppliedEntry, CachedHandle};
+
+/// 全域共享狀態（PLAN §4）
+pub struct AppState {
+    pub config: RwLock<Config>,
+    pub topology: Topology,
+    pub applied: RwLock<HashMap<u32, AppliedEntry>>,
+    /// PID → 早期快取的 process handle（反作弊保護生效前開啟，終生重用）
+    pub handles: RwLock<HashMap<u32, CachedHandle>>,
+    /// usage streaming 開關（面板頁開啟時 true）
+    pub usage_tx: tokio::sync::watch::Sender<bool>,
+    /// tray「結束」設定，用來繞過 closeToTray 攔截
+    pub quitting: AtomicBool,
+}
+
+fn main() {
+    // release：立即卸離 console，隱藏 CMD 視窗（debug 保留看 log）
+    #[cfg(not(debug_assertions))]
+    unsafe {
+        let _ = windows::Win32::System::Console::FreeConsole();
+    }
+    // 強殺殘留的 WebView2 孤兒（鎖 user-data 目錄會導致白畫面）
+    process::kill_orphan_webviews();
+    // SeDebugPrivilege：對 ACL 保護的進程有幫助（無法繞過反作弊 kernel callback）
+    process::enable_debug_privilege();
+
+    // GUI subsystem 看不到 panic 輸出，寫到暫存檔方便診斷
+    std::panic::set_hook(Box::new(|info| {
+        let path = std::env::temp_dir().join("frameanchor-panic.log");
+        let _ = std::fs::write(&path, format!("{info}\n"));
+    }));
+
+    let topology = match topology::enumerate_topology() {
+        Ok(t) => {
+            if t.total_lp > 64 {
+                log::warn!("偵測到 {} 個邏輯處理器：v1 只支援 group 0（前 64 個）", t.total_lp);
+            }
+            log::info!(
+                "拓撲：{} LP / {} 核心, SMT={}, Hybrid={}",
+                t.total_lp,
+                t.physical_cores.len(),
+                t.has_smt,
+                t.has_hybrid
+            );
+            t
+        }
+        Err(e) => {
+            log::error!("拓撲列舉失敗: {e}");
+            Topology::default()
+        }
+    };
+
+    let cfg = config::load();
+    let (usage_tx, _) = tokio::sync::watch::channel(false);
+    let state = Arc::new(AppState {
+        config: RwLock::new(cfg),
+        topology,
+        applied: RwLock::new(HashMap::new()),
+        handles: RwLock::new(HashMap::new()),
+        usage_tx,
+        quitting: AtomicBool::new(false),
+    });
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // 第二個實例啟動 → 喚醒既有視窗後退出
+            tray::show_main_window(app);
+        }))
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
+        .manage(state.clone())
+        .setup(move |app| {
+            let handle = app.handle().clone();
+            tray::build_tray(&handle)?;
+
+            // --minimized（Task Scheduler 帶入）→ 不開主視窗直接常駐 tray
+            let minimized = std::env::args().any(|a| a == "--minimized");
+            let start_min = state
+                .config
+                .read()
+                .map(|c| c.settings.start_minimized)
+                .unwrap_or(false);
+            if !minimized && !start_min {
+                tray::show_main_window(&handle);
+            }
+
+            watcher::spawn(handle.clone(), state.clone());
+            usage::spawn(handle.clone(), state.clone());
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::get_topology,
+            commands::list_windows,
+            commands::get_rules,
+            commands::save_rule,
+            commands::delete_rule,
+            commands::get_settings,
+            commands::save_settings,
+            commands::set_autostart,
+            commands::get_applied,
+            commands::reapply_all,
+            commands::set_usage_streaming,
+            commands::open_data_folder,
+        ])
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let app = window.app_handle();
+                let state = app.state::<Arc<AppState>>();
+                if state.quitting.load(std::sync::atomic::Ordering::Relaxed) {
+                    return; // tray「結束」→ 真正關閉
+                }
+                let close_to_tray = state
+                    .config
+                    .read()
+                    .map(|c| c.settings.close_to_tray)
+                    .unwrap_or(true);
+                if close_to_tray {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+        .run(tauri::generate_context!())
+        .expect("error while running FrameAnchor");
+}
