@@ -1,5 +1,5 @@
 //! 每核心使用率（PLAN §7.5）：NtQuerySystemInformation(SystemProcessorPerformanceInformation=8)
-//! 每秒取樣，與上次取樣算差值。面板未開啟時暫停（省電設計）。
+//! 每秒取樣，與上次取樣算差值。面板未開啟或沒有 applied 規則程序時暫停（省電設計）。
 
 use std::sync::Arc;
 

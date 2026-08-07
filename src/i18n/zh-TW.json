@@ -6,7 +6,10 @@
   },
   "dashboard": {
     "cpuTitle": "CPU 使用率",
-    "coveredLegend": "藍框 = 已被規則涵蓋的核心",
+    "coveredLegend": "藍框 = 所選程序目前套用的核心",
+    "selectProcess": "監控程序",
+    "systemPerCoreNote": "數值為系統每核心整體使用率",
+    "emptyCpuPanel": "尚無執行中的規則程序",
     "appliedTitle": "已套用規則的進程",
     "emptyApplied": "尚無符合規則的遊戲在執行",
     "colGame": "遊戲",

@@ -4,101 +4,132 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project overview
 
-FrameAnchor is a Windows desktop tool for competitive gamers. It applies persistent CPU affinity and priority rules to game processes automatically — game launches, FrameAnchor detects it, applies the rule. Built with **Tauri v2**, **Svelte 5** (runes mode), and **Rust** (Win32 API). Single exe that runs as admin (requireAdministrator manifest), tray icon, optional autostart via Task Scheduler (no UAC at login).
+FrameAnchor is a Windows-only desktop utility that persistently applies CPU affinity and priority rules to game processes. It is a single elevated executable built with **Tauri v2**, **Svelte 5 runes**, TypeScript, Rust, and direct Win32 APIs. It also provides a tray UI, per-core usage monitoring, window-based rule creation, and Task Scheduler autostart.
 
-Full spec: `PLAN.md`.
+`PLAN.md` is the original product specification, but the implementation has evolved beyond parts of it (notably affinity modes, watcher cadence, and shared state). When they disagree, treat the code as authoritative.
 
-## Commands
+## Development commands
+
+The repository uses npm (`package-lock.json`) and requires Windows, Node 20+, Rust 1.80+ with the MSVC toolchain, Visual Studio Build Tools, and WebView2.
 
 ```bash
-npm run dev          # Vite dev server only (frontend hot-reload)
-npm run build        # Vite production build
-npm run check        # svelte-check type-checking
-npm run tauri dev    # Full Tauri dev (Rust + frontend, opens Window)
-npm run tauri build  # Production NSIS installer
+npm ci                  # Install exact frontend/Tauri CLI dependencies
+npm run dev             # Vite frontend only, http://localhost:1420
+npm run check           # svelte-check + TypeScript checks; no ESLint/Prettier configured
+npm run build           # Production frontend build to dist/
+npm run tauri dev       # Full Rust + frontend development app
+npm run tauri build     # Release build and NSIS installer
+npm run gen-icons       # Regenerate src-tauri/icons/*
 ```
 
-Rust unit tests:
+Rust checks and tests can be run from the repository root:
+
 ```bash
-cd src-tauri; cargo test
+cargo check --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml <test_name>  # Substring-filter one test
 ```
 
-Single test:
+Examples of test filters include `fullpath_matches_case_insensitive`.
+
+For built-executable DLL/export failures such as `0xC0000139`, use:
+
 ```bash
-cd src-tauri; cargo test <test_name>
+node scripts/pe-imports.mjs <exe>
+node scripts/pe-exports.mjs <dll>
 ```
 
-## Architecture
+## Runtime architecture
 
-### Process model
-- Single `FrameAnchor.exe`, manifest `requireAdministrator` → always admin
-- Tauri main thread handles UI event loop
-- Two long-lived tokio async tasks spawned at startup:
-  - **Watcher task**: two cadences in one loop — 100ms **discovery pass** (lightweight name-only scan; new matching PID → immediately open + cache process handle + apply rule) and full tick at `pollIntervalMs` (default 1s; cleanup, retries, state read-back). Early handle acquisition is the anti-cheat strategy: EAC's `ObRegisterCallbacks` only strips rights from *newly opened* handles, so a handle opened in the first ~100ms of process life keeps working after protection attaches.
-  - **Usage task**: samples `NtQuerySystemInformation(SystemProcessorPerformanceInformation)` every 1s, emits `usage-update` event. Pauses when dashboard tab not visible (controlled by `set_usage_streaming` command) — power/CPU saving
-- Shared state: `Arc<AppState>` with `RwLock<Config>`, static `Topology` (enumerated once at startup), `RwLock<HashMap<u32, AppliedEntry>>` (PID → applied state), `RwLock<HashMap<u32, CachedHandle>>` (PID → early-acquired handle, kept for process lifetime)
+### Startup and shared state
 
-### Backend module map (src-tauri/src/)
+`src-tauri/src/main.rs` is the composition root. Startup order is intentional:
 
-| Module | Role |
-|---|---|
-| `main.rs` | Setup, plugin registration, command registration, window event handling (closeToTray) |
-| `model.rs` | Serde data types: `Config`, `Settings`, `Rule`, `AffinitySpec`, `AffinityMode`, `CpuPriority`, `IoPriority`, `MemPriority`, `AdvancedSpec` |
-| `topology.rs` | CPU topology enumeration via `GetLogicalProcessorInformationEx`, SMT sibling detection, P/E-core labeling via `EfficiencyClass`. Exports `resolve_mask()` for affinity mode → u64 bitmask |
-| `process.rs` | Process enumeration (Toolhelp snapshot), handle opening (`OpenProcess`), affinity set/get (`SetProcessAffinityMask`/`GetProcessAffinityMask`), priority set/get (`SetPriorityClass`/`GetPriorityClass`), soft affinity (`SetThreadIdealProcessorEx`), path normalization, orphan WebView2 cleanup (`kill_orphan_webviews`), system process blacklist |
-| `priority.rs` | I/O priority via `NtSetInformationProcess(ProcessIoPriority)`, memory priority via `SetProcessInformation(ProcessMemoryPriority)`. Best-effort — failures logged but don't fail the overall rule application |
-| `watcher.rs` | Rule engine: 100ms discovery pass (early handle acquisition) + polling loop, exe matching (fullPath/fileName, case-insensitive), rule application with retry (3 retries; ACCESS_DENIED = 30s backoff, anti-cheat tolerant), PID reuse detection (exe name + process creation time), handle cache purge, emits `applied-update` event |
-| `usage.rs` | Per-core utilization via `NtQuerySystemInformation`, delta-based calculation, streaming on/off via tokio watch channel |
-| `windows_enum.rs` | Browse dialog: `EnumWindows` → filter visible, titled, non-cloaked, non-toolwindow → `QueryFullProcessImageNameW` → icon extraction via `SHGetFileInfoW` |
-| `config.rs` | `%APPDATA%\FrameAnchor\config.json`, atomic write (tmp + rename), corrupt file backup (`config.corrupt.json`), serde defaults for missing fields |
-| `tray.rs` | System tray icon and context menu (show window, applied count, autostart toggle, quit), menu rebuild on language change |
-| `autostart.rs` | Task Scheduler via `schtasks.exe /Create /SC ONLOGON /RL HIGHEST`, no COM |
-| `commands.rs` | All `#[tauri::command]` IPC handlers, emits `applied-update` after mutations |
-| `error.rs` | `thiserror` enums — `ProcessError` (with `AccessDenied` variant), `PriorityError`, `TopologyError`. Error codes as stable string keys for frontend i18n lookup |
+1. Release builds use the Windows GUI subsystem (no console window); debug builds retain the console.
+2. Stale app-owned WebView2 processes are killed.
+3. `SeDebugPrivilege` is enabled.
+4. A panic hook writes `%TEMP%\frameanchor-panic.log`.
+5. CPU topology and `%APPDATA%\FrameAnchor\config.json` are loaded.
+6. Tauri plugins, tray, IPC commands, watcher, and usage tasks are started.
 
-### Frontend (src/)
+The app is always elevated through the custom manifest in `src-tauri/build.rs`. That manifest also carries the Common Controls v6 dependency and PerMonitorV2 DPI awareness; replacing it without those entries can reintroduce `TaskDialogIndirect`/`comctl32` startup failures.
 
-- `App.svelte` — shell with left nav (Dashboard/Rules/Settings), manual tab switching (no router), initializes stores and event listeners on mount
-- `pages/Dashboard.svelte` — CPU topology grid (per-core usage bars, HT/P/E badges) + applied process table
-- `pages/Rules.svelte` — rule card list, new-rule-from-browse button, edit/delete
-- `pages/Settings.svelte` — all settings as checkboxes/dropdowns/slider
-- `components/TopologyGrid.svelte` — read-only usage grid for dashboard
-- `components/AffinityPicker.svelte` — editable core checkbox grid for rule editor, preset buttons
-- `components/CoreCell.svelte` — single core cell (shared by grid and picker)
-- `components/RuleCard.svelte` — single rule editor card
-- `components/AppliedTable.svelte` — applied processes table
-- `components/BrowseDialog.svelte` — modal window picker for creating rules
-- `lib/ipc.ts` — typed `invoke()` wrappers for all commands
-- `lib/types.ts` — TypeScript interfaces matching Rust data model
-- `lib/stores.ts` — Svelte writable stores for topology, rules, settings, applied, usage
-- `i18n/zh-TW.json`, `i18n/en.json` — bilingual dictionaries, key-based (`nav.dashboard`, `errors.ACCESS_DENIED`, etc.), `svelte-i18n`
+Tauri manages an `Arc<AppState>` containing:
 
-### IPC
+- `RwLock<Config>` for settings and rules
+- startup-enumerated `Topology`
+- PID-indexed applied-state and cached-handle maps
+- a tokio watch channel controlling usage streaming
+- an atomic quit flag used to bypass close-to-tray interception
 
-Commands (frontend calls backend):
-- `get_topology`, `list_windows`, `get_rules`, `save_rule`, `delete_rule`, `get_settings`, `save_settings`, `set_autostart`, `get_applied`, `reapply_all`, `set_usage_streaming`, `open_data_folder`
+The main window starts hidden. It is shown unless either `--minimized` or `settings.startMinimized` requests tray-only startup. The single-instance plugin wakes the existing window on a second launch.
 
-Events (backend pushes to frontend):
-- `usage-update: number[]` — per-LP utilization, 1s interval when dashboard visible
-- `applied-update: AppliedProcess[]` — applied process list, emitted on change
+### Background tasks
 
-### Key design decisions
+Two long-lived async tasks run on Tauri's tokio runtime:
 
-- **No `sysinfo` crate** — all Win32 is hand-written for precise control over affinity masks and topology
-- **No REALTIME_PRIORITY_CLASS** — would starve system threads; `High` is the maximum exposed
-- **Affinity v1**: only processor group 0 (max 64 LP), covers all mainstream gaming CPUs
-- **Soft affinity (Prefer mode)**: sets thread ideal processor via `SetThreadIdealProcessorEx` instead of hard affinity mask — useful for games that react badly to hard affinity
-- **Anti-cheat strategy (EAC etc.)**: open the process handle within ~100ms of process creation (100ms discovery pass), cache it for the process lifetime, and route all apply/retry through it — `ObRegisterCallbacks` only strips rights on *new* opens, so pre-protection handles stay usable. No kernel driver, no memory access — legitimate Win32 only. Requires FrameAnchor running before game launch; if the race is lost, `ACCESS_DENIED` gets 30s backoff and the UI tells the user to restart the game. `SeDebugPrivilege` enabled at startup (helps ACL-protected processes, doesn't bypass kernel callbacks)
-- **Blacklist**: system processes (PID < 8, critical exe names, everything under `System32`) are never touched even if user creates a rule
-- **Orphan WebView2 cleanup**: on startup, kills stale `msedgewebview2.exe` processes whose `--user-data-dir` points to this app (prevents 0x8007139F white-screen on restart after crash)
-- **Console subsystem** (not `windows_subsystem="windows"`): console hidden on release via `FreeConsole()`, because windows subsystem breaks WebView2 environment creation on some machines
+- **Watcher (`watcher.rs`)**: one loop with a fixed 100 ms discovery pass plus a full maintenance tick at `pollIntervalMs` (backend-clamped to 200–60,000 ms, default 1,000 ms).
+- **Usage sampler (`usage.rs`)**: samples `NtQuerySystemInformation(SystemProcessorPerformanceInformation)` every second and emits `usage-update`; `Dashboard.svelte` enables it only while mounted and when at least one applied-rule process is running.
 
-## Testing
+The discovery pass first filters Toolhelp process names against enabled rule executable names, then performs expensive path resolution only for candidates. It opens and caches process handles as early as possible so later rule application can reuse handles acquired before anti-cheat protection tightens new handle permissions.
 
-Rust unit tests in `#[cfg(test)]` blocks within each module. Covers:
-- `topology`: `resolve_mask` for all 4 modes × 3 fake topologies (uniform 8C, SMT 8C16T, hybrid 8P+8E), custom cores clamping, empty catch
-- `process`: path normalization, blacklist checks (system PIDs, critical names, System32 paths)
-- `config`: roundtrip, corrupt file backup, missing fields defaults
-- `watcher`: rule matching (fullPath/fileName, extended prefix, case insensitivity)
+The full watcher tick removes dead/stale PIDs, detects PID reuse by executable name and creation time, handles deleted/disabled rules, catches processes missed by discovery, retries failures, refreshes applied state, and emits `applied-update`. `ACCESS_DENIED` retries indefinitely with a 30-second backoff; other failures get three retries.
 
-No frontend tests. No integration/E2E tests.
+### Rule application pipeline
+
+The backend flow spans several modules:
+
+1. `watcher.rs` matches the first enabled rule by normalized full path or case-insensitive file name.
+2. `topology.rs` resolves the affinity specification against startup CPU topology.
+3. `process.rs` performs process/thread operations and enforces the system-process blacklist.
+4. `priority.rs` applies optional I/O and memory priorities as best-effort operations.
+5. `commands.rs` publishes the resulting `AppliedProcess` list to the frontend and updates the tray count.
+
+Affinity modes are `All`, `NoSmtSibling`, `PCoresOnly`, `Custom`, and `Prefer`. For selected core sets, application currently falls back through:
+
+1. `SetProcessAffinityMask` hard affinity
+2. per-thread `SetThreadIdealProcessorEx`
+3. `SetProcessDefaultCpuSets`
+
+`All` reports all logical processors without calling an affinity setter. `Prefer` takes its selected cores directly from `AffinitySpec.cores`, but the current watcher still sends them through the same hard → soft → CPU Sets fallback; do not assume it is soft-only without changing `watcher.rs`.
+
+Only processor group 0 is supported (maximum 64 logical processors). Critical processes, PIDs below 8, and executables under `System32` are never modified. CPU priority intentionally stops at `High`; realtime priority is not exposed.
+
+## Frontend architecture
+
+`src/App.svelte` is a manual three-tab shell (Dashboard, Rules, Settings), not a router. On mount it loads initial state through typed wrappers in `src/lib/ipc.ts`, initializes the stores in `src/lib/stores.ts`, sets the locale, and subscribes to backend events.
+
+The main data flow is:
+
+```text
+Svelte pages/components
+  ↕ writable stores
+src/lib/ipc.ts invoke wrappers + Tauri event listeners
+  ↕
+commands.rs / watcher.rs / usage.rs
+  ↕
+AppState + Win32 operations
+```
+
+Rules are edited in Svelte, saved through IPC, persisted by `config.rs`, and then reapplied by clearing the applied-state map so the watcher rebuilds it. Changing language also rebuilds the native tray menu.
+
+## Cross-layer contracts
+
+Several definitions are intentionally duplicated and must be updated together:
+
+- **Rust/TypeScript models**: changes to serialized types in `src-tauri/src/model.rs`, topology output, or `watcher.rs::AppliedProcess` must be mirrored in `src/lib/types.ts`. Struct fields serialize as camelCase; enum variants serialize as PascalCase strings.
+- **Affinity semantics**: `topology.rs::resolve_mask()` and frontend `src/lib/affinity.ts::resolveCores()` must select the same logical processors. The frontend copy drives picker state and dashboard highlighting.
+- **IPC surface**: a new command needs a `#[tauri::command]`, registration in `main.rs`, and a typed wrapper in `src/lib/ipc.ts`. Backend events need matching frontend listener payload types.
+- **Error codes**: `src-tauri/src/error.rs` returns stable code strings, not user-facing prose. Add every new code to both `src/i18n/en.json` and `src/i18n/zh-TW.json` under `errors.*`.
+- **Configuration compatibility**: model fields use serde defaults so older JSON remains loadable. `config.rs` writes via a temporary file and backs up corrupt input as `config.corrupt.json`.
+
+## Testing boundaries
+
+Rust unit tests live in module-local `#[cfg(test)]` blocks and cover topology/mask resolution, path normalization and blacklisting, config loading/round-tripping, and watcher rule matching.
+
+There are no frontend, integration, or E2E tests. Code that touches live processes, process handles, thread affinity, CPU Sets, the tray, Task Scheduler, or WebView2 must be verified on Windows with `npm run tauri dev` against a disposable process.
+
+## Code conventions
+
+- Comments and log messages are written in **繁體中文**; identifiers, type names, and error-code strings remain English.
+- Win32 behavior is implemented directly with the `windows` crate rather than `sysinfo`; preserve explicit rights, handle lifetimes, and best-effort/error distinctions when changing process operations.

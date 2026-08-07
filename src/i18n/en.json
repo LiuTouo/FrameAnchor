@@ -6,7 +6,10 @@
   },
   "dashboard": {
     "cpuTitle": "CPU Usage",
-    "coveredLegend": "Blue outline = cores covered by rules",
+    "coveredLegend": "Blue outline = selected process applied cores",
+    "selectProcess": "Monitored process",
+    "systemPerCoreNote": "Values are system-wide per-core usage",
+    "emptyCpuPanel": "No rule-matched processes running",
     "appliedTitle": "Processes with applied rules",
     "emptyApplied": "No games matching your rules are running",
     "colGame": "Game",

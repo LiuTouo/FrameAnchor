@@ -50,8 +50,6 @@
     border: 1px solid var(--border);
     border-radius: 8px;
     padding: 10px;
-    max-height: 300px;
-    overflow-y: auto;
   }
   .core-row {
     display: flex;

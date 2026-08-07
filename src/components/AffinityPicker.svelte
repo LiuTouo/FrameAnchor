@@ -17,7 +17,7 @@
   let resolved = $derived(resolveCores(spec, topology));
 
   function preset(mode: AffinityMode) {
-    // Prefer 沒有核心時預設首核心（LP 0），避免空清單
+    // Prefer 沒有核心時預設 LP 0，避免空清單
     let cores = spec.cores;
     if (mode === 'Prefer' && cores.length === 0) cores = [0];
     onchange({ mode, cores });

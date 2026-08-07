@@ -20,6 +20,9 @@
   } = $props();
 
   let pct = $derived(usageValue == null ? null : Math.round(usageValue * 100));
+  let title = $derived(
+    `LP${lp.index}${lp.isSmtSibling ? ' (HT)' : ''}`,
+  );
 </script>
 
 {#if interactive}
@@ -31,7 +34,11 @@
     {/if}
   </label>
 {:else}
-  <div class="cell" class:covered title="LP{lp.index}{lp.isSmtSibling ? ' (HT)' : ''}">
+  <div
+    class="cell"
+    class:covered
+    {title}
+  >
     <div class="row">
       <span class="idx">LP{lp.index}</span>
       {#if showHt && lp.isSmtSibling}

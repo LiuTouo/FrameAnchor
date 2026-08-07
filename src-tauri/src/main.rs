@@ -1,9 +1,8 @@
 //! FrameAnchor 主程式（PLAN §4 架構）。
 //! 單一 exe、requireAdministrator、tray 常駐、watcher + usage 兩個背景 task。
+//! Release 用 GUI subsystem 避免 CMD 閃爍；debug 保留 console。
 
-// 不用 windows_subsystem="windows"：實測在部分機器（含本機）會讓
-// WebView2 environment 建立失敗（0x8007139F）→ 白面板。
-// 改用 console subsystem + 啟動即 FreeConsole 隱藏視窗。
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod autostart;
 mod commands;
@@ -35,18 +34,13 @@ pub struct AppState {
     pub applied: RwLock<HashMap<u32, AppliedEntry>>,
     /// PID → 早期快取的 process handle（反作弊保護生效前開啟，終生重用）
     pub handles: RwLock<HashMap<u32, CachedHandle>>,
-    /// usage streaming 開關（面板頁開啟時 true）
+    /// usage streaming 開關（Dashboard 開啟且至少有 applied 規則程序時 true）
     pub usage_tx: tokio::sync::watch::Sender<bool>,
     /// tray「結束」設定，用來繞過 closeToTray 攔截
     pub quitting: AtomicBool,
 }
 
 fn main() {
-    // release：立即卸離 console，隱藏 CMD 視窗（debug 保留看 log）
-    #[cfg(not(debug_assertions))]
-    unsafe {
-        let _ = windows::Win32::System::Console::FreeConsole();
-    }
     // 強殺殘留的 WebView2 孤兒（鎖 user-data 目錄會導致白畫面）
     process::kill_orphan_webviews();
     // SeDebugPrivilege：對 ACL 保護的進程有幫助（無法繞過反作弊 kernel callback）

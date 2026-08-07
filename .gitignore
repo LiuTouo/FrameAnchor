@@ -1,4 +1,7 @@
 node_modules/
 dist/
 src-tauri/target/
+.claude/
 *.log
+tmp_*.py
+tmp_*.js

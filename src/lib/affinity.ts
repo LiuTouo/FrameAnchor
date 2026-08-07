@@ -1,7 +1,10 @@
 import type { AffinitySpec, Topology } from './types';
 
 /// affinity 模式 → LP index 集合（前端版 resolve_mask，用於面板涵蓋高亮與勾選格狀態）
-export function resolveCores(spec: AffinitySpec, topo: Topology): Set<number> {
+export function resolveCores(
+  spec: Pick<AffinitySpec, 'mode' | 'cores'>,
+  topo: Topology,
+): Set<number> {
   switch (spec.mode) {
     case 'All':
       return new Set(topo.logicalProcessors.map((lp) => lp.index));

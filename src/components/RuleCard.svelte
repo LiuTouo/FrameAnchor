@@ -45,7 +45,7 @@
   let dirty = $derived(JSON.stringify(draft) !== JSON.stringify(original));
 
   let advancedOpen = $state(false);
-  let settingsOpen = $state(true);
+  let settingsOpen = $state(false);
 
   const PRIORITIES: CpuPriority[] = ['Idle', 'BelowNormal', 'Normal', 'AboveNormal', 'High'];
   const PRIO_I18N: Record<CpuPriority, string> = {

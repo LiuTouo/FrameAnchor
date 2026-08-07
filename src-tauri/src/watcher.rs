@@ -1,4 +1,4 @@
-//! 規則引擎（PLAN §7.6）：高頻 discovery 搶先開 handle → 比對規則 → 套用 → 維護 applied 狀態表。
+﻿//! 規則引擎（PLAN §7.6）：高頻 discovery 搶先開 handle → 比對規則 → 套用 → 維護 applied 狀態表。
 //! 反作弊對策：EAC 等用 ObRegisterCallbacks 剝奪「新開啟」handle 的權限，但保護生效前
 //! 已持有的 handle 不受影響 — 因此 discovery 以 100ms 掃描，在遊戲啟動後立刻開 handle
 //! 並快取至進程結束；之後所有套用/重試都走快取 handle。

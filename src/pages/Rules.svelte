@@ -1,4 +1,4 @@
-<script lang="ts">
+﻿<script lang="ts">
   import { t } from 'svelte-i18n';
   import RuleCard from '../components/RuleCard.svelte';
   import BrowseDialog from '../components/BrowseDialog.svelte';

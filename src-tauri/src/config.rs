@@ -1,4 +1,4 @@
-//! 設定持久化（PLAN §7.8）：%APPDATA%\FrameAnchor\config.json，原子寫入 + 壞檔備份。
+﻿//! 設定持久化（PLAN §7.8）：%APPDATA%\FrameAnchor\config.json，原子寫入 + 壞檔備份。
 
 use std::path::{Path, PathBuf};
 
@@ -112,6 +112,42 @@ mod tests {
         let cfg = load_from(&path);
         assert_eq!(cfg.settings.poll_interval_ms, 1000);
         assert!(cfg.rules.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 舊 config 含 affinity.primaryCore：load_from 成功、規則保留，
+    /// save_to 後輸出的 JSON 不含 primaryCore。
+    #[test]
+    fn old_primary_core_field_is_ignored_and_stripped() {
+        let path = temp_path("old_primary.json");
+        let json = r#"{
+            "version": 1,
+            "rules": [
+                {
+                    "id": "test-id",
+                    "name": "TestGame",
+                    "exePath": "C:\\Games\\game.exe",
+                    "matchBy": "FullPath",
+                    "enabled": true,
+                    "affinity": { "mode": "Custom", "cores": [0, 1, 2], "primaryCore": 1 },
+                    "priority": "High",
+                    "advanced": { "ioPriority": null, "memoryPriority": null }
+                }
+            ]
+        }"#;
+        std::fs::write(&path, json).unwrap();
+        let cfg = load_from(&path);
+        assert_eq!(cfg.rules.len(), 1);
+        assert_eq!(cfg.rules[0].name, "TestGame");
+        assert_eq!(cfg.rules[0].affinity.mode, crate::model::AffinityMode::Custom);
+        assert_eq!(cfg.rules[0].affinity.cores, vec![0, 1, 2]);
+
+        // 存回後檔案不含 primaryCore
+        save_to(&path, &cfg).unwrap();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("primaryCore"));
+        assert!(saved.contains("\"cores\""));
+
         let _ = std::fs::remove_file(&path);
     }
 }
