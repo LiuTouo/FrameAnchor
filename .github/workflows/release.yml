@@ -84,30 +84,17 @@ jobs:
           $tauriConf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
           $pubkey = $tauriConf.plugins.updater.pubkey
           if ($pubkey -eq "REPLACE_ME_WITH_YOUR_PUBLIC_KEY_BASE64") {
-            Write-Error @"
-            updater 公鑰仍為 placeholder 'REPLACE_ME_WITH_YOUR_PUBLIC_KEY_BASE64'。
-
-            請先產生簽署金鑰組：
-              npm run tauri signer generate -- -w src-tauri
-
-            此命令會在 src-tauri 目錄產生：
-              - 私鑰檔案（不可提交至版本控制）
-              - 公鑰字串（寫入 tauri.conf.json plugins.updater.pubkey）
-
-            將私鑰內容設為 GitHub Actions secret TAURI_SIGNING_PRIVATE_KEY。
-            若私鑰有密碼保護，另設 TAURI_SIGNING_PRIVATE_KEY_PASSWORD。
-            "@
+            Write-Error "updater 公鑰仍為 placeholder 'REPLACE_ME_WITH_YOUR_PUBLIC_KEY_BASE64'。"
+            Write-Error "請先產生簽署金鑰組：npm run tauri signer generate -- -w src-tauri"
+            Write-Error "此命令會在 src-tauri 目錄產生私鑰檔案（不可提交至版本控制）與公鑰字串（寫入 tauri.conf.json plugins.updater.pubkey）。"
+            Write-Error "將私鑰內容設為 GitHub Actions secret TAURI_SIGNING_PRIVATE_KEY。若私鑰有密碼保護，另設 TAURI_SIGNING_PRIVATE_KEY_PASSWORD。"
             exit 1
           }
 
           # 私鑰必須存在
           if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
-            Write-Error @"
-            GitHub Actions secret TAURI_SIGNING_PRIVATE_KEY 未設定。
-
-            請用 npm run tauri signer generate -- -w src-tauri 產生簽署金鑰組，
-            然後將私鑰內容設定為此 repository 的 Actions secret TAURI_SIGNING_PRIVATE_KEY。
-            "@
+            Write-Error "GitHub Actions secret TAURI_SIGNING_PRIVATE_KEY 未設定。"
+            Write-Error "請用 npm run tauri signer generate -- -w src-tauri 產生簽署金鑰組，然後將私鑰內容設定為此 repository 的 Actions secret TAURI_SIGNING_PRIVATE_KEY。"
             exit 1
           }
 
