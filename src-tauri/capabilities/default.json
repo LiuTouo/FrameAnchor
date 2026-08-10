@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "FrameAnchor 預設權限",
   "windows": ["main"],
-  "permissions": ["core:default", "log:default"]
+  "permissions": ["core:default", "log:default", "updater:default", "process:allow-restart"]
 }

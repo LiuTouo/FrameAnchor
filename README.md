@@ -87,7 +87,12 @@ FrameAnchor 只使用標準 Win32 API，不包含 driver、不注入目標程序
 
 ### 從 Releases 安裝
 
-若專案已發布預先建置版本，可從 [GitHub Releases](https://github.com/LiuTouo/FrameAnchor/releases) 下載 NSIS 安裝程式。
+從 [GitHub Releases](https://github.com/LiuTouo/FrameAnchor/releases) 下載最新版本。提供兩種發布形式：
+
+- **NSIS 安裝程式**（`FrameAnchor_X.Y.Z_x64-setup.exe`）：標準安裝模式。支援自動更新（透過 Tauri updater plugin）。
+- **可攜版**（`FrameAnchor_X.Y.Z_x64-portable.zip`）：解壓縮至任意目錄即可執行。啟動時與手動操作均支援線上檢查更新，可自動下載新版、詢問後替換執行檔並重啟。
+
+每個發布資產均附帶 SHA256 校驗檔（`.sha256`）。
 
 ### 從原始碼建置
 
@@ -196,6 +201,18 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 維護者透過推送語意化版本標籤觸發 GitHub Actions 自動建置與發布。
 
+### 前置設定：updater 簽署金鑰
+
+自動更新需要一組 Ed25519 簽署金鑰。若尚未設定，請在本地執行：
+
+```bash
+npm run tauri signer generate -- -w src-tauri
+```
+
+此命令會在 `src-tauri` 目錄產生私鑰與公鑰。將私鑰內容設為 GitHub repository secret `TAURI_SIGNING_PRIVATE_KEY`；若私鑰有密碼保護，另設 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。將公鑰寫入 `src-tauri/tauri.conf.json` 中 `plugins.updater.pubkey` 欄位（取代 placeholder `REPLACE_ME_WITH_YOUR_PUBLIC_KEY_BASE64`）。
+
+**私鑰絕對不可提交至版本控制。** CI 會在發行前驗證公鑰已替換且 secret 已設定，未設定時建置會失敗並顯示明確錯誤。
+
 ### 步驟
 
 1. **同步版本號**
@@ -224,16 +241,20 @@ cargo test --manifest-path src-tauri/Cargo.toml
    git push origin v0.2.0
    ```
 
-   推送標籤後，GitHub Actions 會自動執行版本驗證、前端型別檢查、Rust 測試，然後透過 `tauri-apps/tauri-action@v1` 建置 NSIS 安裝程式並建立 GitHub Release。
+   推送標籤後，GitHub Actions 會自動執行版本驗證、簽署金鑰驗證、前端型別檢查、Rust 測試，然後建置以下資產：
+
+   - NSIS 安裝程式（`FrameAnchor_X.Y.Z_x64-setup.exe`）與 `.sha256`
+   - 可攜版 ZIP（`FrameAnchor_X.Y.Z_x64-portable.zip`）與 `.sha256`
+   - updater 用 `latest.json` 與簽署檔案
 
 4. **下載發布版本**
 
-   建置完成後，前往 [GitHub Releases](https://github.com/LiuTouo/FrameAnchor/releases) 下載最新的 NSIS 安裝程式（`.exe`）。
+   建置完成後，前往 [GitHub Releases](https://github.com/LiuTouo/FrameAnchor/releases) 下載所需資產。
 
 ### 注意事項
 
 - Windows 二進位檔**未經數位簽章**，下載及執行時 Windows Defender SmartScreen 可能顯示警告。這是預期行為，不影響程式功能。
-- 此專案目前不包含 Tauri updater 支援，因此不會產生 updater 相關設定檔。
+- 可攜版與安裝版可從 About 頁面手動檢查更新；可攜版啟動時也會自動檢查。
 - GitHub Actions 工作流程定義於 `.github/workflows/release.yml`。
 
 ## 技術架構
@@ -256,7 +277,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 ## 專案狀態
 
-目前版本為 **0.1.0**。專案仍處於早期階段，API、設定格式與排程行為可能在後續版本調整。
+專案仍處於早期階段，API、設定格式與排程行為可能在後續版本調整。安裝版與可攜版均支援自動檢查更新與手動更新，版本號由執行檔內建 metadata 動態取得。
 
 ## 授權
 

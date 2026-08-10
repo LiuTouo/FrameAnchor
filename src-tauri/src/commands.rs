@@ -6,6 +6,7 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::model::{Rule, Settings};
 use crate::topology::Topology;
+use crate::update::{self, UpdateState, UpdateStatus};
 use crate::watcher::AppliedProcess;
 use crate::windows_enum::WindowInfo;
 use crate::{autostart, config, process, tray, windows_enum, AppState};
@@ -157,4 +158,172 @@ pub fn emit_applied(app: &AppHandle, state: &Arc<AppState>) {
     let list = collect_applied(state);
     tray::update_applied_count(app, list.len());
     let _ = app.emit("applied-update", list);
+}
+
+// ── 更新相關 commands ──
+
+/// 回傳目前版本、是否為可攜版
+#[tauri::command]
+pub fn get_update_info(app: AppHandle) -> serde_json::Value {
+    let version = update::current_version(&app);
+    let portable = update::is_portable();
+    serde_json::json!({
+        "version": version,
+        "portable": portable,
+    })
+}
+
+/// 可攜版：檢查 GitHub 有無新版，emit update-state 事件
+#[tauri::command]
+pub async fn check_portable_update(app: AppHandle) -> Result<(), String> {
+    let version = update::current_version(&app);
+
+    // 狀態：檢查中
+    let _ = app.emit(
+        "update-state",
+        UpdateState {
+            status: UpdateStatus::Checking,
+            latest_version: None,
+            current_version: version.clone(),
+            progress: None,
+            error: None,
+        },
+    );
+
+    let version_for_check = version.clone();
+    let version_for_up_to_date = version.clone();
+    let version_for_available = version.clone();
+    let app_for_error = app.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        let release = update::fetch_portable_release()?;
+        let latest_str = release.version.to_string();
+
+        if !update::is_update_available(&version_for_check, &release.version) {
+            let _ = app.emit(
+                "update-state",
+                UpdateState {
+                    status: UpdateStatus::UpToDate,
+                    latest_version: Some(latest_str),
+                    current_version: version_for_up_to_date,
+                    progress: None,
+                    error: None,
+                },
+            );
+            return Ok::<_, String>(());
+        }
+
+        // 有新版本
+        let _ = app.emit(
+            "update-state",
+            UpdateState {
+                status: UpdateStatus::Available,
+                latest_version: Some(latest_str),
+                current_version: version_for_available,
+                progress: None,
+                error: None,
+            },
+        );
+        Ok::<_, String>(())
+    })
+    .await
+    .map_err(|e| format!("檢查更新失敗: {e}"))?;
+
+    // 若 result 為 Err，emit Error 狀態
+    if let Err(ref err) = result {
+        let _ = app_for_error.emit(
+            "update-state",
+            UpdateState {
+                status: UpdateStatus::Error,
+                latest_version: None,
+                current_version: version,
+                progress: None,
+                error: Some(err.clone()),
+            },
+        );
+    }
+
+    result
+}
+
+/// 可攜版：下載並安裝更新
+#[tauri::command]
+pub async fn perform_portable_update(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    let version = update::current_version(&app);
+
+    // 狀態：下載中
+    let _ = app.emit(
+        "update-state",
+        UpdateState {
+            status: UpdateStatus::Downloading,
+            latest_version: None,
+            current_version: version.clone(),
+            progress: Some(0),
+            error: None,
+        },
+    );
+
+    let version_for_download = version.clone();
+
+    // 階段 1：查詢 + 下載 + 校驗
+    let (zip_data, latest_str) = tokio::task::spawn_blocking(move || {
+        let release = update::fetch_portable_release()?;
+
+        if !update::is_update_available(&version_for_download, &release.version) {
+            return Err("已經是最新版本".to_string());
+        }
+
+        let latest_str = release.version.to_string();
+
+        let zip_data = update::download_portable_zip(&release, |_pct| {
+            // 下載完成時由 download_portable_zip 回報 100%
+        })?;
+
+        Ok::<_, String>((zip_data, latest_str))
+    })
+    .await
+    .map_err(|e| format!("更新執行失敗: {e}"))??;
+
+    // emit 下載完成進度
+    let _ = app.emit(
+        "update-state",
+        UpdateState {
+            status: UpdateStatus::Downloading,
+            latest_version: Some(latest_str.clone()),
+            current_version: version.clone(),
+            progress: Some(100),
+            error: None,
+        },
+    );
+
+    // 階段 2：解壓縮
+    let (new_exe, marker_path) =
+        tokio::task::spawn_blocking(move || update::extract_portable_exe(&zip_data))
+            .await
+            .map_err(|e| format!("解壓縮失敗: {e}"))??;
+
+    let old_exe = update::current_exe_path().ok_or("無法取得目前執行檔路徑".to_string())?;
+    let pid = std::process::id();
+
+    // 狀態：安裝中
+    let _ = app.emit(
+        "update-state",
+        UpdateState {
+            status: UpdateStatus::Installing,
+            latest_version: None,
+            current_version: version,
+            progress: None,
+            error: None,
+        },
+    );
+
+    // 執行可攜版替換輔助腳本
+    update::execute_portable_replacement(&old_exe, &new_exe, &marker_path, pid)?;
+
+    // 設定 quitting flag，繞過 close-to-tray，真正結束程序
+    state
+        .quitting
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    app.exit(0);
+    Ok(())
 }

@@ -1,5 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { AppliedProcess, Rule, Settings, Topology, WindowInfo } from './types';
+import type { AppliedProcess, Rule, Settings, Topology, UpdateInfo, WindowInfo } from './types';
 
 export const getTopology = () => invoke<Topology>('get_topology');
 export const listWindows = () => invoke<WindowInfo[]>('list_windows');
@@ -13,3 +13,8 @@ export const getApplied = () => invoke<AppliedProcess[]>('get_applied');
 export const reapplyAll = () => invoke<void>('reapply_all');
 export const setUsageStreaming = (active: boolean) => invoke<void>('set_usage_streaming', { active });
 export const openDataFolder = () => invoke<void>('open_data_folder');
+
+// 更新相關
+export const getUpdateInfo = () => invoke<UpdateInfo>('get_update_info');
+export const checkPortableUpdate = () => invoke<void>('check_portable_update');
+export const performPortableUpdate = () => invoke<void>('perform_portable_update');

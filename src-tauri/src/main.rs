@@ -13,6 +13,7 @@ mod priority;
 mod process;
 mod topology;
 mod tray;
+mod update;
 mod usage;
 mod watcher;
 mod windows_enum;
@@ -88,6 +89,8 @@ fn main() {
             // 第二個實例啟動 → 喚醒既有視窗後退出
             tray::show_main_window(app);
         }))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
@@ -126,6 +129,9 @@ fn main() {
             commands::reapply_all,
             commands::set_usage_streaming,
             commands::open_data_folder,
+            commands::get_update_info,
+            commands::check_portable_update,
+            commands::perform_portable_update,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

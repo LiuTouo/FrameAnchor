@@ -75,6 +75,44 @@ jobs:
 
           Write-Host "版本驗證通過：$version"
 
+      - name: 驗證 updater 簽署金鑰
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          # pubkey 必須已從 placeholder 替換為真正的公鑰
+          $tauriConf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          $pubkey = $tauriConf.plugins.updater.pubkey
+          if ($pubkey -eq "REPLACE_ME_WITH_YOUR_PUBLIC_KEY_BASE64") {
+            Write-Error @"
+            updater 公鑰仍為 placeholder 'REPLACE_ME_WITH_YOUR_PUBLIC_KEY_BASE64'。
+
+            請先產生簽署金鑰組：
+              npm run tauri signer generate -- -w src-tauri
+
+            此命令會在 src-tauri 目錄產生：
+              - 私鑰檔案（不可提交至版本控制）
+              - 公鑰字串（寫入 tauri.conf.json plugins.updater.pubkey）
+
+            將私鑰內容設為 GitHub Actions secret TAURI_SIGNING_PRIVATE_KEY。
+            若私鑰有密碼保護，另設 TAURI_SIGNING_PRIVATE_KEY_PASSWORD。
+            "@
+            exit 1
+          }
+
+          # 私鑰必須存在
+          if (-not $env:TAURI_SIGNING_PRIVATE_KEY) {
+            Write-Error @"
+            GitHub Actions secret TAURI_SIGNING_PRIVATE_KEY 未設定。
+
+            請用 npm run tauri signer generate -- -w src-tauri 產生簽署金鑰組，
+            然後將私鑰內容設定為此 repository 的 Actions secret TAURI_SIGNING_PRIVATE_KEY。
+            "@
+            exit 1
+          }
+
+          Write-Host "updater 簽署設定驗證通過"
+
       - name: 安裝前端相依套件
         run: npm ci
 
@@ -84,13 +122,122 @@ jobs:
       - name: Rust 測試
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
-      - uses: tauri-apps/tauri-action@v1
+      - name: 建置 NSIS 安裝程式與 updater artifacts
+        uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "FrameAnchor ${{ github.ref_name }}"
           releaseDraft: false
           prerelease: false
           generateReleaseNotes: true
-          uploadUpdaterJson: false
+          uploadUpdaterJson: true
+
+      - name: 建立可攜版 ZIP
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $version = "$env:GITHUB_REF_NAME".Substring(1)
+          $exeDir = "src-tauri/target/release"
+          $exeName = "FrameAnchor.exe"
+          $zipName = "FrameAnchor_$($version)_x64-portable.zip"
+          $stagingDir = "portable-staging"
+
+          if (-not (Test-Path "$exeDir\$exeName")) {
+            Write-Error "找不到 $exeDir\$exeName"
+            exit 1
+          }
+
+          # 建立暫存目錄，複製 exe 與標記檔
+          New-Item -ItemType Directory -Force -Path $stagingDir | Out-Null
+          Copy-Item "$exeDir\$exeName" "$stagingDir\" -Force
+          # 可攜版標記檔：空檔案，表示此為可攜版
+          New-Item -ItemType File -Path "$stagingDir\.frameanchor-portable" -Force | Out-Null
+
+          # 打包 ZIP：明確指定輸入路徑（不依賴萬用字元包含 dotfile）
+          Compress-Archive -Path "$stagingDir\$exeName", "$stagingDir\.frameanchor-portable" -DestinationPath $zipName -Force
+
+          # 驗證 ZIP 內含可攜版標記檔
+          $zipEntries = [System.IO.Compression.ZipFile]::OpenRead("$pwd\$zipName").Entries
+          $markerFound = $zipEntries | Where-Object { $_.Name -eq '.frameanchor-portable' }
+          if (-not $markerFound) {
+            Write-Error "可攜版 ZIP 中缺少 .frameanchor-portable 標記檔"
+            exit 1
+          }
+          Write-Host "已確認 ZIP 內含可攜版標記檔"
+
+          Write-Host "可攜版 ZIP 已建立：$zipName"
+          Write-Host "size=$((Get-Item $zipName).Length)"
+
+          # 計算 SHA256
+          $sha256 = (Get-FileHash -Path $zipName -Algorithm SHA256).Hash.ToLower()
+          "$sha256  $zipName" | Out-File -FilePath "$zipName.sha256" -Encoding utf8NoBOM
+          Write-Host "SHA256: $sha256"
+
+          # 清理暫存
+          Remove-Item -Recurse -Force $stagingDir
+
+          # 輸出變數供後續步驟使用
+          "zipName=$zipName" >> $env:GITHUB_ENV
+
+      - name: 上傳可攜版至 GitHub Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zipName = "$env:zipName"
+          $tag = "$env:GITHUB_REF_NAME"
+
+          if (-not $zipName) {
+            Write-Error "zipName 環境變數未設定"
+            exit 1
+          }
+
+          if (-not (Test-Path $zipName)) {
+            Write-Error "找不到 $zipName"
+            exit 1
+          }
+          if (-not (Test-Path "$zipName.sha256")) {
+            Write-Error "找不到 $zipName.sha256"
+            exit 1
+          }
+
+          gh release upload $tag $zipName "$zipName.sha256" --clobber
+          Write-Host "已上傳可攜版資產：$zipName, $zipName.sha256"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 計算 NSIS 安裝程式 SHA256 並上傳穩定命名資產
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "$env:GITHUB_REF_NAME"
+          $version = $tag.Substring(1)
+          $expectedName = "FrameAnchor_$($version)_x64-setup.exe"
+
+          # tauri-action 建置輸出在標準 Tauri bundle 路徑
+          $bundleDir = "src-tauri\target\release\bundle\nsis"
+          $installer = Get-ChildItem -Path $bundleDir -Filter "*.exe" -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -like "FrameAnchor*setup*" } |
+              Select-Object -First 1
+
+          if (-not $installer) {
+            Write-Error "在 $bundleDir 中找不到 NSIS 安裝程式（預期 $expectedName）"
+            exit 1
+          }
+
+          Write-Host "找到 NSIS 安裝程式：$($installer.FullName)"
+
+          # 計算 SHA256
+          $sha256 = (Get-FileHash -Path $installer.FullName -Algorithm SHA256).Hash.ToLower()
+          "$sha256  $expectedName" | Out-File -FilePath "$expectedName.sha256" -Encoding utf8NoBOM
+          Write-Host "NSIS SHA256: $sha256"
+
+          # 上傳 checksum
+          gh release upload $tag "$expectedName.sha256" --clobber
+          Write-Host "已上傳安裝程式校驗檔：$expectedName.sha256"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -83,3 +83,27 @@ export interface WindowInfo {
   iconPng: string | null; // base64 PNG
   alreadyHasRule: boolean;
 }
+
+// ── 更新相關型別 ──
+
+export type UpdateStatus =
+  | 'Idle'
+  | 'Checking'
+  | 'UpToDate'
+  | 'Available'
+  | 'Downloading'
+  | 'Installing'
+  | 'Error';
+
+export interface UpdateState {
+  status: UpdateStatus;
+  latestVersion: string | null;
+  currentVersion: string;
+  progress: number | null; // 0..100，僅 Downloading 有意義
+  error: string | null;
+}
+
+export interface UpdateInfo {
+  version: string;
+  portable: boolean;
+}

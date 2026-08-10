@@ -15,6 +15,9 @@ pub mod codes {
     pub const TOPOLOGY_FAILED: &str = "TOPOLOGY_FAILED";
     pub const CONFIG_FAILED: &str = "CONFIG_FAILED";
     pub const AUTOSTART_FAILED: &str = "AUTOSTART_FAILED";
+    pub const UPDATE_CHECK_FAILED: &str = "UPDATE_CHECK_FAILED";
+    pub const UPDATE_DOWNLOAD_FAILED: &str = "UPDATE_DOWNLOAD_FAILED";
+    pub const UPDATE_INSTALL_FAILED: &str = "UPDATE_INSTALL_FAILED";
 }
 
 #[derive(Error, Debug)]

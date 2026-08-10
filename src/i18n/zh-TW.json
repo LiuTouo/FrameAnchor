@@ -94,7 +94,24 @@
     "showAdvanced": "在規則編輯器顯示進階優先級（I/O / 記憶體）",
     "about": "關於",
     "version": "版本",
+    "portableBuild": "可攜版",
+    "updateCheck": "檢查更新",
+    "updateInstall": "安裝更新",
+    "updateChecking": "正在檢查更新…",
+    "updateUpToDate": "已是最新版本",
+    "updateAvailable": "有新版本可用",
+    "updateDownloading": "下載中",
+    "updateInstalling": "正在安裝…",
+    "updateError": "更新檢查失敗",
+    "updateErrorDetail": "錯誤：{error}",
+    "updateConfirmTitle": "確認更新",
+    "updateConfirmBody": "即將安裝 FrameAnchor {version}。目前版本為 {current}。是否繼續？",
     "dataFolder": "開啟資料夾"
+  },
+  "update": {
+    "bannerText": "FrameAnchor {version} 已發佈（目前版本 {current}）。",
+    "bannerInstall": "安裝",
+    "bannerDismiss": "稍後"
   },
   "errors": {
     "ACCESS_DENIED": "存取被拒（可能受反作弊保護）",
@@ -105,6 +122,9 @@
     "MEM_FAILED": "設定記憶體優先級失敗",
     "AUTOSTART_FAILED": "設定開機啟動失敗",
     "CONFIG_FAILED": "設定檔寫入失敗",
+    "UPDATE_CHECK_FAILED": "檢查更新失敗（網路錯誤或 GitHub API 無法存取）",
+    "UPDATE_DOWNLOAD_FAILED": "下載更新失敗",
+    "UPDATE_INSTALL_FAILED": "安裝更新失敗",
     "unknown": "未知錯誤",
     "anticheatNote": "此遊戲受反作弊保護。請讓 FrameAnchor 在遊戲啟動前執行；若遊戲已在運行，請重啟遊戲。"
   }

@@ -86,7 +86,12 @@ For an anti-cheat-protected target, you can start FrameAnchor before launching t
 
 ### Install from Releases
 
-If prebuilt versions are available, download the NSIS installer from [GitHub Releases](https://github.com/LiuTouo/FrameAnchor/releases).
+Download the latest version from [GitHub Releases](https://github.com/LiuTouo/FrameAnchor/releases). Two distribution forms are provided:
+
+- **NSIS installer** (`FrameAnchor_X.Y.Z_x64-setup.exe`): Standard install mode. Supports automatic updates via the Tauri updater plugin.
+- **Portable** (`FrameAnchor_X.Y.Z_x64-portable.zip`): Extract to any directory and run. Supports online update checking at startup and on manual request; can download a new version, ask for confirmation, replace the executable, and restart.
+
+Every release asset includes a SHA256 checksum file (`.sha256`).
 
 ### Build from Source
 
@@ -209,9 +214,38 @@ The runtime has two main background tasks:
 
 The original product specification is available in [`PLAN.md`](PLAN.md). When it differs from the current implementation, the code is authoritative.
 
+## Release Process
+
+Maintainers trigger automated builds and releases by pushing a semantic version tag. The CI workflow validates version consistency across all files, checks the updater signing key, runs frontend type checks and Rust tests, then builds all artifacts:
+
+- NSIS installer (`FrameAnchor_X.Y.Z_x64-setup.exe`) with `.sha256`
+- Portable ZIP (`FrameAnchor_X.Y.Z_x64-portable.zip`) with `.sha256`
+- Updater `latest.json` and signature files
+
+### Updater Signing Key Setup
+
+Before the first release, generate an Ed25519 key pair:
+
+```bash
+npm run tauri signer generate -- -w src-tauri
+```
+
+Set the private key content as the GitHub Actions secret `TAURI_SIGNING_PRIVATE_KEY` (and `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` if password-protected). Write the public key into `src-tauri/tauri.conf.json` under `plugins.updater.pubkey`, replacing the placeholder `REPLACE_ME_WITH_YOUR_PUBLIC_KEY_BASE64`.
+
+**Never commit the private key.** The CI workflow validates that the public key has been replaced and the secret is present; builds fail with a clear error otherwise.
+
+### Release Steps
+
+1. Sync version numbers in `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`.
+2. Commit and tag with `vX.Y.Z` format.
+3. Push the tag to trigger the workflow.
+4. Download assets from [GitHub Releases](https://github.com/LiuTouo/FrameAnchor/releases).
+
+Windows binaries are **not code-signed**. Windows Defender SmartScreen may show a warning on download and first launch. This is expected and does not affect functionality.
+
 ## Project Status
 
-The current version is **0.1.0**. The project is still at an early stage, and APIs, configuration formats, and scheduling behavior may change in later releases.
+The project is still at an early stage, and APIs, configuration formats, and scheduling behavior may change in later releases. Both the installer and portable editions support automatic update checking and manual updates; the version number is dynamically obtained from the built-in executable metadata.
 
 ## License
 

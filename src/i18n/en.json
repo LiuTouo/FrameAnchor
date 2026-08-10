@@ -94,7 +94,24 @@
     "showAdvanced": "Show advanced priorities (I/O / Memory) in the rule editor",
     "about": "About",
     "version": "Version",
+    "portableBuild": "Portable",
+    "updateCheck": "Check for updates",
+    "updateInstall": "Install update",
+    "updateChecking": "Checking for updates…",
+    "updateUpToDate": "Up to date",
+    "updateAvailable": "New version available",
+    "updateDownloading": "Downloading",
+    "updateInstalling": "Installing…",
+    "updateError": "Update check failed",
+    "updateErrorDetail": "Error: {error}",
+    "updateConfirmTitle": "Confirm update",
+    "updateConfirmBody": "FrameAnchor {version} will be installed. Current version: {current}. Continue?",
     "dataFolder": "Open data folder"
+  },
+  "update": {
+    "bannerText": "FrameAnchor {version} is available (currently {current}).",
+    "bannerInstall": "Install",
+    "bannerDismiss": "Dismiss"
   },
   "errors": {
     "ACCESS_DENIED": "Access denied (possibly protected by anti-cheat)",
@@ -105,6 +122,9 @@
     "MEM_FAILED": "Failed to set memory priority",
     "AUTOSTART_FAILED": "Failed to configure startup",
     "CONFIG_FAILED": "Failed to write config",
+    "UPDATE_CHECK_FAILED": "Update check failed (network error or GitHub API unreachable)",
+    "UPDATE_DOWNLOAD_FAILED": "Update download failed",
+    "UPDATE_INSTALL_FAILED": "Update install failed",
     "unknown": "Unknown error",
     "anticheatNote": "This game is anti-cheat protected. Keep FrameAnchor running before launching the game; if it's already running, restart the game."
   }

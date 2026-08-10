@@ -1,8 +1,15 @@
 <script lang="ts">
   import { locale, t } from 'svelte-i18n';
   import * as ipc from '../lib/ipc';
-  import { settings } from '../lib/stores';
-  import type { Settings } from '../lib/types';
+  import { settings, updateState, isPortable } from '../lib/stores';
+  import type { Settings, UpdateStatus } from '../lib/types';
+  import { checkForUpdates, installUpdate } from '../lib/updater';
+
+  // busy 狀態直接從 updateState store 推導
+  let checking = $derived($updateState?.status === 'Checking');
+  let installing = $derived(
+    $updateState?.status === 'Downloading' || $updateState?.status === 'Installing',
+  );
 
   async function save(partial: Partial<Settings>) {
     const current = $settings;
@@ -19,11 +26,44 @@
 
   async function toggleAutostart(enable: boolean) {
     try {
-      await ipc.setAutostart(enable); // 後端同步寫 settings.start_with_windows
+      await ipc.setAutostart(enable);
       const current = $settings;
       if (current) settings.set({ ...current, startWithWindows: enable });
     } catch (e) {
       console.error('set_autostart failed', e);
+    }
+  }
+
+  /// 手動檢查更新
+  async function manualCheck() {
+    await checkForUpdates();
+  }
+
+  /// 執行更新（含確認對話框）
+  async function doUpdate() {
+    const curState = $updateState;
+    if (!curState || curState.status !== 'Available') return;
+
+    const title = $t('settings.updateConfirmTitle') as string;
+    const body = $t('settings.updateConfirmBody', {
+      values: { version: curState.latestVersion ?? '', current: curState.currentVersion },
+    }) as string;
+    if (!window.confirm(`${title}\n\n${body}`)) return;
+
+    await installUpdate();
+  }
+
+  /// from update-state event 或手動設定
+  function statusLabel(s: UpdateStatus | null): string {
+    if (!s) return '';
+    switch (s) {
+      case 'Checking': return $t('settings.updateChecking') as string;
+      case 'UpToDate': return $t('settings.updateUpToDate') as string;
+      case 'Available': return $t('settings.updateAvailable') as string;
+      case 'Downloading': return $t('settings.updateDownloading') as string;
+      case 'Installing': return $t('settings.updateInstalling') as string;
+      case 'Error': return $t('settings.updateError') as string;
+      default: return '';
     }
   }
 
@@ -99,8 +139,43 @@
   <h2>{$t('settings.about')}</h2>
   <div class="panel">
     <div class="opt row">
-      <span class="hint">FrameAnchor · {$t('settings.version')} 0.1.0</span>
+      <span class="hint">FrameAnchor · {$t('settings.version')} {$updateState?.currentVersion ?? '0.0.0'}</span>
+      {#if $isPortable}
+        <span class="hint tag">{$t('settings.portableBuild')}</span>
+      {/if}
     </div>
+
+    <!-- 更新狀態與控制 -->
+    <div class="opt row">
+      {#if $updateState && $updateState.status !== 'Idle'}
+        <span class="hint">
+          {statusLabel($updateState.status)}
+          {#if $updateState.latestVersion && $updateState.status === 'Available'}
+            · {$updateState.latestVersion}
+          {/if}
+          {#if $updateState.progress !== null && $updateState.status === 'Downloading'}
+            · {$updateState.progress}%
+          {/if}
+        </span>
+      {/if}
+
+      {#if $updateState?.status === 'Available'}
+        <button onclick={doUpdate} disabled={installing}>
+          {installing ? '…' : $t('settings.updateInstall')}
+        </button>
+      {:else if $updateState?.status !== 'Downloading' && $updateState?.status !== 'Installing'}
+        <button onclick={manualCheck} disabled={checking || installing}>
+          {checking ? '…' : $t('settings.updateCheck')}
+        </button>
+      {/if}
+    </div>
+
+    {#if $updateState?.error}
+      <div class="opt">
+        <span class="hint error">{$t('settings.updateErrorDetail', { values: { error: $updateState.error } })}</span>
+      </div>
+    {/if}
+
     <div class="opt row">
       <span class="hint">{dataDir}</span>
       <button onclick={() => ipc.openDataFolder()}>{$t('settings.dataFolder')}</button>
@@ -146,5 +221,14 @@
   }
   input[type='range'] {
     accent-color: var(--accent);
+  }
+  .tag {
+    background: var(--panel-2);
+    padding: 1px 6px;
+    border-radius: 4px;
+    font-size: 11px;
+  }
+  .error {
+    color: #f87171;
   }
 </style>
