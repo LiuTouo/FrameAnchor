@@ -77,6 +77,8 @@ jobs:
 
       - name: 驗證 updater 簽署金鑰
         shell: pwsh
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           $ErrorActionPreference = "Stop"
 
