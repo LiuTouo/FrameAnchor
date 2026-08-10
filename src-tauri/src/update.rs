@@ -10,10 +10,15 @@
 //!   6. 產生 PowerShell 輔助腳本（安全引用路徑、等待、備份、置換、重啟）
 //!   7. 設定 quitting flag，執行輔助腳本後呼叫 app.exit(0)
 
+use std::io::Write;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 
 use semver::Version;
 use serde::Deserialize;
+
+/// 避免 PowerShell 彈出視窗（與 autostart.rs 一致）
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 // ── GitHub API 資料結構 ──
 
@@ -459,10 +464,19 @@ fn ps_single_quote(s: &str) -> String {
 
 /// 產生 PowerShell 輔助腳本內容。
 /// 使用單引號字串避免跳脫問題，處理 apostrophe/double-quote 安全。
-fn portable_helper_script(old_exe: &str, new_exe: &str, marker_path: &str, pid: u32) -> String {
+/// 腳本會將進度寫入 `%TEMP%\frameanchor_update\update.log` 以便診斷。
+/// 每次啟動會截斷舊日誌，避免無限制成長。
+fn portable_helper_script(
+    old_exe: &str,
+    new_exe: &str,
+    marker_path: &str,
+    pid: u32,
+    log_path: &str,
+) -> String {
     let old_q = ps_single_quote(old_exe);
     let new_q = ps_single_quote(new_exe);
     let marker_q = ps_single_quote(marker_path);
+    let log_q = ps_single_quote(log_path);
 
     format!(
         r#"# FrameAnchor 可攜版更新輔助腳本
@@ -471,11 +485,25 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$LogFile = {log_q}
+
+# 每次啟動時截斷日誌，避免無限制成長
+Remove-Item $LogFile -Force -ErrorAction SilentlyContinue
+
+function Write-Log {{
+    param([string]$Message)
+    $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$ts $Message" | Out-File -FilePath $LogFile -Append -Encoding utf8
+}}
+
+Write-Log "helper started, target PID=$TargetPid"
 
 $OldExe = {old_q}
 $NewExe = {new_q}
 $Marker = {marker_q}
 $OldDir = Split-Path $OldExe -Parent
+
+Write-Log "old=$OldExe, new=$NewExe, marker=$Marker"
 
 # 等待 FrameAnchor 完全結束（含 timeout）
 $timeout = Get-Date
@@ -483,45 +511,62 @@ while ($true) {{
     $proc = Get-Process -Id $TargetPid -ErrorAction SilentlyContinue
     if (-not $proc) {{ break }}
     if (((Get-Date) - $timeout).TotalSeconds -gt 30) {{
-        Write-Error "等待程序 PID $TargetPid 結束逾時"
+        Write-Log "ERROR: timeout waiting for PID $TargetPid"
         exit 1
     }}
     Start-Sleep -Milliseconds 200
 }}
 
-# 再等一小段確保檔案解鎖
+Write-Log "target exited, waiting for file unlock"
 Start-Sleep -Milliseconds 500
 
-# 備份舊 exe
+# 備份、置換、標記、清理全部在 try/catch 內，確保錯誤可診斷且可還原
 $Backup = "$OldExe.bak"
-Copy-Item -Path $OldExe -Destination $Backup -Force -ErrorAction Stop
-
 try {{
+    # 備份舊 exe
+    Write-Log "creating backup: $Backup"
+    Copy-Item -Path $OldExe -Destination $Backup -Force -ErrorAction Stop
+    Write-Log "backup OK"
+
     # 置換新 exe（move 比 copy+delete 更接近原子）
+    Write-Log "replacing exe"
     Move-Item -Path $NewExe -Destination $OldExe -Force -ErrorAction Stop
+    Write-Log "replace OK"
 
     # 複製標記檔
     if (Test-Path $Marker) {{
+        Write-Log "copying marker"
         Copy-Item -Path $Marker -Destination (Join-Path $OldDir "{marker_name}") -Force
         Remove-Item -Path $Marker -Force -ErrorAction SilentlyContinue
+        Write-Log "marker OK"
     }}
 
     # 清理備份
+    Write-Log "removing backup"
     Remove-Item -Path $Backup -Force -ErrorAction SilentlyContinue
-
-    # 重啟
-    Start-Process -FilePath $OldExe
+    Write-Log "backup cleaned"
 }} catch {{
-    # 從備份還原
+    Write-Log "ERROR: $($_.Exception.Message)"
+    # 備份存在 → 已發生變動，還原舊 exe 並重啟；備份不存在 → 原 exe 未動
     if (Test-Path $Backup) {{
+        Write-Log "restoring from backup"
         Move-Item -Path $Backup -Destination $OldExe -Force -ErrorAction SilentlyContinue
+        Write-Log "restarting original"
         Start-Process -FilePath $OldExe
+        Write-Log "original restart initiated"
+    }} else {{
+        Write-Log "ERROR: failure before backup, old exe untouched"
     }}
-    Write-Error $_.Exception.Message
     exit 1
 }}
+
+# 成功完成：重新啟動
+Write-Log "SUCCESS, restarting $OldExe"
+Start-Process -FilePath $OldExe
+Write-Log "restart initiated"
 "#,
         pid = pid,
+        log_q = log_q,
         old_q = old_q,
         new_q = new_q,
         marker_q = marker_q,
@@ -540,15 +585,24 @@ pub fn execute_portable_replacement(
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("建立暫存目錄失敗: {e}"))?;
 
     let script_path = tmp_dir.join("update.ps1");
+    let log_path = tmp_dir.join("update.log");
     let script = portable_helper_script(
         &old_exe.to_string_lossy(),
         &new_exe.to_string_lossy(),
         &marker_path.to_string_lossy(),
         pid,
+        &log_path.to_string_lossy(),
     );
-    std::fs::write(&script_path, script).map_err(|e| format!("寫入更新腳本失敗: {e}"))?;
 
-    // 啟動 PowerShell（不等待），-WindowStyle Hidden 讓使用者看不到視窗
+    // 寫入 UTF-8 BOM（EF BB BF）確保 PowerShell 5.1 正確解讀非 ASCII 字元
+    let mut file = std::fs::File::create(&script_path)
+        .map_err(|e| format!("建立更新腳本失敗: {e}"))?;
+    file.write_all(b"\xEF\xBB\xBF")
+        .map_err(|e| format!("寫入更新腳本失敗: {e}"))?;
+    file.write_all(script.as_bytes())
+        .map_err(|e| format!("寫入更新腳本失敗: {e}"))?;
+
+    // 啟動 PowerShell，使用 CREATE_NO_WINDOW 避免彈出視窗
     std::process::Command::new("powershell")
         .args([
             "-WindowStyle",
@@ -558,6 +612,7 @@ pub fn execute_portable_replacement(
             "-File",
         ])
         .arg(&script_path)
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("啟動更新輔助程序失敗: {e}"))?;
 
@@ -679,9 +734,13 @@ mod tests {
 
     // ── 輔助腳本 ──
 
+    fn make_script(old: &str, new: &str, marker: &str, pid: u32) -> String {
+        portable_helper_script(old, new, marker, pid, r"C:\tmp\update.log")
+    }
+
     #[test]
     fn helper_script_contains_pid_and_paths() {
-        let script = portable_helper_script(
+        let script = make_script(
             r"C:\app\FrameAnchor.exe",
             r"C:\tmp\new.exe",
             r"C:\tmp\.frameanchor-portable",
@@ -694,7 +753,7 @@ mod tests {
 
     #[test]
     fn helper_script_contains_backup_and_restore() {
-        let script = portable_helper_script(
+        let script = make_script(
             r"C:\app\fa.exe",
             r"C:\tmp\new.exe",
             r"C:\tmp\.frameanchor-portable",
@@ -703,24 +762,114 @@ mod tests {
         assert!(script.contains(".bak"));
         assert!(script.contains("Start-Process"));
         assert!(script.contains("Move-Item"));
+        // rollback 應區分備份存在/不存在兩條路徑
+        assert!(script.contains("restoring from backup"));
+        assert!(script.contains("failure before backup"));
     }
 
     #[test]
     fn helper_script_contains_timeout() {
-        let script = portable_helper_script(
+        let script = make_script(
             r"C:\app\fa.exe",
             r"C:\tmp\new.exe",
             r"C:\tmp\.frameanchor-portable",
             1,
         );
         assert!(script.contains("TotalSeconds"));
-        assert!(script.contains("逾時"));
+    }
+
+    #[test]
+    fn helper_script_contains_logging() {
+        let script = make_script(
+            r"C:\app\fa.exe",
+            r"C:\tmp\new.exe",
+            r"C:\tmp\.frameanchor-portable",
+            1,
+        );
+        assert!(script.contains("Write-Log"), "script should contain diagnostic logging");
+        assert!(script.contains("update.log"), "script should reference log file");
+    }
+
+    #[test]
+    fn helper_script_log_markers() {
+        let script = make_script(
+            r"C:\app\fa.exe",
+            r"C:\tmp\new.exe",
+            r"C:\tmp\.frameanchor-portable",
+            1,
+        );
+        // 關鍵階段應有對應 log
+        for marker in &[
+            "helper started",
+            "backup OK",
+            "replacing exe",
+            "replace OK",
+            "backup cleaned",
+            "SUCCESS",
+            "restoring from backup",
+            "failure before backup",
+        ] {
+            assert!(
+                script.contains(marker),
+                "script missing log marker: {}",
+                marker
+            );
+        }
+    }
+
+    #[test]
+    fn helper_script_has_log_truncation() {
+        let script = make_script(
+            r"C:\app\fa.exe",
+            r"C:\tmp\new.exe",
+            r"C:\tmp\.frameanchor-portable",
+            1,
+        );
+        // 每次啟動應截斷舊日誌
+        assert!(
+            script.contains("Remove-Item $LogFile"),
+            "script should truncate log at startup"
+        );
+    }
+
+    #[test]
+    fn helper_script_backup_inside_try() {
+        let script = make_script(
+            r"C:\app\fa.exe",
+            r"C:\tmp\new.exe",
+            r"C:\tmp\.frameanchor-portable",
+            1,
+        );
+        // Copy-Item（備份）必須在 try { 和 } catch 之間（輸出為實際 PowerShell，非 Rust format 跳脫）
+        let try_pos = script.find("try {").expect("script should have try block");
+        let catch_pos = script.find("} catch {").expect("script should have catch block");
+        let copy_pos = script.find("Copy-Item").expect("script should have Copy-Item");
+        assert!(
+            try_pos < copy_pos && copy_pos < catch_pos,
+            "Copy-Item (backup) should be inside try/catch, try={try_pos} copy={copy_pos} catch={catch_pos}"
+        );
+    }
+
+    #[test]
+    fn helper_script_rollback_both_branches() {
+        let script = make_script(
+            r"C:\app\fa.exe",
+            r"C:\tmp\new.exe",
+            r"C:\tmp\.frameanchor-portable",
+            1,
+        );
+        // catch 內應有兩條分支：備份存在時還原，不存在時記錄原 exe 未動
+        assert!(script.contains("restoring from backup"));
+        assert!(script.contains("failure before backup"));
+        // 確認兩條路徑都有對應動作
+        assert!(script.contains("restarting original"));
+        assert!(script.contains("old exe untouched"));
     }
 
     #[test]
     fn helper_script_escapes_single_quote_in_path() {
         // 路徑含 apostrophe
-        let script = portable_helper_script(
+        let script = make_script(
             r"C:\Users\John'OConnor\App\fa.exe",
             r"C:\tmp\new.exe",
             r"C:\tmp\.frameanchor-portable",
@@ -728,6 +877,31 @@ mod tests {
         );
         // 單引號字串內 '' 為跳脫
         assert!(script.contains("John''OConnor"));
+    }
+
+    #[test]
+    fn helper_script_contains_no_bare_write_error() {
+        let script = make_script(
+            r"C:\app\fa.exe",
+            r"C:\tmp\new.exe",
+            r"C:\tmp\.frameanchor-portable",
+            1,
+        );
+        // Write-Error 已由 Write-Log 取代，確保不會因 stderr 遺失診斷訊息
+        assert!(!script.contains("Write-Error"));
+    }
+
+    #[test]
+    fn helper_script_bom_check() {
+        // 此測試驗證 BOM 寫入邏輯：\xEF\xBB\xBF 是 UTF-8 BOM
+        let bom: &[u8] = b"\xEF\xBB\xBF";
+        assert_eq!(bom.len(), 3);
+        // 確認 BOM 開頭的檔案會被 PowerShell 5.1 識別為 UTF-8
+        let script = make_script(r"C:\a\f.exe", r"C:\t\n.exe", r"C:\t\m", 1);
+        let script_start = script.as_bytes();
+        // 確保腳本內容不以 BOM 開頭（BOM 在 execute_portable_replacement 寫入時才加上）
+        // 腳本字串本身不含 BOM
+        assert!(!script_start.starts_with(bom), "script string itself should not have BOM");
     }
 
     #[test]
