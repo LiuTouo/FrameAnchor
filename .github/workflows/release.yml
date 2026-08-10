@@ -1,0 +1,96 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: 驗證版本一致性
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $tag = "$env:GITHUB_REF_NAME"
+
+          if ($tag -notmatch '^v(\d+)\.(\d+)\.(\d+)$') {
+            Write-Error "標籤 '$tag' 不符合語意化版本格式 vX.Y.Z"
+            exit 1
+          }
+
+          $version = $tag.Substring(1)
+
+          $pkg = Get-Content package.json -Raw | ConvertFrom-Json
+          if ($pkg.version -ne $version) {
+            Write-Error "package.json 版本 $($pkg.version) 與標籤版本 $version 不一致"
+            exit 1
+          }
+
+          $lock = Get-Content package-lock.json -Raw | ConvertFrom-Json -AsHashtable
+          if ($lock['version'] -ne $version) {
+            Write-Error "package-lock.json 版本 $($lock['version']) 與標籤版本 $version 不一致"
+            exit 1
+          }
+          if ($lock['packages'] -and $lock['packages']['']) {
+            $lockRoot = $lock['packages']['']
+            if ($lockRoot['version'] -ne $version) {
+              Write-Error "package-lock.json packages[\"\"] 版本 $($lockRoot['version']) 與標籤版本 $version 不一致"
+              exit 1
+            }
+          }
+
+          $cargoToml = Get-Content src-tauri/Cargo.toml -Raw
+          if ($cargoToml -match 'version\s*=\s*"([^"]+)"') {
+            $cargoVersion = $Matches[1]
+            if ($cargoVersion -ne $version) {
+              Write-Error "src-tauri/Cargo.toml 版本 $cargoVersion 與標籤版本 $version 不一致"
+              exit 1
+            }
+          } else {
+            Write-Error "無法從 src-tauri/Cargo.toml 解析版本"
+            exit 1
+          }
+
+          $tauriConf = Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          if ($tauriConf.version -ne $version) {
+            Write-Error "src-tauri/tauri.conf.json 版本 $($tauriConf.version) 與標籤版本 $version 不一致"
+            exit 1
+          }
+
+          Write-Host "版本驗證通過：$version"
+
+      - name: 安裝前端相依套件
+        run: npm ci
+
+      - name: 前端型別檢查
+        run: npm run check
+
+      - name: Rust 測試
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: "FrameAnchor ${{ github.ref_name }}"
+          releaseDraft: false
+          prerelease: false
+          generateReleaseNotes: true
+          uploadUpdaterJson: false

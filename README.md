@@ -25,6 +25,7 @@ FrameAnchor 是一款 Windows 桌面工具，會持續監控指定的遊戲或�
 - [使用方式](#使用方式)
 - [設定與資料](#設定與資料)
 - [開發與建置](#開發與建置)
+- [發布流程](#發布流程)
 - [技術架構](#技術架構)
 - [授權](#授權)
 
@@ -190,6 +191,50 @@ cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
 完整應用程式與程序操作依賴 Windows API。涉及 live process、affinity、priority、CPU Sets、系統匣、Task Scheduler 或 WebView2 的變更，仍需在 Windows 上使用可拋棄的測試程序進行手動驗證。
+
+## 發布流程
+
+維護者透過推送語意化版本標籤觸發 GitHub Actions 自動建置與發布。
+
+### 步驟
+
+1. **同步版本號**
+
+   確保以下四個檔案中的版本號一致（例如 `0.2.0`）：
+
+   - `package.json` — `"version": "0.2.0"`
+   - `package-lock.json` — 根層級 `"version": "0.2.0"`（`npm install` 會自動同步）
+   - `src-tauri/Cargo.toml` — `[package]` 下的 `version = "0.2.0"`
+   - `src-tauri/tauri.conf.json` — 頂層 `"version": "0.2.0"`
+
+2. **提交並建立標籤**
+
+   ```bash
+   git add package.json package-lock.json src-tauri/Cargo.toml src-tauri/tauri.conf.json
+   git commit -m "chore: bump version to 0.2.0"
+   git tag -a v0.2.0 -m "v0.2.0"
+   ```
+
+   標籤必須嚴格符合 `vX.Y.Z` 格式。CI 會在建置前驗證標籤與所有檔案版本一致，不一致時會失敗並顯示明確錯誤。
+
+3. **推送觸發建置**
+
+   ```bash
+   git push origin master
+   git push origin v0.2.0
+   ```
+
+   推送標籤後，GitHub Actions 會自動執行版本驗證、前端型別檢查、Rust 測試，然後透過 `tauri-apps/tauri-action@v1` 建置 NSIS 安裝程式並建立 GitHub Release。
+
+4. **下載發布版本**
+
+   建置完成後，前往 [GitHub Releases](https://github.com/LiuTouo/FrameAnchor/releases) 下載最新的 NSIS 安裝程式（`.exe`）。
+
+### 注意事項
+
+- Windows 二進位檔**未經數位簽章**，下載及執行時 Windows Defender SmartScreen 可能顯示警告。這是預期行為，不影響程式功能。
+- 此專案目前不包含 Tauri updater 支援，因此不會產生 updater 相關設定檔。
+- GitHub Actions 工作流程定義於 `.github/workflows/release.yml`。
 
 ## 技術架構
 
