@@ -78,6 +78,9 @@ pub struct Rule {
     pub priority: CpuPriority,
     #[serde(default)]
     pub advanced: AdvancedSpec,
+    /// GPU 基準測試推薦的套用元資料（可選；舊 config 無此欄可正常載入）
+    #[serde(default)]
+    pub recommendation: Recommendation,
 }
 
 impl Rule {
@@ -91,8 +94,32 @@ impl Rule {
             affinity: AffinitySpec::default(),
             priority: CpuPriority::High,
             advanced: AdvancedSpec::default(),
+            recommendation: Recommendation::default(),
         }
     }
+}
+
+/// 基準測試推薦元資料：綁定在 Rule 上的「這個規則為何這樣設」的證據。
+/// 全部欄位 serde default → 舊 config 載入不受影響，roundtrip 保留新欄位。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct Recommendation {
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub generated_at: Option<String>,
+    #[serde(default)]
+    pub cpu_fingerprint: Option<String>,
+    #[serde(default)]
+    pub gpu_instance_id: Option<String>,
+    #[serde(default)]
+    pub best_lp: Option<u32>,
+    #[serde(default)]
+    pub severe_lps: Vec<u32>,
+    #[serde(default)]
+    pub recommended_cores: Vec<u32>,
+    #[serde(default)]
+    pub adjusted: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
@@ -219,5 +246,76 @@ impl MemPriority {
             4 => MemPriority::BelowNormal,
             _ => MemPriority::Normal,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 舊 config 完全沒有 recommendation 欄位 → 正常載入，metadata 用預設值
+    #[test]
+    fn old_config_without_recommendation_loads() {
+        let json = r#"{
+            "version": 1,
+            "rules": [
+                {
+                    "id": "r1",
+                    "name": "Game",
+                    "exePath": "C:\\Games\\game.exe",
+                    "matchBy": "FullPath",
+                    "enabled": true,
+                    "affinity": { "mode": "All", "cores": [] },
+                    "priority": "High",
+                    "advanced": {}
+                }
+            ]
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.rules.len(), 1);
+        let rec = &cfg.rules[0].recommendation;
+        assert!(rec.session_id.is_none());
+        assert!(rec.severe_lps.is_empty());
+        assert!(rec.recommended_cores.is_empty());
+        assert!(!rec.adjusted);
+    }
+
+    /// roundtrip：填入推薦元資料後序列化/反序列化，欄位原樣保留
+    #[test]
+    fn recommendation_roundtrip_preserved() {
+        let mut cfg = Config::default();
+        let mut rule = Rule::new(r"C:\Games\game.exe".into(), "Game".into());
+        rule.recommendation = Recommendation {
+            session_id: Some("sess-1".into()),
+            generated_at: Some("2026-08-11T00:00:00Z".into()),
+            cpu_fingerprint: Some("fp-abc".into()),
+            gpu_instance_id: Some(r"PCI\VEN_10DE&DEV_2684".into()),
+            best_lp: Some(5),
+            severe_lps: vec![3, 4],
+            recommended_cores: vec![5, 6, 7],
+            adjusted: true,
+        };
+        cfg.rules.push(rule);
+
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: Config = serde_json::from_str(&json).unwrap();
+        let rec = &back.rules[0].recommendation;
+        assert_eq!(rec.session_id.as_deref(), Some("sess-1"));
+        assert_eq!(rec.best_lp, Some(5));
+        assert_eq!(rec.severe_lps, vec![3, 4]);
+        assert_eq!(rec.recommended_cores, vec![5, 6, 7]);
+        assert!(rec.adjusted);
+        assert_eq!(rec.cpu_fingerprint.as_deref(), Some("fp-abc"));
+    }
+
+    /// camelCase 序列化：Rule 序列化後欄位名為 camelCase、enum 為 PascalCase
+    #[test]
+    fn rule_serializes_camel_case() {
+        let rule = Rule::new(r"C:\Games\game.exe".into(), "Game".into());
+        let json = serde_json::to_string(&rule).unwrap();
+        assert!(json.contains("\"exePath\""));
+        assert!(json.contains("\"recommendation\""));
+        assert!(json.contains("\"FullPath\""));
+        assert!(json.contains("\"High\""));
     }
 }

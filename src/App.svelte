@@ -3,18 +3,48 @@
   import { listen } from '@tauri-apps/api/event';
   import { locale, t } from 'svelte-i18n';
   import Dashboard from './pages/Dashboard.svelte';
+  import GpuTest from './pages/GpuTest.svelte';
   import Rules from './pages/Rules.svelte';
   import SettingsPage from './pages/Settings.svelte';
+  import ConfirmDialog from './components/ConfirmDialog.svelte';
   import * as ipc from './lib/ipc';
-  import { topology, rules, settings, applied, usage, updateState, isPortable } from './lib/stores';
-  import type { AppliedProcess, UpdateState } from './lib/types';
+  import {
+    applied,
+    benchmarkProgress,
+    benchmarkState,
+    isPortable,
+    rules,
+    settings,
+    topology,
+    updateState,
+    usage,
+  } from './lib/stores';
+  import type { AppliedProcess, BenchmarkProgress, UpdateState } from './lib/types';
   import { checkForUpdates, installUpdate } from './lib/updater';
 
-  type Tab = 'dashboard' | 'rules' | 'settings';
+  type Tab = 'dashboard' | 'rules' | 'gpu' | 'settings';
   let tab = $state<Tab>('dashboard');
+
+  // 基準測試執行中 → 鎖定導覽，不能離開 GPU 測試頁
+  const benchmarkRunning = $derived($benchmarkState?.status === 'Running');
+
+  function switchTab(next: Tab) {
+    if (benchmarkRunning && next !== 'gpu') return; // 執行中禁止離開
+    tab = next;
+  }
+
+  function navDisabled(next: Tab) {
+    return benchmarkRunning && next !== 'gpu';
+  }
+
+  // 進入 Running → 自動切到 GPU 測試頁（reload/reopen 也落在警告+進度+取消）
+  $effect(() => {
+    if ($benchmarkState?.status === 'Running') tab = 'gpu';
+  });
 
   // 啟動時找到的更新橫幅：本機 dismiss 旗標，不影響 store 狀態
   let updateBannerDismissed = $state(false);
+  let updateConfirmOpen = $state(false);
 
   onMount(() => {
     let unlisteners: Array<() => void> = [];
@@ -25,6 +55,9 @@
       settings.set(s);
       locale.set(s.language);
       applied.set(await ipc.getApplied());
+
+      // 重建基準測試執行期狀態（reload 後不重啟/不停止 session）
+      benchmarkState.set(await ipc.getBenchmarkState());
 
       // 取得版本資訊與可攜版旗標
       const info = await ipc.getUpdateInfo();
@@ -47,6 +80,13 @@
       unlisteners.push(
         await listen<UpdateState>('update-state', (e) => updateState.set(e.payload)),
       );
+      // GPU 基準測試進度事件 → 即時更新 state（後端仍是執行期唯一 owner）
+      unlisteners.push(
+        await listen<BenchmarkProgress>('gpu-benchmark-progress', (e) => {
+          benchmarkProgress.set(e.payload);
+          void ipc.getBenchmarkState().then((s) => benchmarkState.set(s));
+        }),
+      );
 
       // 啟動時自動檢查更新（匯流至 updater 模組）
       await checkForUpdates();
@@ -59,12 +99,11 @@
     const curState = $updateState;
     if (!curState || curState.status !== 'Available') return;
 
-    const title = $t('settings.updateConfirmTitle') as string;
-    const body = $t('settings.updateConfirmBody', {
-      values: { version: curState.latestVersion ?? '', current: curState.currentVersion },
-    }) as string;
-    if (!window.confirm(`${title}\n\n${body}`)) return;
+    updateConfirmOpen = true;
+  }
 
+  async function confirmBannerInstall() {
+    updateConfirmOpen = false;
     await installUpdate();
   }
 </script>
@@ -72,13 +111,28 @@
 <div class="shell">
   <nav>
     <div class="logo">Frame<span>Anchor</span></div>
-    <button class:active={tab === 'dashboard'} onclick={() => (tab = 'dashboard')}>
+    <button
+      class:active={tab === 'dashboard'}
+      disabled={navDisabled('dashboard')}
+      onclick={() => switchTab('dashboard')}
+    >
       {$t('nav.dashboard')}
     </button>
-    <button class:active={tab === 'rules'} onclick={() => (tab = 'rules')}>
+    <button
+      class:active={tab === 'rules'}
+      disabled={navDisabled('rules')}
+      onclick={() => switchTab('rules')}
+    >
       {$t('nav.rules')}
     </button>
-    <button class:active={tab === 'settings'} onclick={() => (tab = 'settings')}>
+    <button class:active={tab === 'gpu'} onclick={() => switchTab('gpu')}>
+      {$t('nav.gpuTest')}
+    </button>
+    <button
+      class:active={tab === 'settings'}
+      disabled={navDisabled('settings')}
+      onclick={() => switchTab('settings')}
+    >
       {$t('nav.settings')}
     </button>
   </nav>
@@ -104,11 +158,24 @@
       <Dashboard />
     {:else if tab === 'rules'}
       <Rules />
+    {:else if tab === 'gpu'}
+      <GpuTest />
     {:else}
       <SettingsPage />
     {/if}
   </main>
 </div>
+
+<ConfirmDialog
+  bind:open={updateConfirmOpen}
+  title={$t('settings.updateConfirmTitle') as string}
+  message={$t('settings.updateConfirmBody', {
+    values: { version: $updateState?.latestVersion ?? '', current: $updateState?.currentVersion ?? '' },
+  }) as string}
+  confirmLabel={$t('settings.updateInstall') as string}
+  cancelLabel={$t('common.cancel') as string}
+  onconfirm={confirmBannerInstall}
+/>
 
 <style>
   .shell {

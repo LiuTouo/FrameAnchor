@@ -147,17 +147,46 @@ jobs:
           # 可攜版標記檔：空檔案，表示此為可攜版
           New-Item -ItemType File -Path "$stagingDir\.frameanchor-portable" -Force | Out-Null
 
-          # 打包 ZIP：明確指定輸入路徑（不依賴萬用字元包含 dotfile）
-          Compress-Archive -Path "$stagingDir\$exeName", "$stagingDir\.frameanchor-portable" -DestinationPath $zipName -Force
-
-          # 驗證 ZIP 內含可攜版標記檔
-          $zipEntries = [System.IO.Compression.ZipFile]::OpenRead("$pwd\$zipName").Entries
-          $markerFound = $zipEntries | Where-Object { $_.Name -eq '.frameanchor-portable' }
-          if (-not $markerFound) {
-            Write-Error "可攜版 ZIP 中缺少 .frameanchor-portable 標記檔"
+          # 基準測試資源：可攜版必須內含（resource_dir() = exe 所在目錄 → resources\benchmark）
+          $resourceDir = "$exeDir\resources\benchmark"
+          if (Test-Path $resourceDir) {
+            New-Item -ItemType Directory -Force -Path "$stagingDir\resources\benchmark" | Out-Null
+            Copy-Item "$resourceDir\*" "$stagingDir\resources\benchmark\" -Force -Recurse
+            Write-Host "已複製基準測試資源到可攜版"
+          } else {
+            Write-Error "找不到基準測試資源目錄 $resourceDir（可攜版將缺少 benchmark 工具）"
             exit 1
           }
-          Write-Host "已確認 ZIP 內含可攜版標記檔"
+
+          # 打包 ZIP：明確指定輸入路徑（不依賴萬用字元包含 dotfile）
+          Compress-Archive -Path "$stagingDir\$exeName", "$stagingDir\.frameanchor-portable", "$stagingDir\resources" -DestinationPath $zipName -Force
+
+          # 驗證 ZIP 內含 exe、標記檔與六個必要資源項目。
+          # FullName 分隔符正規化為 /，逐一比對，缺任一項即失敗。
+          $requiredEntries = @(
+            'FrameAnchor.exe',
+            '.frameanchor-portable',
+            'resources/benchmark/PresentMon-2.5.1-x64.exe',
+            'resources/benchmark/lava-triangle.exe',
+            'resources/benchmark/d3d9-workload.exe',
+            'resources/benchmark/LICENSE-PresentMon.txt',
+            'resources/benchmark/LICENSE-liblava.txt',
+            'resources/benchmark/SHA256SUMS'
+          )
+          $zipArchive = [System.IO.Compression.ZipFile]::OpenRead("$pwd\$zipName")
+          try {
+            $fullNames = @($zipArchive.Entries.FullName) | ForEach-Object { $_ -replace '\\', '/' }
+          } finally {
+            $zipArchive.Dispose()
+          }
+          foreach ($entry in $requiredEntries) {
+            if ($fullNames -notcontains $entry) {
+              Write-Error "可攜版 ZIP 中缺少必要項目: $entry"
+              exit 1
+            }
+            Write-Host "已確認 ZIP 內含: $entry"
+          }
+          Write-Host "已確認 ZIP 內含全部必要項目"
 
           Write-Host "可攜版 ZIP 已建立：$zipName"
           Write-Host "size=$((Get-Item $zipName).Length)"

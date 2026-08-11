@@ -18,9 +18,9 @@ use crate::model::{AffinityMode, AffinitySpec};
 #[serde(rename_all = "camelCase")]
 pub struct Topology {
     pub logical_processors: Vec<LogicalProcessor>, // 依 LP index 排序
-    pub physical_cores: Vec<PhysicalCore>,          // 依 core id 排序
-    pub has_smt: bool,        // 有任何核心 >1 LP
-    pub has_hybrid: bool,     // EfficiencyClass 不全相同
+    pub physical_cores: Vec<PhysicalCore>,         // 依 core id 排序
+    pub has_smt: bool,                             // 有任何核心 >1 LP
+    pub has_hybrid: bool,                          // EfficiencyClass 不全相同
     pub total_lp: u32,
 }
 
@@ -39,7 +39,7 @@ pub struct PhysicalCore {
     pub id: u32,
     pub lp_indices: Vec<u32>, // 1 個 = 無 SMT；2 個 = 有 HT
     pub efficiency_class: u8,
-    pub is_p_core: bool,      // efficiency_class == 全系統最大值
+    pub is_p_core: bool, // efficiency_class == 全系統最大值
 }
 
 /// 列舉 CPU 拓撲。失敗回傳 Err；呼叫端決定 fallback。
@@ -66,8 +66,9 @@ pub fn enumerate_topology() -> Result<Topology, TopologyError> {
     let mut raw_cores: Vec<(Vec<u32>, u8, bool)> = Vec::new(); // (lp_indices, efficiency, is_smt)
     let mut offset = 0usize;
     while offset < needed as usize {
-        let header =
-            unsafe { &*(buf.as_ptr().add(offset) as *const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) };
+        let header = unsafe {
+            &*(buf.as_ptr().add(offset) as *const SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX)
+        };
         if header.Relationship == RelationProcessorCore {
             let proc_rel: PROCESSOR_RELATIONSHIP = unsafe { header.Anonymous.Processor };
             // v1：只用 group 0（PLAN §15 限制，>64 邏輯核心不支援）
@@ -75,7 +76,11 @@ pub fn enumerate_topology() -> Result<Topology, TopologyError> {
                 let group_mask = proc_rel.GroupMask[0];
                 let lp_indices = mask_to_indices(group_mask.Mask as u64);
                 if !lp_indices.is_empty() {
-                    raw_cores.push((lp_indices, proc_rel.EfficiencyClass, proc_rel.Flags == LTP_PC_SMT));
+                    raw_cores.push((
+                        lp_indices,
+                        proc_rel.EfficiencyClass,
+                        proc_rel.Flags == LTP_PC_SMT,
+                    ));
                 }
             }
         }
@@ -101,7 +106,12 @@ pub fn build_topology(mut raw_cores: Vec<(Vec<u32>, u8, bool)>) -> Topology {
     let has_hybrid = raw_cores.iter().any(|(_, e, _)| *e != max_eff)
         && raw_cores.iter().any(|(_, e, _)| *e == max_eff)
         && !raw_cores.is_empty()
-        && raw_cores.iter().map(|(_, e, _)| e).collect::<std::collections::HashSet<_>>().len() > 1;
+        && raw_cores
+            .iter()
+            .map(|(_, e, _)| e)
+            .collect::<std::collections::HashSet<_>>()
+            .len()
+            > 1;
     let has_smt = raw_cores.iter().any(|(_, _, smt)| *smt);
 
     let mut physical_cores = Vec::new();
@@ -185,7 +195,11 @@ mod tests {
 
     /// 假拓撲：SMT 8C16T（每核心 2 LP）
     fn topo_8c16t() -> Topology {
-        build_topology((0..8u32).map(|c| (vec![c * 2, c * 2 + 1], 0, true)).collect())
+        build_topology(
+            (0..8u32)
+                .map(|c| (vec![c * 2, c * 2 + 1], 0, true))
+                .collect(),
+        )
     }
 
     /// 假拓撲：混合 8P(有HT)+8E = 24 LP（模擬 i9 類型）
@@ -206,14 +220,20 @@ mod tests {
     #[test]
     fn all_mode_covers_everything() {
         let t = topo_8c16t();
-        let spec = AffinitySpec { mode: AffinityMode::All, cores: vec![] };
+        let spec = AffinitySpec {
+            mode: AffinityMode::All,
+            cores: vec![],
+        };
         assert_eq!(resolve_mask(&spec, &t), 0xFFFF);
     }
 
     #[test]
     fn no_smt_sibling_picks_first_thread_per_core() {
         let t = topo_8c16t();
-        let spec = AffinitySpec { mode: AffinityMode::NoSmtSibling, cores: vec![] };
+        let spec = AffinitySpec {
+            mode: AffinityMode::NoSmtSibling,
+            cores: vec![],
+        };
         // 每核心第一條：LP 0,2,4,...,14
         assert_eq!(resolve_mask(&spec, &t), 0b0101_0101_0101_0101);
     }
@@ -222,7 +242,10 @@ mod tests {
     fn no_smt_on_uniform_cpu_equals_all() {
         let t = topo_8c();
         assert!(!t.has_smt);
-        let spec = AffinitySpec { mode: AffinityMode::NoSmtSibling, cores: vec![] };
+        let spec = AffinitySpec {
+            mode: AffinityMode::NoSmtSibling,
+            cores: vec![],
+        };
         assert_eq!(resolve_mask(&spec, &t), 0xFF);
     }
 
@@ -231,7 +254,10 @@ mod tests {
         let t = topo_hybrid();
         assert!(t.has_hybrid);
         assert_eq!(t.total_lp, 24);
-        let spec = AffinitySpec { mode: AffinityMode::PCoresOnly, cores: vec![] };
+        let spec = AffinitySpec {
+            mode: AffinityMode::PCoresOnly,
+            cores: vec![],
+        };
         // P-core LP 0..16
         assert_eq!(resolve_mask(&spec, &t), 0xFFFF);
     }
@@ -252,28 +278,40 @@ mod tests {
     fn p_cores_only_on_uniform_equals_all() {
         let t = topo_8c();
         assert!(!t.has_hybrid);
-        let spec = AffinitySpec { mode: AffinityMode::PCoresOnly, cores: vec![] };
+        let spec = AffinitySpec {
+            mode: AffinityMode::PCoresOnly,
+            cores: vec![],
+        };
         assert_eq!(resolve_mask(&spec, &t), 0xFF);
     }
 
     #[test]
     fn custom_uses_given_cores() {
         let t = topo_8c16t();
-        let spec = AffinitySpec { mode: AffinityMode::Custom, cores: vec![0, 2, 4, 6] };
+        let spec = AffinitySpec {
+            mode: AffinityMode::Custom,
+            cores: vec![0, 2, 4, 6],
+        };
         assert_eq!(resolve_mask(&spec, &t), 0b0101_0101);
     }
 
     #[test]
     fn empty_custom_falls_back_to_all() {
         let t = topo_8c();
-        let spec = AffinitySpec { mode: AffinityMode::Custom, cores: vec![] };
+        let spec = AffinitySpec {
+            mode: AffinityMode::Custom,
+            cores: vec![],
+        };
         assert_eq!(resolve_mask(&spec, &t), 0xFF);
     }
 
     #[test]
     fn custom_cores_clamped_to_topology() {
         let t = topo_8c();
-        let spec = AffinitySpec { mode: AffinityMode::Custom, cores: vec![0, 1, 63] };
+        let spec = AffinitySpec {
+            mode: AffinityMode::Custom,
+            cores: vec![0, 1, 63],
+        };
         assert_eq!(resolve_mask(&spec, &t), 0b11);
     }
 

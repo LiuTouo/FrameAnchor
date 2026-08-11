@@ -34,7 +34,11 @@ pub fn list_windows(state: State<Arc<AppState>>) -> Vec<WindowInfo> {
 
 #[tauri::command]
 pub fn get_rules(state: State<Arc<AppState>>) -> Vec<Rule> {
-    state.config.read().map(|c| c.rules.clone()).unwrap_or_default()
+    state
+        .config
+        .read()
+        .map(|c| c.rules.clone())
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -248,7 +252,12 @@ pub async fn check_portable_update(app: AppHandle) -> Result<(), String> {
 
 /// 可攜版：下載並安裝更新
 #[tauri::command]
-pub async fn perform_portable_update(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+pub async fn perform_portable_update(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), String> {
+    // 基準測試執行中：拒絕替換/退出，避免 runner 中斷未還原
+    state.benchmark.refuse_exit_if_running()?;
     let version = update::current_version(&app);
 
     // 狀態：下載中
@@ -296,8 +305,8 @@ pub async fn perform_portable_update(app: AppHandle, state: State<'_, Arc<AppSta
         },
     );
 
-    // 階段 2：解壓縮
-    let (new_exe, marker_path) =
+    // 階段 2：解壓縮（含基準測試資源）
+    let (new_exe, marker_path, new_resources) =
         tokio::task::spawn_blocking(move || update::extract_portable_exe(&zip_data))
             .await
             .map_err(|e| format!("解壓縮失敗: {e}"))??;
@@ -317,8 +326,8 @@ pub async fn perform_portable_update(app: AppHandle, state: State<'_, Arc<AppSta
         },
     );
 
-    // 執行可攜版替換輔助腳本
-    update::execute_portable_replacement(&old_exe, &new_exe, &marker_path, pid)?;
+    // 執行可攜版替換輔助腳本（同步更新基準測試資源）
+    update::execute_portable_replacement(&old_exe, &new_exe, &marker_path, &new_resources, pid)?;
 
     // 設定 quitting flag，繞過 close-to-tray，真正結束程序
     state

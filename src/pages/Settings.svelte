@@ -4,6 +4,9 @@
   import { settings, updateState, isPortable } from '../lib/stores';
   import type { Settings, UpdateStatus } from '../lib/types';
   import { checkForUpdates, installUpdate } from '../lib/updater';
+  import ConfirmDialog from '../components/ConfirmDialog.svelte';
+
+  let updateConfirmOpen = $state(false);
 
   // busy 狀態直接從 updateState store 推導
   let checking = $derived($updateState?.status === 'Checking');
@@ -44,12 +47,11 @@
     const curState = $updateState;
     if (!curState || curState.status !== 'Available') return;
 
-    const title = $t('settings.updateConfirmTitle') as string;
-    const body = $t('settings.updateConfirmBody', {
-      values: { version: curState.latestVersion ?? '', current: curState.currentVersion },
-    }) as string;
-    if (!window.confirm(`${title}\n\n${body}`)) return;
+    updateConfirmOpen = true;
+  }
 
+  async function confirmUpdate() {
+    updateConfirmOpen = false;
     await installUpdate();
   }
 
@@ -182,6 +184,17 @@
     </div>
   </div>
 {/if}
+
+<ConfirmDialog
+  bind:open={updateConfirmOpen}
+  title={$t('settings.updateConfirmTitle') as string}
+  message={$t('settings.updateConfirmBody', {
+    values: { version: $updateState?.latestVersion ?? '', current: $updateState?.currentVersion ?? '' },
+  }) as string}
+  confirmLabel={$t('settings.updateInstall') as string}
+  cancelLabel={$t('common.cancel') as string}
+  onconfirm={confirmUpdate}
+/>
 
 <style>
   h2 {

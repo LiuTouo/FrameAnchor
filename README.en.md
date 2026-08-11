@@ -24,6 +24,7 @@ It is intended for experimenting with CPU core layouts, reducing unnecessary cor
 - [Installation](#installation)
 - [Usage](#usage)
 - [Configuration and Data](#configuration-and-data)
+- [GPU Benchmark (Beta)](#gpu-benchmark-beta)
 - [Development and Building](#development-and-building)
 - [Architecture](#architecture)
 - [License](#license)
@@ -41,6 +42,7 @@ It is intended for experimenting with CPU core layouts, reducing unnecessary cor
 - **System tray operation**: Supports close-to-tray, start minimized, and single-instance behavior.
 - **Start with Windows**: Uses Windows Task Scheduler to launch with the highest privileges at user logon.
 - **Bilingual interface**: Traditional Chinese and English.
+- **GPU benchmark (Beta)**: Tests GPU driver interrupt affinity per logical processor on a selected GPU, finds the best core for GPU interrupts, and can import the result into a rule draft with one click.
 
 ## Affinity Modes
 
@@ -156,6 +158,56 @@ Default settings include:
 - Background maintenance interval: 1 second
 - Advanced priority controls: hidden
 
+## GPU Benchmark (Beta)
+
+FrameAnchor includes a GPU benchmark that finds the **logical processor (LP) best suited to handle the selected GPU's driver interrupts**. It cycles the GPU driver's interrupt affinity across LPs, collects frame-times with a measurement tool, and reports the best core and cores that perform poorly, which can be imported into a rule draft in one click.
+
+### How it differs from a general CPU/GPU benchmark
+
+- **Not a graphics benchmark**: It does not compare image quality, scenes, or FPS between GPUs. The workload is a fixed alternating black/white, uncapped, no-vsync render.
+- **Not "which core runs the game fastest"**: It measures which core yields the most stable/highest frame-times when handling GPU interrupts.
+- Each test pins the GPU driver interrupt affinity to a single LP; statistics include Avg/Max/Min/STDEV and 1%/0.1%/0.01%/0.005% time-weighted lows.
+
+### Expected duration
+
+Each tested core takes roughly:
+
+```text
+sample seconds + warm-up seconds + startup wait (5 s) + driver restart/stabilize (~14 s) + margin
+```
+
+Total is approximately `cores × rounds × per-core time`. For example 16 cores, 30 s sample, 1 round, roughly 13–15 minutes. The UI shows an estimate before starting.
+
+### Risk warning
+
+The test repeatedly **disables/enables the selected GPU driver** (disable/enable), which may cause:
+
+- Several seconds of black screen
+- Temporary display dropout or resolution reset
+- Other workloads using the same GPU (including browser hardware acceleration) to pause
+
+**Do not operate the computer after starting**, until the test finishes or is cancelled. The test uses a crash-safe recovery journal; even a crash mid-test restores the pre-test policy on next launch.
+
+### Data and history
+
+- Sessions are stored under `%APPDATA%\FrameAnchor\benchmarks\<session-uuid>\` with `session.json` and per-round `round-<round>-lp-<core>.csv` files.
+- The history list shows date, GPU, API, status, best core, and disk size for each session; details can be opened or deleted (with confirmation).
+- In-flight recovery journal: `%APPDATA%\FrameAnchor\benchmark-recovery.json`; the one-level restore record after an apply: `gpu-restore.json`.
+- History is never deleted automatically.
+
+### Apply and restore semantics
+
+- A test itself **never auto-applies** anything — every session restores the GPU interrupt affinity to its pre-test state.
+- After completion you must explicitly press **"Apply best core to GPU"** (with confirmation) to pin interrupt affinity to the best LP.
+- **"Restore previous setting"** returns to the policy before the most recent successful apply (one-level restore record).
+- Both apply and restore confirm and briefly restart the GPU driver again (possible screen flicker).
+
+### Compatibility restriction
+
+- Each completed session stores the **CPU fingerprint** (CPU identity + topology) and the GPU's stable PnP instance ID.
+- Only sessions whose **current CPU fingerprint matches** and whose **GPU is still present** can be applied or imported; incompatible history stays viewable but apply/import is disabled with a reason.
+- If the current CPU hardware no longer matches a recommendation stored on a rule, a stale-hardware warning is shown while the data is preserved.
+
 ## Development and Building
 
 Install dependencies:
@@ -185,7 +237,18 @@ npm run tauri build
 
 npm run gen-icons
 # Regenerates src-tauri/icons/*
+
+npm run build:benchmark-assets
+# Builds the D3D9 workload sidecar (Rust + Direct3D 9) and copies it into the resources dir
+
+npm run verify:benchmark-assets
+# Verifies bundled benchmark resources (SHA-256 of PresentMon/liblava and D3D9 sidecar presence)
+
+npm run fetch:benchmark-assets
+# Re-downloads PresentMon and the liblava workload and updates SHA256SUMS
 ```
+
+`npm run tauri build` automatically runs the frontend build, the D3D9 sidecar build, and the resource verification in order, so the bundle always includes the bundled tools and their license notices.
 
 Rust checks and tests:
 
@@ -250,3 +313,13 @@ The project is still at an early stage, and APIs, configuration formats, and sch
 ## License
 
 This project is licensed under the [GNU General Public License v3.0](LICENSE).
+
+### Third-party notices
+
+The GPU benchmark feature bundles and redistributes the following third-party components (each under its own license):
+
+- **PresentMon 2.5.1** (Intel) — [MIT License](src-tauri/resources/benchmark/LICENSE-PresentMon.txt). Frame-time collection tool; verified by a fixed SHA-256 before execution.
+- **liblava Vulkan workload** (`lava-triangle.exe`, distributed via valleyofdoom/AutoGpuAffinity and built on the liblava framework) — [MIT License](src-tauri/resources/benchmark/LICENSE-liblava.txt). Vulkan test workload; also SHA-256 verified before execution.
+- **Direct3D 9 workload** (`d3d9-workload.exe`) — a sidecar written in Rust directly against the Win32 Direct3D 9 API by this project (see `src-tauri/d3d9-workload/`), licensed under GPL-3.0 like the project itself.
+
+Full license texts and the SHA-256 manifest live in `src-tauri/resources/benchmark/`.

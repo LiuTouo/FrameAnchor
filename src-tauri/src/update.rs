@@ -72,8 +72,7 @@ pub enum UpdateStatus {
 
 // ── GitHub API 常數 ──
 
-const GITHUB_API_RELEASES: &str =
-    "https://api.github.com/repos/LiuTouo/FrameAnchor/releases";
+const GITHUB_API_RELEASES: &str = "https://api.github.com/repos/LiuTouo/FrameAnchor/releases";
 const USER_AGENT: &str = "FrameAnchor";
 
 /// 可攜版 ZIP 大小上限 (100 MiB)
@@ -93,7 +92,10 @@ pub fn is_portable() -> bool {
 
 /// 目前執行檔所在目錄
 pub fn current_exe_dir() -> Option<PathBuf> {
-    std::env::current_exe().ok()?.parent().map(|p| p.to_path_buf())
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|p| p.to_path_buf())
 }
 
 /// 目前執行檔完整路徑
@@ -184,8 +186,8 @@ pub fn fetch_portable_release() -> Result<PortableRelease, String> {
         .tag_name
         .strip_prefix('v')
         .unwrap_or(&latest.tag_name);
-    let version =
-        Version::parse(version_str).map_err(|e| format!("無法解析版本標籤 '{}': {e}", latest.tag_name))?;
+    let version = Version::parse(version_str)
+        .map_err(|e| format!("無法解析版本標籤 '{}': {e}", latest.tag_name))?;
 
     let expected_zip = portable_zip_name(&version);
     let expected_checksum = format!("{}.sha256", expected_zip);
@@ -196,12 +198,7 @@ pub fn fetch_portable_release() -> Result<PortableRelease, String> {
         .iter()
         .find(|a| a.name == expected_zip)
         .cloned()
-        .ok_or_else(|| {
-            format!(
-                "版本 {} 缺少可攜版資產 '{}'",
-                latest.tag_name, expected_zip
-            )
-        })?;
+        .ok_or_else(|| format!("版本 {} 缺少可攜版資產 '{}'", latest.tag_name, expected_zip))?;
 
     // 精確匹配校驗檔（強制）
     let checksum_asset = latest
@@ -372,16 +369,33 @@ pub fn download_portable_zip(
     Ok(buf.to_vec())
 }
 
-/// 從 zip bytes 中解壓縮出新 exe。
-/// 驗證：單一 FrameAnchor.exe、無路徑遍歷、內含可攜版標記檔。
-/// 回傳 (暫存 exe 路徑, 暫存標記檔路徑)。
-pub fn extract_portable_exe(zip_data: &[u8]) -> Result<(PathBuf, PathBuf), String> {
+/// 可攜版 ZIP 內基準測試資源的目錄前綴
+const RESOURCE_PREFIX: &str = "resources/benchmark/";
+
+/// 可攜版 ZIP 內 `resources/benchmark/` 必須完整包含的資源檔（缺一不可）。
+/// 抽驗與 helper 交換資源目錄時都以這份清單為準。
+pub const REQUIRED_RESOURCE_FILES: [&str; 6] = [
+    "PresentMon-2.5.1-x64.exe",
+    "lava-triangle.exe",
+    "d3d9-workload.exe",
+    "LICENSE-PresentMon.txt",
+    "LICENSE-liblava.txt",
+    "SHA256SUMS",
+];
+
+/// 從 zip bytes 解壓縮出新 exe、標記檔與完整基準測試資源。
+/// 驗證：單一 FrameAnchor.exe、根層級標記檔、`resources/benchmark/` 內
+/// 六個必要資源檔各出現一次。拒絕：路徑遍歷/反斜線、缺少任何必要資源、
+/// 重複資源、以目錄偽裝成資源檔、資源巢狀路徑或未預期的額外檔名。
+/// 回傳 (暫存 exe 路徑, 暫存標記檔路徑, 暫存資源目錄路徑)。
+pub fn extract_portable_exe(zip_data: &[u8]) -> Result<(PathBuf, PathBuf, PathBuf), String> {
     let cursor = std::io::Cursor::new(zip_data);
-    let mut archive =
-        zip::ZipArchive::new(cursor).map_err(|e| format!("無法讀取 ZIP: {e}"))?;
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("無法讀取 ZIP: {e}"))?;
 
     let mut exe_indices: Vec<usize> = Vec::new();
     let mut marker_found = false;
+    // 每個必要資源檔出現的 ZIP 項目索引（空 = 未出現；>1 = 重複）
+    let mut required_seen: Vec<Vec<usize>> = vec![Vec::new(); REQUIRED_RESOURCE_FILES.len()];
 
     for i in 0..archive.len() {
         let entry = archive
@@ -389,21 +403,39 @@ pub fn extract_portable_exe(zip_data: &[u8]) -> Result<(PathBuf, PathBuf), Strin
             .map_err(|e| format!("讀取 ZIP 項目 {i} 失敗: {e}"))?;
         let name = entry.name();
 
-        // 路徑遍歷檢查
+        // 路徑遍歷檢查（檔名或目錄名內含 .. 或反斜線一律拒絕）
         if name.contains("..") || name.contains('\\') {
             return Err(format!("ZIP 項目 '{name}' 包含不安全的路径元件"));
         }
 
-        // 只接受根層級檔案（無目錄前綴）
         let basename = Path::new(name)
             .file_name()
             .and_then(|s| s.to_str())
             .unwrap_or(name);
 
+        // 目錄項目：容器目錄（resources/、resources/benchmark/）直接略過；
+        // 以 exe 或標記檔命名的目錄屬偽裝，拒絕。
+        if entry.is_dir() {
+            if basename.eq_ignore_ascii_case("FrameAnchor.exe") || basename == PORTABLE_MARKER {
+                return Err(format!("ZIP 項目 '{name}' 是目錄，不能用來偽裝檔案"));
+            }
+            continue;
+        }
+
         if basename.eq_ignore_ascii_case("FrameAnchor.exe") {
             exe_indices.push(i);
-        } else if basename == PORTABLE_MARKER {
+        } else if name == PORTABLE_MARKER {
             marker_found = true;
+        } else if let Some(rel) = name.strip_prefix(RESOURCE_PREFIX) {
+            // 資源必須剛好落在 resources/benchmark/ 下、非目錄、無巢狀路徑，
+            // 且檔名是六個必要檔之一。
+            if rel.is_empty() || rel.contains('/') || rel.contains('\\') {
+                return Err(format!("ZIP 資源項目路徑不合法: '{name}'"));
+            }
+            match REQUIRED_RESOURCE_FILES.iter().position(|f| *f == rel) {
+                Some(pos) => required_seen[pos].push(i),
+                None => return Err(format!("ZIP 資源項目不在必要清單: '{name}'")),
+            }
         }
     }
 
@@ -419,40 +451,60 @@ pub fn extract_portable_exe(zip_data: &[u8]) -> Result<(PathBuf, PathBuf), Strin
     if !marker_found {
         return Err(format!("ZIP 中缺少可攜版標記檔 '{PORTABLE_MARKER}'"));
     }
+    for (pos, seen) in required_seen.iter().enumerate() {
+        let file = REQUIRED_RESOURCE_FILES[pos];
+        match seen.len() {
+            0 => return Err(format!("ZIP 中缺少必要資源 '{file}'")),
+            n if n > 1 => {
+                return Err(format!("ZIP 中包含 {n} 個必要資源 '{file}'（預期 1 個）"));
+            }
+            _ => {}
+        }
+    }
 
     let tmp_dir = std::env::temp_dir().join("frameanchor_update");
     std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("建立暫存目錄失敗: {e}"))?;
 
     let tmp_exe = tmp_dir.join("FrameAnchor_new.exe");
     let tmp_marker = tmp_dir.join(PORTABLE_MARKER);
+    // 暫存資源目錄：helper 把整個 benchmark 目錄搬移到 exe 旁的 resources 下
+    let tmp_resources = tmp_dir.join("resources").join("benchmark");
+    std::fs::create_dir_all(&tmp_resources).map_err(|e| format!("建立暫存資源目錄失敗: {e}"))?;
 
     // 解壓縮 exe
     {
         let mut exe_file = archive
             .by_index(exe_indices[0])
             .map_err(|e| format!("讀取 ZIP 項目失敗: {e}"))?;
-        let mut out = std::fs::File::create(&tmp_exe)
-            .map_err(|e| format!("建立暫存執行檔失敗: {e}"))?;
-        std::io::copy(&mut exe_file, &mut out)
-            .map_err(|e| format!("解壓縮執行檔失敗: {e}"))?;
+        let mut out =
+            std::fs::File::create(&tmp_exe).map_err(|e| format!("建立暫存執行檔失敗: {e}"))?;
+        std::io::copy(&mut exe_file, &mut out).map_err(|e| format!("解壓縮執行檔失敗: {e}"))?;
     }
 
     // 解壓縮標記檔
     for i in 0..archive.len() {
         if let Ok(mut f) = archive.by_index(i) {
-            if f.name() == PORTABLE_MARKER
-                || f.name().ends_with(&format!("/{PORTABLE_MARKER}"))
-            {
+            if f.name() == PORTABLE_MARKER {
                 let mut out = std::fs::File::create(&tmp_marker)
                     .map_err(|e| format!("建立暫存標記檔失敗: {e}"))?;
-                std::io::copy(&mut f, &mut out)
-                    .map_err(|e| format!("解壓縮標記檔失敗: {e}"))?;
+                std::io::copy(&mut f, &mut out).map_err(|e| format!("解壓縮標記檔失敗: {e}"))?;
                 break;
             }
         }
     }
 
-    Ok((tmp_exe, tmp_marker))
+    // 解壓縮六個必要資源檔到暫存目錄，供 helper 整目錄交換
+    for seen in &required_seen {
+        let mut f = archive
+            .by_index(seen[0])
+            .map_err(|e| format!("讀取資源項目失敗: {e}"))?;
+        let out_path = tmp_resources.join(f.name().strip_prefix(RESOURCE_PREFIX).unwrap());
+        let mut out =
+            std::fs::File::create(&out_path).map_err(|e| format!("建立暫存資源檔失敗: {e}"))?;
+        std::io::copy(&mut f, &mut out).map_err(|e| format!("解壓縮資源檔失敗: {e}"))?;
+    }
+
+    Ok((tmp_exe, tmp_marker, tmp_resources))
 }
 
 // ── 可攜版替換輔助腳本 ──
@@ -470,12 +522,14 @@ fn portable_helper_script(
     old_exe: &str,
     new_exe: &str,
     marker_path: &str,
+    new_resources: &str,
     pid: u32,
     log_path: &str,
 ) -> String {
     let old_q = ps_single_quote(old_exe);
     let new_q = ps_single_quote(new_exe);
     let marker_q = ps_single_quote(marker_path);
+    let resources_q = ps_single_quote(new_resources);
     let log_q = ps_single_quote(log_path);
 
     format!(
@@ -520,8 +574,12 @@ while ($true) {{
 Write-Log "target exited, waiting for file unlock"
 Start-Sleep -Milliseconds 500
 
-# 備份、置換、標記、清理全部在 try/catch 內，確保錯誤可診斷且可還原
+# 備份、置換、標記、資源、清理全部在 try/catch 內，確保錯誤可診斷且可還原。
+# 資源以整目錄交換（swap）而非逐檔覆寫，避免中途失敗留下混雜版本。
 $Backup = "$OldExe.bak"
+$ResourcesDir = Join-Path $OldDir "resources\benchmark"
+$ResourcesBackup = Join-Path $OldDir "resources\benchmark.bak"
+$OldResourcesExisted = Test-Path $ResourcesDir
 try {{
     # 備份舊 exe
     Write-Log "creating backup: $Backup"
@@ -541,21 +599,55 @@ try {{
         Write-Log "marker OK"
     }}
 
-    # 清理備份
-    Write-Log "removing backup"
+    # 交換基準測試資源：舊資源改名備份後，把整個新 benchmark 目錄搬入。
+    # Move-Item 不建立父目錄，舊資源不存在時先建立 resources 容器。
+    Write-Log "swapping benchmark resources"
+    if ($OldResourcesExisted) {{
+        Rename-Item -Path $ResourcesDir -NewName "benchmark.bak" -Force -ErrorAction Stop
+        Write-Log "old resources backed up to benchmark.bak"
+    }} else {{
+        New-Item -ItemType Directory -Force -Path (Split-Path $ResourcesDir -Parent) | Out-Null
+    }}
+    Move-Item -Path {resources_q} -Destination $ResourcesDir -Force -ErrorAction Stop
+    Write-Log "resources swapped"
+
+    # 成功後才清理備份（exe 備份 + benchmark.bak）
+    Write-Log "removing backups"
     Remove-Item -Path $Backup -Force -ErrorAction SilentlyContinue
-    Write-Log "backup cleaned"
+    if (Test-Path $ResourcesBackup) {{
+        Remove-Item -Path $ResourcesBackup -Recurse -Force -ErrorAction SilentlyContinue
+    }}
+    Write-Log "backups cleaned"
 }} catch {{
     Write-Log "ERROR: $($_.Exception.Message)"
-    # 備份存在 → 已發生變動，還原舊 exe 並重啟；備份不存在 → 原 exe 未動
+    # 還原 exe（備份存在 → 已發生變動）；備份不存在 → 原 exe 未動
+    $exeRestored = $false
     if (Test-Path $Backup) {{
-        Write-Log "restoring from backup"
+        Write-Log "restoring exe from backup"
         Move-Item -Path $Backup -Destination $OldExe -Force -ErrorAction SilentlyContinue
+        Write-Log "exe restored"
+        $exeRestored = $true
+    }} else {{
+        Write-Log "ERROR: failure before backup, old exe untouched"
+    }}
+    # 還原資源：
+    #   舊資源曾存在 → 移除可能半套的新資源，整目錄還原 benchmark.bak；
+    #   舊資源原本不存在 → 移除本次安裝的半套新資源（不留殘骸）。
+    if (Test-Path $ResourcesBackup) {{
+        Write-Log "restoring resources from backup"
+        Remove-Item -Path $ResourcesDir -Recurse -Force -ErrorAction SilentlyContinue
+        Rename-Item -Path $ResourcesBackup -NewName "benchmark" -Force -ErrorAction SilentlyContinue
+        Write-Log "resources restored"
+    }} elseif ((Test-Path $ResourcesDir) -and -not $OldResourcesExisted) {{
+        Write-Log "removing partially installed resources"
+        Remove-Item -Path $ResourcesDir -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Log "partial resources removed"
+    }}
+    # 重啟原 exe 只發生在 rollback 完成之後
+    if ($exeRestored) {{
         Write-Log "restarting original"
         Start-Process -FilePath $OldExe
         Write-Log "original restart initiated"
-    }} else {{
-        Write-Log "ERROR: failure before backup, old exe untouched"
     }}
     exit 1
 }}
@@ -570,6 +662,7 @@ Write-Log "restart initiated"
         old_q = old_q,
         new_q = new_q,
         marker_q = marker_q,
+        resources_q = resources_q,
         marker_name = PORTABLE_MARKER,
     )
 }
@@ -579,6 +672,7 @@ pub fn execute_portable_replacement(
     old_exe: &Path,
     new_exe: &Path,
     marker_path: &Path,
+    new_resources: &Path,
     pid: u32,
 ) -> Result<(), String> {
     let tmp_dir = std::env::temp_dir().join("frameanchor_update");
@@ -590,13 +684,14 @@ pub fn execute_portable_replacement(
         &old_exe.to_string_lossy(),
         &new_exe.to_string_lossy(),
         &marker_path.to_string_lossy(),
+        &new_resources.to_string_lossy(),
         pid,
         &log_path.to_string_lossy(),
     );
 
     // 寫入 UTF-8 BOM（EF BB BF）確保 PowerShell 5.1 正確解讀非 ASCII 字元
-    let mut file = std::fs::File::create(&script_path)
-        .map_err(|e| format!("建立更新腳本失敗: {e}"))?;
+    let mut file =
+        std::fs::File::create(&script_path).map_err(|e| format!("建立更新腳本失敗: {e}"))?;
     file.write_all(b"\xEF\xBB\xBF")
         .map_err(|e| format!("寫入更新腳本失敗: {e}"))?;
     file.write_all(script.as_bytes())
@@ -630,7 +725,10 @@ mod tests {
     #[test]
     fn current_version_parses_as_semver() {
         let v = env!("CARGO_PKG_VERSION");
-        assert!(Version::parse(v).is_ok(), "CARGO_PKG_VERSION 不是有效 semver");
+        assert!(
+            Version::parse(v).is_ok(),
+            "CARGO_PKG_VERSION 不是有效 semver"
+        );
     }
 
     #[test]
@@ -720,7 +818,12 @@ mod tests {
     fn parse_checksum_accepts_standard_format() {
         // 標準格式 "<hex>  <filename>"
         let body = "d14f5bcf9f29f5a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6  FrameAnchor_0.2.0_x64-portable.zip\n";
-        let hex = body.trim().split_whitespace().next().unwrap_or("").to_lowercase();
+        let hex = body
+            .trim()
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
         assert_eq!(hex.len(), 64);
         assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -728,14 +831,188 @@ mod tests {
     #[test]
     fn parse_checksum_accepts_hex_only() {
         let body = "d14f5bcf9f29f5a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6\n";
-        let hex = body.trim().split_whitespace().next().unwrap_or("").to_lowercase();
+        let hex = body
+            .trim()
+            .split_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_lowercase();
         assert_eq!(hex.len(), 64);
     }
 
     // ── 輔助腳本 ──
 
     fn make_script(old: &str, new: &str, marker: &str, pid: u32) -> String {
-        portable_helper_script(old, new, marker, pid, r"C:\tmp\update.log")
+        portable_helper_script(
+            old,
+            new,
+            marker,
+            r"C:\tmp\resources\benchmark",
+            pid,
+            r"C:\tmp\update.log",
+        )
+    }
+
+    /// 回歸測試：helper 腳本必須以「整目錄交換」更新基準測試資源，
+    /// 而不是逐檔複製到 live 目錄。
+    #[test]
+    fn helper_script_swaps_benchmark_resources() {
+        let script = make_script(
+            r"C:\app\FrameAnchor.exe",
+            r"C:\tmp\new.exe",
+            r"C:\tmp\.frameanchor-portable",
+            12345,
+        );
+        assert!(
+            script.contains("swapping benchmark resources"),
+            "腳本應含資源交換步驟"
+        );
+        // 舊資源改名備份（swap 的第一段）
+        assert!(
+            script.contains("Rename-Item -Path $ResourcesDir -NewName \"benchmark.bak\""),
+            "腳本應把舊資源改名為 benchmark.bak 當備份"
+        );
+        // 整目錄搬入新資源（swap 的第二段）
+        assert!(
+            script.contains(
+                "Move-Item -Path 'C:\\tmp\\resources\\benchmark' -Destination $ResourcesDir"
+            ),
+            "腳本應整目錄搬入新資源"
+        );
+        assert!(
+            script.contains(r"C:\tmp\resources\benchmark"),
+            "腳本應含暫存資源路徑"
+        );
+        // 避免在 live 目錄逐檔複製：不得對暫存資源目錄用 Copy-Item
+        assert!(
+            !script.contains("Copy-Item -Path 'C:\\tmp\\resources\\benchmark'"),
+            "不得對資源目錄逐檔 Copy-Item"
+        );
+    }
+
+    /// 回歸測試：資源更新必須可 rollback——舊資源先改名備份，
+    /// 失敗時從 benchmark.bak 整目錄還原（exe 還原與資源還原都要有）。
+    #[test]
+    fn helper_script_backs_up_and_restores_resources() {
+        let script = make_script(
+            r"C:\app\FrameAnchor.exe",
+            r"C:\tmp\new.exe",
+            r"C:\tmp\.frameanchor-portable",
+            12345,
+        );
+        assert!(
+            script.contains("benchmark.bak"),
+            "腳本應把舊資源備份為 benchmark.bak"
+        );
+        assert!(
+            script.contains("$ResourcesBackup = Join-Path $OldDir \"resources\\benchmark.bak\""),
+            "備份路徑應指向 resources\\benchmark.bak"
+        );
+        assert!(script.contains("Rename-Item"), "腳本應改名備份/還原資源");
+        assert!(
+            script.contains("restoring resources from backup"),
+            "腳本失敗路徑應還原資源"
+        );
+        // 還原順序：先移除半套新 resources，再還原 backup
+        let restore_idx = script.find("restoring resources from backup").unwrap();
+        let rm_idx = script.find("Remove-Item -Path $ResourcesDir").unwrap();
+        assert!(rm_idx > restore_idx, "應先刪半套新資源再還原備份");
+        // 成功路徑也會清理 benchmark.bak
+        assert!(
+            script.contains("Remove-Item -Path $ResourcesBackup -Recurse -Force"),
+            "成功後應清理 benchmark.bak"
+        );
+    }
+
+    /// 回歸測試：舊資源原本不存在時，catch 必須移除本次安裝的半套新資源，
+    /// 不留殘骸。
+    #[test]
+    fn helper_script_catch_removes_partial_resources_when_old_absent() {
+        let script = make_script(
+            r"C:\app\FrameAnchor.exe",
+            r"C:\tmp\new.exe",
+            r"C:\tmp\.frameanchor-portable",
+            12345,
+        );
+        assert!(
+            script.contains("removing partially installed resources"),
+            "舊資源不存在時 catch 應移除半套新資源"
+        );
+        assert!(
+            script.contains("elseif ((Test-Path $ResourcesDir) -and -not $OldResourcesExisted)"),
+            "應以 OldResourcesExisted 區分舊資源是否存在（-and 條件必須加括號）"
+        );
+        assert!(
+            !script.contains("elseif (Test-Path $ResourcesDir -and"),
+            "禁止未加括號的 Test-Path -and 條件（-and 會被當作 Test-Path 參數）"
+        );
+        assert!(
+            script.contains("partial resources removed"),
+            "移除半套新資源後應寫 log"
+        );
+    }
+
+    /// 回歸測試：重啟原 exe 只發生在資源 rollback（還原或移除）完成之後。
+    #[test]
+    fn helper_script_restarts_original_only_after_rollback() {
+        let script = make_script(
+            r"C:\app\FrameAnchor.exe",
+            r"C:\tmp\new.exe",
+            r"C:\tmp\.frameanchor-portable",
+            1,
+        );
+        let restore_pos = script
+            .find("restoring resources from backup")
+            .expect("should have restore branch");
+        let partial_pos = script
+            .find("removing partially installed resources")
+            .expect("should have removal branch");
+        let restart_pos = script
+            .find("restarting original")
+            .expect("should restart original in catch");
+        assert!(
+            partial_pos > restore_pos,
+            "移除半套分支（elseif）應在還原備份分支（if）之後"
+        );
+        assert!(
+            restart_pos > partial_pos,
+            "重啟原 exe 應在所有資源 rollback 之後"
+        );
+    }
+
+    /// 回歸測試：產生的 helper 腳本必須能通過 PowerShell parser 解析（零 parse error），
+    /// 防止不合法的運算式（例如未加括號的 -and 條件）混入產出腳本。
+    /// 使用與生產執行相同的 powershell.exe（5.1）與 UTF-8 BOM 寫入方式。
+    #[test]
+    fn helper_script_parses_clean_with_powershell_parser() {
+        let script = make_script(
+            r"C:\app\FrameAnchor.exe",
+            r"C:\tmp\new.exe",
+            r"C:\tmp\.frameanchor-portable",
+            12345,
+        );
+        let path = std::env::temp_dir().join("fa_helper_parse_check.ps1");
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&path).expect("建立暫存腳本失敗");
+            f.write_all(b"\xEF\xBB\xBF").expect("寫入 BOM 失敗");
+            f.write_all(script.as_bytes()).expect("寫入腳本失敗");
+        }
+        let escaped = path.display().to_string().replace('\'', "''");
+        let ps = format!(
+            r"$errs=$null; [void][System.Management.Automation.Language.Parser]::ParseFile('{escaped}',[ref]$null,[ref]$errs); if($errs.Count -gt 0){{ $errs | ForEach-Object {{ Write-Output ('PARSE:' + $_.Extent.StartLineNumber + ':' + $_.Message) }}; exit 1 }}"
+        );
+        let out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
+            .output()
+            .expect("無法啟動 PowerShell，請確認已安裝");
+        let _ = std::fs::remove_file(&path);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success(),
+            "產生的 helper 腳本未通過 PowerShell parser:\n{stdout}"
+        );
+        assert!(stdout.is_empty(), "PowerShell parser 回報錯誤:\n{stdout}");
     }
 
     #[test]
@@ -762,9 +1039,10 @@ mod tests {
         assert!(script.contains(".bak"));
         assert!(script.contains("Start-Process"));
         assert!(script.contains("Move-Item"));
-        // rollback 應區分備份存在/不存在兩條路徑
-        assert!(script.contains("restoring from backup"));
+        // rollback 應區分備份存在/不存在兩條路徑（exe 還原 + 資源還原）
+        assert!(script.contains("restoring exe from backup"));
         assert!(script.contains("failure before backup"));
+        assert!(script.contains("restoring resources from backup"));
     }
 
     #[test]
@@ -786,8 +1064,14 @@ mod tests {
             r"C:\tmp\.frameanchor-portable",
             1,
         );
-        assert!(script.contains("Write-Log"), "script should contain diagnostic logging");
-        assert!(script.contains("update.log"), "script should reference log file");
+        assert!(
+            script.contains("Write-Log"),
+            "script should contain diagnostic logging"
+        );
+        assert!(
+            script.contains("update.log"),
+            "script should reference log file"
+        );
     }
 
     #[test]
@@ -804,10 +1088,11 @@ mod tests {
             "backup OK",
             "replacing exe",
             "replace OK",
-            "backup cleaned",
+            "removing backups",
             "SUCCESS",
-            "restoring from backup",
+            "restoring exe from backup",
             "failure before backup",
+            "restoring resources from backup",
         ] {
             assert!(
                 script.contains(marker),
@@ -842,8 +1127,12 @@ mod tests {
         );
         // Copy-Item（備份）必須在 try { 和 } catch 之間（輸出為實際 PowerShell，非 Rust format 跳脫）
         let try_pos = script.find("try {").expect("script should have try block");
-        let catch_pos = script.find("} catch {").expect("script should have catch block");
-        let copy_pos = script.find("Copy-Item").expect("script should have Copy-Item");
+        let catch_pos = script
+            .find("} catch {")
+            .expect("script should have catch block");
+        let copy_pos = script
+            .find("Copy-Item")
+            .expect("script should have Copy-Item");
         assert!(
             try_pos < copy_pos && copy_pos < catch_pos,
             "Copy-Item (backup) should be inside try/catch, try={try_pos} copy={copy_pos} catch={catch_pos}"
@@ -859,8 +1148,9 @@ mod tests {
             1,
         );
         // catch 內應有兩條分支：備份存在時還原，不存在時記錄原 exe 未動
-        assert!(script.contains("restoring from backup"));
+        assert!(script.contains("restoring exe from backup"));
         assert!(script.contains("failure before backup"));
+        assert!(script.contains("restoring resources from backup"));
         // 確認兩條路徑都有對應動作
         assert!(script.contains("restarting original"));
         assert!(script.contains("old exe untouched"));
@@ -901,7 +1191,10 @@ mod tests {
         let script_start = script.as_bytes();
         // 確保腳本內容不以 BOM 開頭（BOM 在 execute_portable_replacement 寫入時才加上）
         // 腳本字串本身不含 BOM
-        assert!(!script_start.starts_with(bom), "script string itself should not have BOM");
+        assert!(
+            !script_start.starts_with(bom),
+            "script string itself should not have BOM"
+        );
     }
 
     #[test]
@@ -939,6 +1232,214 @@ mod tests {
         let buf: &[u8] = b"this is not a zip file at all, just some random bytes here";
         let result = extract_portable_exe(buf);
         assert!(result.is_err());
+    }
+
+    /// 建一個含 exe + 標記 + 指定資源檔（+ 選擇性重複項目）的可攜版 ZIP。
+    /// `extra` 為直接以原檔名寫入的非標準項目（用於巢狀/未預期檔名測試）。
+    fn build_zip(resources: &[&str], duplicate: Option<&str>) -> Vec<u8> {
+        build_zip_with_extra(resources, duplicate, None)
+    }
+
+    fn build_zip_with_extra(
+        resources: &[&str],
+        duplicate: Option<&str>,
+        extra: Option<&str>,
+    ) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let opts = SimpleFileOptions::default();
+            w.start_file("FrameAnchor.exe", opts).unwrap();
+            w.write_all(b"MZ fake exe bytes").unwrap();
+            w.start_file(".frameanchor-portable", opts).unwrap();
+            w.write_all(b"").unwrap();
+            for r in resources {
+                w.start_file(&format!("{RESOURCE_PREFIX}{r}"), opts)
+                    .unwrap();
+                w.write_all(format!("fake {r}").as_bytes()).unwrap();
+            }
+            if let Some(dup) = duplicate {
+                w.start_file(&format!("{RESOURCE_PREFIX}{dup}"), opts)
+                    .unwrap();
+                w.write_all(b"fake duplicate").unwrap();
+            }
+            if let Some(x) = extra {
+                w.start_file(x, opts).unwrap();
+                w.write_all(b"extra").unwrap();
+            }
+            w.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    /// 六個必要資源全部存在 → 全部被抽出。
+    /// 註：extract 輸出固定到 %TEMP%\frameanchor_update，與其它抽取測試共用；
+    /// 故意不清理，避免並行測試互相刪除彼此的暫存檔。
+    #[test]
+    fn extract_accepts_all_six_resources() {
+        let zip = build_zip(&REQUIRED_RESOURCE_FILES, None);
+        let (exe, marker, resources) = extract_portable_exe(&zip).unwrap();
+        assert!(exe.exists(), "exe 應被抽出");
+        assert!(marker.exists(), "標記應被抽出");
+        for f in REQUIRED_RESOURCE_FILES {
+            assert!(resources.join(f).exists(), "資源應被抽出: {f}");
+        }
+    }
+
+    /// 六個必要資源缺任何一個 → 拒絕且錯誤指名缺失檔（table-driven）
+    #[test]
+    fn extract_rejects_each_missing_required_resource() {
+        for missing in REQUIRED_RESOURCE_FILES {
+            let present: Vec<&str> = REQUIRED_RESOURCE_FILES
+                .iter()
+                .copied()
+                .filter(|f| *f != missing)
+                .collect();
+            let err = extract_portable_exe(&build_zip(&present, None)).unwrap_err();
+            assert!(
+                err.contains(missing),
+                "缺少 {missing} 時錯誤應指名該檔: {err}"
+            );
+            assert!(err.contains("缺少必要資源"), "err={err}");
+        }
+    }
+
+    /// 重複檔名 → 拒絕。
+    /// zip crate 在寫入與開啟兩階段都拒絕重複項目名（InvalidArchive），
+    /// 因此可攜版 ZIP 結構上不可能含重複資源名；此測試鎖住該不變式。
+    #[test]
+    fn extract_rejects_duplicate_required_resource() {
+        use zip::write::SimpleFileOptions;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        let mut w = zip::ZipWriter::new(&mut buf);
+        let opts = SimpleFileOptions::default();
+        w.start_file("resources/benchmark/SHA256SUMS", opts)
+            .unwrap();
+        let dup = w.start_file("resources/benchmark/SHA256SUMS", opts);
+        assert!(dup.is_err(), "zip 寫入階段必須拒絕重複檔名");
+    }
+
+    /// 資源下出現巢狀路徑 → 拒絕
+    #[test]
+    fn extract_rejects_nested_resource_path() {
+        let err = extract_portable_exe(&build_zip_with_extra(
+            &REQUIRED_RESOURCE_FILES,
+            None,
+            Some("resources/benchmark/sub/lava-triangle.exe"),
+        ))
+        .unwrap_err();
+        assert!(err.contains("路徑不合法"), "err={err}");
+    }
+
+    /// 六個必要檔齊全，但多出未預期的資源檔 → 拒絕
+    #[test]
+    fn extract_rejects_unexpected_resource_file() {
+        let err = extract_portable_exe(&build_zip_with_extra(
+            &REQUIRED_RESOURCE_FILES,
+            None,
+            Some("resources/benchmark/extra.dll"),
+        ))
+        .unwrap_err();
+        assert!(err.contains("不在必要清單"), "err={err}");
+        assert!(err.contains("extra.dll"), "err={err}");
+    }
+
+    /// 以目錄偽裝成必要資源檔 → 不得被當成資源接受（缺該檔即拒絕）
+    #[test]
+    fn extract_rejects_directory_masquerading_as_resource() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let opts = SimpleFileOptions::default();
+            w.start_file("FrameAnchor.exe", opts).unwrap();
+            w.write_all(b"MZ").unwrap();
+            w.start_file(".frameanchor-portable", opts).unwrap();
+            w.write_all(b"").unwrap();
+            // 目錄項目偽裝成必要資源 SHA256SUMS
+            w.add_directory("resources/benchmark/SHA256SUMS/", opts)
+                .unwrap();
+            for f in REQUIRED_RESOURCE_FILES
+                .iter()
+                .filter(|f| **f != "SHA256SUMS")
+            {
+                w.start_file(&format!("{RESOURCE_PREFIX}{f}"), opts)
+                    .unwrap();
+                w.write_all(b"x").unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let err = extract_portable_exe(&buf.into_inner()).unwrap_err();
+        assert!(err.contains("SHA256SUMS"), "err={err}");
+    }
+
+    /// 容器目錄項目（resources/、resources/benchmark/）不應造成拒絕
+    #[test]
+    fn extract_tolerates_container_directory_entries() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let opts = SimpleFileOptions::default();
+            w.start_file("FrameAnchor.exe", opts).unwrap();
+            w.write_all(b"MZ").unwrap();
+            w.start_file(".frameanchor-portable", opts).unwrap();
+            w.write_all(b"").unwrap();
+            w.add_directory("resources/", opts).unwrap();
+            w.add_directory("resources/benchmark/", opts).unwrap();
+            for f in REQUIRED_RESOURCE_FILES {
+                w.start_file(&format!("{RESOURCE_PREFIX}{f}"), opts)
+                    .unwrap();
+                w.write_all(b"x").unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let (exe, marker, resources) = extract_portable_exe(&buf.into_inner()).unwrap();
+        assert!(exe.exists() && marker.exists(), "exe/marker 應被抽出");
+        assert!(resources.join("SHA256SUMS").exists(), "資源應被抽出");
+    }
+
+    /// 路徑遍歷（.. 或反斜線）→ 拒絕
+    #[test]
+    fn extract_rejects_traversal_and_backslash() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let opts = SimpleFileOptions::default();
+            // ..\ 起頭的項目同時觸發 .. 與反斜線檢查
+            w.start_file(r"..\evil.exe", opts).unwrap();
+            w.write_all(b"evil").unwrap();
+            w.finish().unwrap();
+        }
+        let err = extract_portable_exe(&buf.into_inner()).unwrap_err();
+        assert!(err.contains("不安全的路径元件"), "err={err}");
+    }
+
+    /// 回歸測試：ZIP 含 resources/benchmark 但缺 exe → 仍拒絕
+    #[test]
+    fn extract_rejects_missing_exe_even_with_resources() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let opts = SimpleFileOptions::default();
+            w.start_file("resources/benchmark/SHA256SUMS", opts)
+                .unwrap();
+            w.write_all(b"abc").unwrap();
+            w.start_file(".frameanchor-portable", opts).unwrap();
+            w.write_all(b"").unwrap();
+            w.finish().unwrap();
+        }
+        let result = extract_portable_exe(&buf.into_inner());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("FrameAnchor.exe"));
     }
 
     #[test]

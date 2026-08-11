@@ -1,4 +1,4 @@
-﻿//! 設定持久化（PLAN §7.8）：%APPDATA%\FrameAnchor\config.json，原子寫入 + 壞檔備份。
+//! 設定持久化（PLAN §7.8）：%APPDATA%\FrameAnchor\config.json，原子寫入 + 壞檔備份。
 
 use std::path::{Path, PathBuf};
 
@@ -47,13 +47,18 @@ pub fn save(cfg: &Config) -> Result<(), String> {
 
 /// 原子寫入：先寫 tmp 再 rename（PLAN §5.1）
 pub fn save_to(path: &Path, cfg: &Config) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(cfg).map_err(|e| format!("serialize: {e}"))?;
+    atomic_write(path, &text)
+}
+
+/// 原子寫入文字檔（tmp + rename）。Windows 上 rename 不覆蓋已存在目標，先刪再改名。
+/// config、基準測試 session.json、還原日誌共用同一套防壞檔寫法。
+pub fn atomic_write(path: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
     }
     let tmp = path.with_extension("json.tmp");
-    let text = serde_json::to_string_pretty(cfg).map_err(|e| format!("serialize: {e}"))?;
     std::fs::write(&tmp, text).map_err(|e| format!("write tmp: {e}"))?;
-    // Windows 上 rename 不覆蓋已存在的目標，先刪再改名
     if path.exists() {
         std::fs::remove_file(path).map_err(|e| format!("remove old: {e}"))?;
     }
@@ -75,7 +80,8 @@ mod tests {
         let path = temp_path("roundtrip.json");
         let mut cfg = Config::default();
         cfg.settings.poll_interval_ms = 2000;
-        cfg.rules.push(Rule::new(r"C:\Games\game.exe".into(), "Game".into()));
+        cfg.rules
+            .push(Rule::new(r"C:\Games\game.exe".into(), "Game".into()));
 
         save_to(&path, &cfg).unwrap();
         let loaded = load_from(&path);
@@ -139,7 +145,10 @@ mod tests {
         let cfg = load_from(&path);
         assert_eq!(cfg.rules.len(), 1);
         assert_eq!(cfg.rules[0].name, "TestGame");
-        assert_eq!(cfg.rules[0].affinity.mode, crate::model::AffinityMode::Custom);
+        assert_eq!(
+            cfg.rules[0].affinity.mode,
+            crate::model::AffinityMode::Custom
+        );
         assert_eq!(cfg.rules[0].affinity.cores, vec![0, 1, 2]);
 
         // 存回後檔案不含 primaryCore

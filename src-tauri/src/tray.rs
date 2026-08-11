@@ -2,7 +2,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use tauri::menu::{CheckMenuItem, CheckMenuItemBuilder, Menu, MenuItem, MenuItemBuilder, PredefinedMenuItem};
+use tauri::menu::{
+    CheckMenuItem, CheckMenuItemBuilder, Menu, MenuItem, MenuItemBuilder, PredefinedMenuItem,
+};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Wry};
 
@@ -76,9 +78,12 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 fn build_menu(app: &AppHandle, lang: &str, applied_count: usize) -> tauri::Result<Menu<Wry>> {
     let s = strings(lang);
     let show = MenuItemBuilder::with_id(ID_SHOW, s.show).build(app)?;
-    let applied = MenuItemBuilder::with_id(ID_APPLIED, s.applied.replace("{n}", &applied_count.to_string()))
-        .enabled(false)
-        .build(app)?;
+    let applied = MenuItemBuilder::with_id(
+        ID_APPLIED,
+        s.applied.replace("{n}", &applied_count.to_string()),
+    )
+    .enabled(false)
+    .build(app)?;
     let autostart = CheckMenuItemBuilder::with_id(ID_AUTOSTART, s.autostart)
         .checked(autostart::is_enabled())
         .build(app)?;
@@ -147,6 +152,11 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         }
         ID_QUIT => {
             let state = app.state::<Arc<AppState>>();
+            // 基準測試執行中：拒絕退出，讓 backend runner 完成或安全取消/還原
+            if state.benchmark.refuse_exit_if_running().is_err() {
+                log::warn!("基準測試執行中，拒絕結束 FrameAnchor");
+                return;
+            }
             state
                 .quitting
                 .store(true, std::sync::atomic::Ordering::Relaxed);

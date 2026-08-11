@@ -8,16 +8,16 @@ use windows::Win32::System::Diagnostics::ToolHelp::{
 };
 use windows::Win32::System::Kernel::PROCESSOR_NUMBER;
 use windows::Win32::System::SystemInformation::{
-    GetSystemCpuSetInformation, CpuSetInformation, SYSTEM_CPU_SET_INFORMATION,
+    CpuSetInformation, GetSystemCpuSetInformation, SYSTEM_CPU_SET_INFORMATION,
 };
 use windows::Win32::System::Threading::{
     GetPriorityClass, GetProcessAffinityMask, GetProcessTimes, OpenProcess, OpenThread,
-    QueryFullProcessImageNameW, SetPriorityClass, SetProcessAffinityMask,
+    QueryFullProcessImageNameW, SetPriorityClass, SetProcessAffinityMask, SetProcessDefaultCpuSets,
     SetThreadIdealProcessorEx, TerminateProcess, ABOVE_NORMAL_PRIORITY_CLASS,
-    BELOW_NORMAL_PRIORITY_CLASS, HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS,
-    NORMAL_PRIORITY_CLASS, PROCESS_NAME_FORMAT, PROCESS_QUERY_INFORMATION,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_SET_LIMITED_INFORMATION,
-    PROCESS_TERMINATE, PROCESS_VM_READ, THREAD_SET_INFORMATION, SetProcessDefaultCpuSets,
+    BELOW_NORMAL_PRIORITY_CLASS, HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
+    PROCESS_NAME_FORMAT, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SET_INFORMATION, PROCESS_SET_LIMITED_INFORMATION, PROCESS_TERMINATE, PROCESS_VM_READ,
+    THREAD_SET_INFORMATION,
 };
 
 use crate::error::ProcessError;
@@ -59,7 +59,11 @@ pub fn enumerate_processes() -> Vec<ProcessInfo> {
     let mut result = Vec::new();
     for_each_process(|pid, exe_name| {
         let exe_path = process_path(pid);
-        result.push(ProcessInfo { pid, exe_name, exe_path });
+        result.push(ProcessInfo {
+            pid,
+            exe_name,
+            exe_path,
+        });
     });
     result
 }
@@ -117,9 +121,13 @@ impl Drop for OwnedHandle {
 /// 開啟用於設定的 handle
 pub fn open_for_set(pid: u32) -> Result<OwnedHandle, ProcessError> {
     unsafe {
-        OpenProcess(PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION, false, pid)
-            .map(OwnedHandle)
-            .map_err(|_| ProcessError::from_last_open())
+        OpenProcess(
+            PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION,
+            false,
+            pid,
+        )
+        .map(OwnedHandle)
+        .map_err(|_| ProcessError::from_last_open())
     }
 }
 
@@ -185,7 +193,9 @@ pub fn enable_debug_privilege() {
 }
 
 pub fn set_affinity(h: HANDLE, mask: u64) -> Result<(), ProcessError> {
-    unsafe { SetProcessAffinityMask(h, mask as usize).map_err(|e| ProcessError::Win32(e.code().0 as u32)) }
+    unsafe {
+        SetProcessAffinityMask(h, mask as usize).map_err(|e| ProcessError::Win32(e.code().0 as u32))
+    }
 }
 
 /// 清理孤兒 WebView2 子程序。host（frameanchor.exe）被強殺時，
@@ -194,11 +204,11 @@ pub fn set_affinity(h: HANDLE, mask: u64) -> Result<(), ProcessError> {
 /// 啟動時呼叫：若沒有其他 live frameanchor 實例，終止所有
 /// user-data-dir 指向本 app 的 webview 子程序。
 pub fn kill_orphan_webviews() {
+    use windows::Wdk::System::Threading::{NtQueryInformationProcess, PROCESSINFOCLASS};
     use windows::Win32::System::Diagnostics::Debug::ReadProcessMemory;
     use windows::Win32::System::Threading::{
         PEB, PROCESS_BASIC_INFORMATION, RTL_USER_PROCESS_PARAMETERS,
     };
-    use windows::Wdk::System::Threading::{NtQueryInformationProcess, PROCESSINFOCLASS};
 
     let our_dir = format!(
         "{}\\com.frameanchor.app\\EBWebView",
@@ -303,9 +313,11 @@ pub fn kill_orphan_webviews() {
             })();
             if let Some(cmd) = cmdline {
                 if cmd.contains(&our_dir) {
-                    if let Ok(h) =
-                        OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-                    {
+                    if let Ok(h) = OpenProcess(
+                        PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                        false,
+                        pid,
+                    ) {
                         let _ = TerminateProcess(h, 0);
                         let _ = CloseHandle(h);
                     }
@@ -371,13 +383,7 @@ fn enumerate_cpu_sets() -> Option<CpuSetMap> {
     unsafe {
         let mut needed: u32 = 0;
         // 第一次呼叫取得所需 buffer 長度（process=NULL=system-wide）
-        let _ = GetSystemCpuSetInformation(
-            None,
-            0,
-            &mut needed,
-            None,
-            Some(0),
-        );
+        let _ = GetSystemCpuSetInformation(None, 0, &mut needed, None, Some(0));
         if needed == 0 {
             return None;
         }
@@ -431,15 +437,12 @@ pub fn set_cpu_sets(pid: u32, cores: &[u32]) -> Result<(), ProcessError> {
         OpenProcess(PROCESS_SET_LIMITED_INFORMATION, false, pid)
             .map_err(|_| ProcessError::from_last_open())?
     };
-    let result =
-        unsafe { SetProcessDefaultCpuSets(h, Some(&set_ids)) };
+    let result = unsafe { SetProcessDefaultCpuSets(h, Some(&set_ids)) };
     let _ = unsafe { CloseHandle(h) };
     if result.as_bool() {
         Ok(())
     } else {
-        let code = std::io::Error::last_os_error()
-            .raw_os_error()
-            .unwrap_or(0) as u32;
+        let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
         Err(ProcessError::Win32(code))
     }
 }
@@ -537,7 +540,10 @@ mod tests {
 
     #[test]
     fn normalize_strips_extended_prefix() {
-        assert_eq!(normalize_path(r"\\?\C:\Games\Game.exe"), r"c:\games\game.exe");
+        assert_eq!(
+            normalize_path(r"\\?\C:\Games\Game.exe"),
+            r"c:\games\game.exe"
+        );
     }
 
     #[test]
@@ -569,6 +575,10 @@ mod tests {
 
     #[test]
     fn blacklist_allows_game() {
-        assert!(!is_blacklisted(1234, "game.exe", Some(r"C:\Games\game.exe")));
+        assert!(!is_blacklisted(
+            1234,
+            "game.exe",
+            Some(r"C:\Games\game.exe")
+        ));
     }
 }

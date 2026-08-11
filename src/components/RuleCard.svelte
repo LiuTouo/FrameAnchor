@@ -1,6 +1,12 @@
 <script lang="ts">
   import { t } from 'svelte-i18n';
   import AffinityPicker from './AffinityPicker.svelte';
+  import * as ipc from '../lib/ipc';
+  import {
+    maskToLp,
+    nextAdjustedAfterManualChange,
+    recommendationSourceTime,
+  } from '../lib/affinity';
   import type {
     AffinitySpec,
     CpuPriority,
@@ -8,6 +14,7 @@
     MemPriority,
     MatchBy,
     Rule,
+    SessionSummary,
     Topology,
   } from '../lib/types';
 
@@ -18,6 +25,8 @@
     isNew,
     onApply,
     onDelete,
+    importableSessions = [],
+    currentCpuFingerprint = '',
   }: {
     rule: Rule;
     topology: Topology;
@@ -25,6 +34,8 @@
     isNew: boolean;
     onApply: (rule: Rule) => void;
     onDelete: (id: string) => void;
+    importableSessions?: SessionSummary[];
+    currentCpuFingerprint?: string;
   } = $props();
 
   // 深拷貝：Rule 是純 JSON 資料，用 JSON round-trip。
@@ -46,6 +57,101 @@
 
   let advancedOpen = $state(false);
   let settingsOpen = $state(false);
+
+  // ── 基準測試推薦匯入 ──
+  let importOpen = $state(false);
+  let importSel = $state<string>('');
+  let importBusy = $state(false);
+  let importPreview = $state<{
+    recommended: number[];
+    session: SessionSummary;
+    policyLp: number | null;
+  } | null>(null);
+
+  // 預設選取最新可匯入 session（list 依 startedAt 降冪）
+  $effect(() => {
+    if (importableSessions.length && !importSel) {
+      const first = importableSessions[0];
+      importSel = first.id;
+      void loadImportPreview(first);
+    }
+  });
+
+  async function loadImportPreview(s: SessionSummary) {
+    if (s.bestLp == null) return;
+    importBusy = true;
+    try {
+      const recommended = await ipc.computeRecommendedCores(s.bestLp, s.severeLps ?? []);
+      const policy = await ipc.getGpuAffinityPolicy(s.gpuInstanceId).catch(() => null);
+      const policyLp = policy ? maskToLp(policy.assignmentSetOverride?.bytes ?? null) : null;
+      importPreview = { recommended, session: s, policyLp };
+    } catch {
+      importPreview = null;
+    } finally {
+      importBusy = false;
+    }
+  }
+
+  function onImportSelect(id: string) {
+    importSel = id;
+    const s = importableSessions.find((x) => x.id === id);
+    if (s) void loadImportPreview(s);
+  }
+
+  const importNoCores = $derived(importPreview ? importPreview.recommended.length === 0 : false);
+  const coreDiff = $derived.by(() => {
+    const p = importPreview;
+    if (!p) return null;
+    return {
+      add: p.recommended.filter((i) => !draft.affinity.cores.includes(i)),
+      remove: draft.affinity.cores.filter((i) => !p.recommended.includes(i)),
+    };
+  });
+
+  function doImport() {
+    const p = importPreview;
+    if (!p || p.recommended.length === 0) return;
+    draft.affinity = { mode: 'Custom', cores: p.recommended };
+    draft.recommendation = {
+      sessionId: p.session.id,
+      // 來源時間：session.finishedAt ?? session.startedAt，非匯入當下
+      generatedAt: recommendationSourceTime(p.session),
+      cpuFingerprint: p.session.cpuFingerprint,
+      gpuInstanceId: p.session.gpuInstanceId,
+      bestLp: p.session.bestLp,
+      severeLps: p.session.severeLps ?? [],
+      recommendedCores: p.recommended,
+      adjusted: false, // 只有重匯入會重置
+    };
+    importOpen = false;
+  }
+
+  // 使用者手動改親和性 → adjusted 維持 true 且不清除：
+  // 即使之後手動回到精確的推薦 Custom 集合也一樣。只有重匯入（doImport 設 false）重置。
+  function onAffinityChange(spec: AffinitySpec) {
+    draft.affinity = spec;
+    if (draft.recommendation && !draft.recommendation.adjusted) {
+      draft.recommendation = {
+        ...draft.recommendation,
+        adjusted: nextAdjustedAfterManualChange(draft.recommendation.adjusted),
+      };
+    }
+  }
+
+  // 過時硬體警告：目前 CPU 指紋與儲存推薦不符 → 保留資料但提示
+  const staleHardware = $derived(
+    !!draft.recommendation?.cpuFingerprint &&
+      !!currentCpuFingerprint &&
+      draft.recommendation.cpuFingerprint !== currentCpuFingerprint,
+  );
+
+  function policyStatusText(p: { policyLp: number | null; session: SessionSummary }): string {
+    if (p.policyLp == null) return '—';
+    if (p.policyLp === p.session.bestLp) return $t('ruleImport.policyMatch') as string;
+    return $t('ruleImport.policyMismatch', {
+      values: { current: p.policyLp, best: p.session.bestLp },
+    }) as string;
+  }
 
   const PRIORITIES: CpuPriority[] = ['Idle', 'BelowNormal', 'Normal', 'AboveNormal', 'High'];
   const PRIO_I18N: Record<CpuPriority, string> = {
@@ -98,15 +204,84 @@
   {#if settingsOpen}
   <div class="section">
     <div class="label">{$t('rules.affinity')}</div>
+    {#if staleHardware}
+      <div class="hint stale-warn">{$t('ruleImport.staleHardware')}</div>
+    {/if}
     <AffinityPicker
       {topology}
       spec={draft.affinity}
-      onchange={(spec: AffinitySpec) => {
-        draft.affinity = spec;
-      }}
+      recommendation={draft.recommendation}
+      onchange={onAffinityChange}
     />
     {#if draft.affinity.mode === 'Prefer'}
       <div class="hint">{$t('rules.preferHint')}</div>
+    {/if}
+  </div>
+
+  <div class="section">
+    <button class="adv-toggle" onclick={() => (importOpen = !importOpen)}>
+      {importOpen ? '▾' : '▸'} {$t('ruleImport.open')}
+    </button>
+    {#if importOpen}
+      {#if importableSessions.length === 0}
+        <div class="hint">{$t('ruleImport.emptyList')}</div>
+      {:else}
+        <div class="import-row">
+          <label class="grow">
+            <span class="label-inline">{$t('ruleImport.source')}</span>
+            <select value={importSel} onchange={(e) => onImportSelect(e.currentTarget.value)}>
+              {#each importableSessions as s (s.id)}
+                <option value={s.id}>
+                  {s.startedAt.replace('T', ' ').slice(0, 16)} — {s.gpuName || s.gpuInstanceId} —
+                  {s.bestLp ?? '—'}
+                </option>
+              {/each}
+            </select>
+          </label>
+        </div>
+        {#if importPreview}
+          <dl class="import-meta">
+            <div>
+              <dt>{$t('ruleImport.date')}</dt>
+              <dd>{importPreview.session.startedAt.replace('T', ' ').slice(0, 19)}</dd>
+            </div>
+            <div>
+              <dt>{$t('ruleImport.gpu')}</dt>
+              <dd>{importPreview.session.gpuName || importPreview.session.gpuInstanceId}</dd>
+            </div>
+            <div>
+              <dt>{$t('ruleImport.best')}</dt>
+              <dd>{importPreview.session.bestLp ?? '—'}</dd>
+            </div>
+            <div>
+              <dt>{$t('gpuTest.policyCurrent')}</dt>
+              <dd>{policyStatusText(importPreview)}</dd>
+            </div>
+            {#if coreDiff}
+              <div>
+                <dt>{$t('gpuTest.colLp')}</dt>
+                <dd>
+                  {$t('ruleImport.coreDiff', {
+                    values: { add: coreDiff.add.join(', ') || '0', remove: coreDiff.remove.join(', ') || '0' },
+                  })}
+                </dd>
+              </div>
+            {/if}
+          </dl>
+          {#if importNoCores}
+            <div class="hint no-cores">{$t('ruleImport.noCores')}</div>
+          {/if}
+          <div class="toolbar">
+            <button
+              class="primary"
+              disabled={importBusy || importNoCores}
+              onclick={doImport}
+            >
+              {$t('ruleImport.import')}
+            </button>
+          </div>
+        {/if}
+      {/if}
     {/if}
   </div>
 
@@ -297,5 +472,50 @@
   }
   select {
     min-width: 130px;
+  }
+  .stale-warn {
+    color: #f0a33c;
+    margin-bottom: 6px;
+  }
+  .import-row {
+    display: flex;
+    align-items: flex-end;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .label-inline {
+    display: block;
+    color: var(--muted);
+    font-size: 11px;
+    margin-bottom: 3px;
+  }
+  .import-row select {
+    width: 100%;
+  }
+  .import-meta {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 4px 14px;
+    margin: 0 0 8px;
+  }
+  .import-meta div {
+    display: flex;
+    gap: 8px;
+  }
+  .import-meta dt {
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .import-meta dd {
+    margin: 0;
+  }
+  .no-cores {
+    color: var(--danger);
+    margin-bottom: 8px;
+  }
+  .toolbar {
+    display: flex;
+    gap: 8px;
+    margin-top: 6px;
   }
 </style>

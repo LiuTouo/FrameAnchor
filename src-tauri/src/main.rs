@@ -5,9 +5,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod autostart;
+mod benchmark;
 mod commands;
 mod config;
 mod error;
+mod gpu;
 mod model;
 mod priority;
 mod process;
@@ -39,6 +41,8 @@ pub struct AppState {
     pub usage_tx: tokio::sync::watch::Sender<bool>,
     /// tray「結束」設定，用來繞過 closeToTray 攔截
     pub quitting: AtomicBool,
+    /// 基準測試管理者（GPU 控制、還原、狀態）
+    pub benchmark: Arc<benchmark::manager::BenchmarkManager>,
 }
 
 fn main() {
@@ -56,7 +60,10 @@ fn main() {
     let topology = match topology::enumerate_topology() {
         Ok(t) => {
             if t.total_lp > 64 {
-                log::warn!("偵測到 {} 個邏輯處理器：v1 只支援 group 0（前 64 個）", t.total_lp);
+                log::warn!(
+                    "偵測到 {} 個邏輯處理器：v1 只支援 group 0（前 64 個）",
+                    t.total_lp
+                );
             }
             log::info!(
                 "拓撲：{} LP / {} 核心, SMT={}, Hybrid={}",
@@ -75,6 +82,12 @@ fn main() {
 
     let cfg = config::load();
     let (usage_tx, _) = tokio::sync::watch::channel(false);
+
+    // 基準測試管理者：GPU 控制一律透過注入的 backend（啟動時嘗試 pending 還原）
+    let backend: Arc<dyn gpu::GpuBackend> = Arc::new(gpu::RealGpuBackend::new());
+    let benchmark = Arc::new(benchmark::manager::BenchmarkManager::new(backend));
+    benchmark.attempt_startup_recovery();
+
     let state = Arc::new(AppState {
         config: RwLock::new(cfg),
         topology,
@@ -82,6 +95,7 @@ fn main() {
         handles: RwLock::new(HashMap::new()),
         usage_tx,
         quitting: AtomicBool::new(false),
+        benchmark,
     });
 
     tauri::Builder::default()
@@ -132,6 +146,21 @@ fn main() {
             commands::get_update_info,
             commands::check_portable_update,
             commands::perform_portable_update,
+            benchmark::ipc::enumerate_gpus,
+            benchmark::ipc::get_benchmark_state,
+            benchmark::ipc::list_benchmark_sessions,
+            benchmark::ipc::get_benchmark_session,
+            benchmark::ipc::delete_benchmark_session,
+            benchmark::ipc::get_benchmark_storage_info,
+            benchmark::ipc::get_gpu_affinity_policy,
+            benchmark::ipc::apply_best_gpu_affinity,
+            benchmark::ipc::get_benchmark_apply_status,
+            benchmark::ipc::list_importable_sessions,
+            benchmark::ipc::compute_recommended_cores,
+            benchmark::ipc::get_current_cpu_fingerprint,
+            benchmark::ipc::restore_previous_gpu_affinity,
+            benchmark::ipc::start_gpu_benchmark,
+            benchmark::ipc::cancel_benchmark,
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {

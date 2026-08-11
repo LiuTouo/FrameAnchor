@@ -1,14 +1,17 @@
 {
   "name": "frameanchor",
   "private": true,
-  "version": "0.1.3",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "tauri": "tauri",
-    "gen-icons": "node scripts/gen-icons.mjs"
+    "gen-icons": "node scripts/gen-icons.mjs",
+    "build:benchmark-assets": "node scripts/build-d3d9-workload.mjs",
+    "verify:benchmark-assets": "node scripts/verify-benchmark-assets.mjs",
+    "fetch:benchmark-assets": "node scripts/fetch-benchmark-assets.mjs"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^5.0.0",

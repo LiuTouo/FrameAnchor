@@ -1,6 +1,8 @@
 node_modules/
 dist/
 src-tauri/target/
+src-tauri/d3d9-workload/target/
+src-tauri/resources/benchmark/d3d9-workload.exe
 .claude/
 *.log
 tmp_*.py

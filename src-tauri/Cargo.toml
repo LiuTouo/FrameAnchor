@@ -1,6 +1,6 @@
 [package]
 name = "frameanchor"
-version = "0.1.3"
+version = "0.2.0"
 description = "FrameAnchor - CPU scheduling tool for competitive gaming"
 edition = "2021"
 rust-version = "1.80"
@@ -44,6 +44,8 @@ features = [
     "Win32_Storage_FileSystem",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_System_Registry",
 ]
 
 [profile.release]

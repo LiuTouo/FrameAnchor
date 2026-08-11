@@ -1,4 +1,4 @@
-﻿//! 規則引擎（PLAN §7.6）：高頻 discovery 搶先開 handle → 比對規則 → 套用 → 維護 applied 狀態表。
+//! 規則引擎（PLAN §7.6）：高頻 discovery 搶先開 handle → 比對規則 → 套用 → 維護 applied 狀態表。
 //! 反作弊對策：EAC 等用 ObRegisterCallbacks 剝奪「新開啟」handle 的權限，但保護生效前
 //! 已持有的 handle 不受影響 — 因此 discovery 以 100ms 掃描，在遊戲啟動後立刻開 handle
 //! 並快取至進程結束；之後所有套用/重試都走快取 handle。
@@ -15,7 +15,7 @@ use windows::Win32::Foundation::HANDLE;
 use crate::error::{codes, ProcessError};
 use crate::model::{AffinityMode, MatchBy, Rule};
 use crate::topology::{self, Topology};
-use crate::{commands, process, priority, AppState};
+use crate::{commands, priority, process, AppState};
 
 /// 已套用進程（PLAN §5.4）
 #[derive(Serialize, Clone, Debug)]
@@ -27,7 +27,7 @@ pub struct AppliedProcess {
     pub rule_name: String,
     pub affinity_ok: bool,
     pub priority_ok: bool,
-    pub io_ok: Option<bool>,  // None = 規則未設定此項
+    pub io_ok: Option<bool>, // None = 規則未設定此項
     pub mem_ok: Option<bool>,
     pub error: Option<String>, // 錯誤代碼（前端查 i18n）
     pub applied_at: String,    // RFC3339
@@ -68,7 +68,10 @@ enum AffinityResult {
     /// 硬綁定成功（SetProcessAffinityMask），攜帶實際設定的核心清單
     HardOk { cores: Vec<u32> },
     /// 軟綁定成功（SetThreadIdealProcessorEx，逐 thread）
-    SoftOk { cores: Vec<u32>, thread_count: usize },
+    SoftOk {
+        cores: Vec<u32>,
+        thread_count: usize,
+    },
     /// CPU Sets 成功（SetProcessDefaultCpuSets）
     CpuSetsOk { cores: Vec<u32> },
     /// 三層全部失敗
@@ -164,11 +167,13 @@ fn ensure_handle(state: &Arc<AppState>, pid: u32) -> Result<HANDLE, ProcessError
     let oh = process::open_for_set(pid)?;
     let created = process::process_creation_time(oh.0).unwrap_or(0);
     let h = oh.0;
-    state
-        .handles
-        .write()
-        .unwrap()
-        .insert(pid, CachedHandle { handle: oh, created });
+    state.handles.write().unwrap().insert(
+        pid,
+        CachedHandle {
+            handle: oh,
+            created,
+        },
+    );
     Ok(h)
 }
 
@@ -235,7 +240,15 @@ fn discovery_pass(app: &AppHandle, state: &Arc<AppState>) {
         };
         log::info!("套用規則「{}」→ {} (PID {})", rule.name, exe_name, pid);
         let handle = ensure_handle(state, pid);
-        let entry = apply_and_build(pid, &exe_name, &rule, &state.topology, Instant::now(), interval, handle);
+        let entry = apply_and_build(
+            pid,
+            &exe_name,
+            &rule,
+            &state.topology,
+            Instant::now(),
+            interval,
+            handle,
+        );
         if let Some(err) = &entry.info.error {
             log::warn!("套用失敗 {} (PID {}): {}", exe_name, pid, err);
         }
@@ -306,11 +319,7 @@ fn tick(app: &AppHandle, state: &Arc<AppState>, interval_ms: u64) {
         // 3) 規則被刪除或停用 → 移除對應 entry
         let orphaned: Vec<u32> = applied
             .iter()
-            .filter(|(_, e)| {
-                !rules
-                    .iter()
-                    .any(|r| r.id == e.info.rule_id && r.enabled)
-            })
+            .filter(|(_, e)| !rules.iter().any(|r| r.id == e.info.rule_id && r.enabled))
             .map(|(pid, _)| *pid)
             .collect();
         for pid in orphaned {
@@ -332,7 +341,15 @@ fn tick(app: &AppHandle, state: &Arc<AppState>, interval_ms: u64) {
             };
             log::info!("套用規則「{}」→ {} (PID {})", rule.name, p.exe_name, p.pid);
             let handle = ensure_handle(state, p.pid);
-            let entry = apply_and_build(p.pid, &p.exe_name, &rule, &state.topology, now, interval_ms, handle);
+            let entry = apply_and_build(
+                p.pid,
+                &p.exe_name,
+                &rule,
+                &state.topology,
+                now,
+                interval_ms,
+                handle,
+            );
             if let Some(err) = &entry.info.error {
                 log::warn!("套用失敗 {} (PID {}): {}", p.exe_name, p.pid, err);
             }
@@ -359,7 +376,15 @@ fn tick(app: &AppHandle, state: &Arc<AppState>, interval_ms: u64) {
             if let Some(rule) = rule {
                 log::info!("重試套用「{}」→ PID {}", rule.name, pid);
                 let handle = ensure_handle(state, pid);
-                let mut entry = apply_and_build(pid, &exe_name, &rule, &state.topology, now, interval_ms, handle);
+                let mut entry = apply_and_build(
+                    pid,
+                    &exe_name,
+                    &rule,
+                    &state.topology,
+                    now,
+                    interval_ms,
+                    handle,
+                );
                 if entry.info.error.is_some() && !entry.access_denied {
                     let prev = applied.get(&pid).map(|e| e.retries_left).unwrap_or(1);
                     entry.retries_left = prev.saturating_sub(1);
@@ -417,7 +442,10 @@ fn apply_and_build(
             info.affinity_ok = true;
             info.current_cores = cores;
         }
-        AffinityResult::SoftOk { cores, thread_count } => {
+        AffinityResult::SoftOk {
+            cores,
+            thread_count,
+        } => {
             info.affinity_ok = true;
             info.soft_affinity = true;
             info.current_cores = cores;

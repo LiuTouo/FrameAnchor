@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { t } from 'svelte-i18n';
   import type { LogicalProcessor } from '../lib/types';
 
   let {
@@ -8,6 +9,9 @@
     showHt = true,
     interactive = false,
     checked = false,
+    recBest = false,
+    recSevere = false,
+    recExcluded = false,
     ontoggle,
   }: {
     lp: LogicalProcessor;
@@ -16,6 +20,9 @@
     showHt?: boolean;
     interactive?: boolean;
     checked?: boolean;
+    recBest?: boolean;
+    recSevere?: boolean;
+    recExcluded?: boolean;
     ontoggle?: (index: number) => void;
   } = $props();
 
@@ -26,11 +33,22 @@
 </script>
 
 {#if interactive}
-  <label class="cell interactive" class:covered class:checked>
+  <label
+    class="cell interactive"
+    class:covered
+    class:checked
+    class:rec-excluded={recExcluded}
+  >
     <input type="checkbox" {checked} onchange={() => ontoggle?.(lp.index)} />
     <span class="idx">LP{lp.index}</span>
+    {#if recBest}
+      <span class="badge rec-best">{$t('gpuTest.bestTag')}</span>
+    {/if}
     {#if showHt && lp.isSmtSibling}
       <span class="badge ht">HT</span>
+    {/if}
+    {#if recExcluded}
+      <span class="badge rec-x" title={$t('ruleImport.excludedLabel')}>✕</span>
     {/if}
   </label>
 {:else}
@@ -80,6 +98,18 @@
   .cell.interactive.checked {
     border-color: var(--accent);
     background: rgba(79, 140, 255, 0.12);
+  }
+  .cell.interactive.rec-excluded {
+    opacity: 0.45;
+    border-style: dashed;
+  }
+  .badge.rec-best {
+    background: var(--accent);
+    color: #fff;
+  }
+  .badge.rec-x {
+    background: var(--bg);
+    color: var(--muted);
   }
   .row {
     display: flex;

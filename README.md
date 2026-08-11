@@ -24,6 +24,7 @@ FrameAnchor 是一款 Windows 桌面工具，會持續監控指定的遊戲或�
 - [安裝](#安裝)
 - [使用方式](#使用方式)
 - [設定與資料](#設定與資料)
+- [GPU 基準測試（Beta）](#gpu-基準測試beta)
 - [開發與建置](#開發與建置)
 - [發布流程](#發布流程)
 - [技術架構](#技術架構)
@@ -42,6 +43,7 @@ FrameAnchor 是一款 Windows 桌面工具，會持續監控指定的遊戲或�
 - **系統匣常駐**：支援關閉至系統匣、啟動時最小化與 single-instance。
 - **開機啟動**：透過 Windows Task Scheduler 以最高權限在使用者登入時啟動。
 - **雙語介面**：支援繁體中文與英文。
+- **GPU 基準測試（Beta）**：對選定 GPU 逐邏輯處理器測試「驅動中斷親和性」的效能，找出最適合處理 GPU 中斷的核心，並可一鍵匯入為規則推薦。
 
 ## Affinity 模式
 
@@ -157,6 +159,56 @@ FrameAnchor 結束後，不會再監控新程序；已經套用至執行中程�
 - 背景維護間隔：1 秒
 - 進階優先級選項：隱藏
 
+## GPU 基準測試（Beta）
+
+FrameAnchor 內建 GPU 基準測試，目的是找出**最適合處理指定顯示卡驅動中斷**的邏輯處理器（LP）。它會逐 LP 切換 GPU 驅動的「中斷親和性」（Interrupt Affinity），用量測工具收集 frame-time，統計後標出最佳核心與表現嚴重低落的核心，並可把推薦核心集合一鍵匯入為規則草稿。
+
+### 與一般 CPU／GPU 基準測試的區別
+
+- **不是圖形基準測試**：不比較畫質、場景或不同顯示卡的 FPS；畫面只是固定的黑白交替、無 vsync、不設上限的 workload。
+- **不是「哪顆核心跑遊戲最快」**：測的是「哪顆核心處理 GPU 中斷時，frame-time 最穩定／最高」。
+- 透過每次測試將 GPU 驅動中斷親和性鎖定到單一 LP，量測對該核心的影響；統計包含 Avg／Max／Min／STDEV 與 1%／0.1%／0.01%／0.005% time-weighted lows。
+
+### 預期耗時
+
+每次測試核心的耗時約為：
+
+```text
+取樣秒數 + 暖機秒數 + 啟動等待（5 秒）+ 驅動重啟與穩定（約 14 秒）+ 緩衝
+```
+
+總耗時約為 `核心數 × 輪數 × 上述每核心耗時`。例如 16 核心、取樣 30 秒、1 輪，約需 13–15 分鐘。開始前 UI 會顯示預估分鐘數。
+
+### 風險警告
+
+測試會對選定顯示卡反覆**停用／啟用驅動**（disable/enable），可能導致：
+
+- 畫面黑屏數秒
+- 顯示器暫時斷訊、解析度重置
+- 其他使用同一 GPU 的工作（含瀏覽器硬體加速）暫停
+
+**開始後請勿操作電腦**，直到測試完成或按下取消。測試本身使用可還原的 crash-safe 日誌；即使中途當機，下次啟動也會自動還原測試前策略。
+
+### 資料與歷史
+
+- 測試記錄儲存於 `%APPDATA%\FrameAnchor\benchmarks\<session-uuid>\`，內含 `session.json`、每輪每核心的 `round-<輪>-lp-<核心>.csv`。
+- 歷史列表顯示每筆記錄的日期、GPU、API、狀態、最佳核心與磁碟大小；可檢視詳情或刪除（刪除需確認）。
+- 執行中的還原日誌為 `%APPDATA%\FrameAnchor\benchmark-recovery.json`；套用後的單層還原記錄為 `gpu-restore.json`。
+- 歷史預設不會自動刪除。
+
+### 套用與還原語意
+
+- 測試本身**不會自動套用**任何策略——每次測試結束都會把 GPU 中斷親和性還原到測試前狀態。
+- 完成後可在結果頁或歷史中，明確按下「套用最佳核心到 GPU」，才會把中斷親和性鎖定到該最佳 LP。
+- 「還原先前設定」會回到**最近一次成功套用之前**的策略（單層還原記錄）。
+- 套用／還原都需確認，且會再次短暫重啟 GPU 驅動（可能閃屏）。
+
+### 相容性限制
+
+- 每筆完成記錄會保存當時的 **CPU 指紋**（CPU 身分＋拓撲）與 **GPU 穩定 PnP instance ID**。
+- 只有「目前 CPU 指紋一致、且該 GPU 仍存在」的完成記錄才可套用或匯入；不相容的歷史仍可檢視，但套用／匯入會被停用並說明原因。
+- 若目前 CPU 硬體與儲存於規則上的推薦指紋不符，會顯示過時硬體警告，但資料保留。
+
 ## 開發與建置
 
 安裝相依套件：
@@ -186,7 +238,18 @@ npm run tauri build
 
 npm run gen-icons
 # 重新產生 src-tauri/icons/*
+
+npm run build:benchmark-assets
+# 編譯 D3D9 workload sidecar（Rust + Direct3D 9）並複製到資源目錄
+
+npm run verify:benchmark-assets
+# 驗證內建基準測試資源（PresentMon／liblava 的 SHA-256 與 D3D9 sidecar 存在）
+
+npm run fetch:benchmark-assets
+# 重新下載 PresentMon 與 liblava workload 並更新 SHA256SUMS
 ```
+
+`npm run tauri build` 會自動依序執行前端建置、D3D9 sidecar 建置與資源驗證，因此打包結果一定包含內建工具與授權聲明。
 
 Rust 檢查與測試：
 
@@ -282,3 +345,13 @@ npm run tauri signer generate -- -w src-tauri
 ## 授權
 
 本專案採用 [GNU General Public License v3.0](LICENSE)。
+
+### 第三方元件聲明
+
+GPU 基準測試功能內建並重新發布以下第三方元件（各自授權如下）：
+
+- **PresentMon 2.5.1**（Intel 出品）— [MIT License](src-tauri/resources/benchmark/LICENSE-PresentMon.txt)。frame-time 收集工具；執行基準測試前會以固定 SHA-256 校驗。
+- **liblava Vulkan workload**（`lava-triangle.exe`，由 valleyofdoom/AutoGpuAffinity 發布，使用 liblava 框架）— [MIT License](src-tauri/resources/benchmark/LICENSE-liblava.txt)。Vulkan 測試負載；執行前同樣會校驗 SHA-256。
+- **Direct3D 9 workload**（`d3d9-workload.exe`）— 由本專案以 Rust 直接使用 Win32 Direct3D 9 API 撰寫的 sidecar（見 `src-tauri/d3d9-workload/`），GPL-3.0 與本專案一致。
+
+授權全文與 SHA-256 清單存放於 `src-tauri/resources/benchmark/`。
