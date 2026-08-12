@@ -123,7 +123,7 @@
     padding: 7px 10px;
     color: var(--text-secondary);
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 500;
     border-bottom: 2px solid var(--border-subtle);
   }
 
@@ -150,7 +150,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-weight: 600;
+    font-weight: 500;
   }
 
   .cell-pid {
@@ -180,7 +180,7 @@
     align-items: center;
     gap: 4px;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
     white-space: nowrap;
   }
 
@@ -203,7 +203,7 @@
   }
 
   .mono {
-    font-family: Consolas, 'Cascadia Code', monospace;
+    font-family: 'IBM Plex Sans TC', monospace;
     font-size: 11px;
   }
 </style>

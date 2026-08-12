@@ -281,7 +281,7 @@
   }
 
   .mono {
-    font-family: Consolas, 'Cascadia Code', monospace;
+    font-family: 'IBM Plex Sans TC', monospace;
     font-size: 11px;
   }
 </style>

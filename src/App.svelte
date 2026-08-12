@@ -250,7 +250,7 @@
   }
 
   .brand-text {
-    font-weight: 700;
+    font-weight: 500;
     font-size: 15px;
   }
 
@@ -295,7 +295,7 @@
   .nav-btn.active {
     color: var(--text-primary);
     background: var(--accent-muted);
-    font-weight: 600;
+    font-weight: 500;
   }
 
   .nav-btn.active .nav-icon {

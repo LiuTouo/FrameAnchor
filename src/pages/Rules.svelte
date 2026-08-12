@@ -361,7 +361,7 @@
   }
 
   .master-name {
-    font-weight: 600;
+    font-weight: 500;
     font-size: 13px;
     overflow: hidden;
     text-overflow: ellipsis;

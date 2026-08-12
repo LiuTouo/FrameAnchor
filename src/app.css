@@ -1,3 +1,12 @@
+/* ── 字型：IBM Plex Sans TC Medium ── */
+@font-face {
+  font-family: 'IBM Plex Sans TC';
+  src: url('./assets/fonts/IBMPlexSansTC-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* ── 設計代幣：深色主題（預設） ── */
 :root,
 [data-theme='dark'] {
@@ -138,7 +147,7 @@ body,
 body {
   background: var(--surface-0);
   color: var(--text-primary);
-  font-family: 'Segoe UI', 'Microsoft JhengHei', system-ui, sans-serif;
+  font-family: 'IBM Plex Sans TC', system-ui, sans-serif;
   font-size: 13px;
   line-height: 1.5;
   overflow: hidden;
@@ -292,7 +301,7 @@ select {
   padding: 0 6px;
   border-radius: var(--radius-xs);
   font-size: 10px;
-  font-weight: 600;
+  font-weight: 500;
   line-height: 16px;
   letter-spacing: 0.02em;
 }
@@ -334,7 +343,7 @@ td:first-child {
 th {
   color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 /* ── 空狀態 / 錯誤狀態 ── */
@@ -368,7 +377,7 @@ th {
 
 /* ── 等寬字 ── */
 .mono {
-  font-family: Consolas, 'Cascadia Code', monospace;
+  font-family: 'IBM Plex Sans TC', monospace;
   font-size: 11px;
 }
 

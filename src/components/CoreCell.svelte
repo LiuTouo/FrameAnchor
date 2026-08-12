@@ -136,7 +136,7 @@
 
   .idx {
     font-size: 11px;
-    font-weight: 600;
+    font-weight: 500;
   }
 
   .pct {

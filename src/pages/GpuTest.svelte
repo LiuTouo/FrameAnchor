@@ -634,7 +634,7 @@
     transition: all var(--transition-fast);
   }
   .segment-btn:hover:not(:disabled) { color: var(--text-primary); }
-  .segment-btn.active { background: var(--surface-0); color: var(--text-primary); font-weight: 600; box-shadow: var(--shadow-xs); }
+  .segment-btn.active { background: var(--surface-0); color: var(--text-primary); font-weight: 500; box-shadow: var(--shadow-xs); }
   .segment-btn:disabled { opacity: 0.4; cursor: default; }
 
   /* ── Recovery banner ── */
@@ -642,7 +642,7 @@
     display: flex; align-items: center; gap: var(--space-2);
     padding: var(--space-3); background: var(--danger-muted);
     border: 1px solid var(--danger); border-radius: var(--radius-md);
-    color: var(--danger); font-weight: 600; font-size: 13px;
+    color: var(--danger); font-weight: 500; font-size: 13px;
   }
 
   /* ── 面板 ── */
@@ -655,7 +655,7 @@
   .field { display: flex; flex-direction: column; gap: 4px; }
   .field.check { flex-direction: row; align-items: center; gap: var(--space-2); }
   .field.full-width { grid-column: 1 / -1; }
-  .field-label { color: var(--text-secondary); font-size: 12px; font-weight: 600; }
+  .field-label { color: var(--text-secondary); font-size: 12px; font-weight: 500; }
 
   .lp-chips { display: flex; flex-wrap: wrap; gap: 5px; }
   .lp-chips button { min-width: 32px; padding: 3px 8px; text-align: center; font-size: 12px; }
@@ -696,13 +696,13 @@
   .session-item:hover { background: var(--surface-2); }
   .session-item.active { background: var(--accent-muted); border-left: 3px solid var(--accent); padding-left: calc(var(--space-3) - 3px); }
   .session-item-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-1); }
-  .session-date { font-size: 12px; font-weight: 600; }
+  .session-date { font-size: 12px; font-weight: 500; }
   .session-item-meta { display: flex; gap: var(--space-2); font-size: 11px; }
   .session-item-foot { display: flex; justify-content: space-between; gap: var(--space-2); }
   .empty-hint { padding: var(--space-4); text-align: center; }
 
   /* Status badges */
-  .badge { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; font-weight: 600; padding: 0 5px; border-radius: var(--radius-xs); line-height: 16px; }
+  .badge { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; font-weight: 500; padding: 0 5px; border-radius: var(--radius-xs); line-height: 16px; }
   .badge.status-completed { background: var(--success-muted); color: var(--success); }
   .badge.status-failed, .badge.status-cancelled { background: var(--danger-muted); color: var(--danger); }
   .badge.best { background: var(--accent); color: var(--accent-text); }
@@ -719,21 +719,21 @@
   .metric-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
   .metric-table th, .metric-table td { padding: 5px 8px; border-bottom: 1px solid var(--border-subtle); text-align: right; white-space: nowrap; }
   .metric-table th:first-child, .metric-table td:first-child { text-align: left; }
-  .metric-table th { color: var(--text-secondary); font-size: 11px; font-weight: 600; }
-  td.best { background: var(--accent-muted); color: var(--accent); font-weight: 700; }
+  .metric-table th { color: var(--text-secondary); font-size: 11px; font-weight: 500; }
+  td.best { background: var(--accent-muted); color: var(--accent); font-weight: 500; }
   td.second { background: color-mix(in srgb, var(--accent-muted) 50%, transparent); }
   td.unusual-value { color: var(--warning); }
-  .lp-cell { font-weight: 600; }
+  .lp-cell { font-weight: 500; }
 
   /* Meta */
   .meta-strip { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-5); margin-bottom: var(--space-4); }
   .meta-item { display: flex; flex-direction: column; gap: 1px; }
-  .mono { font-family: Consolas, 'Cascadia Code', monospace; font-size: 11px; }
+  .mono { font-family: 'IBM Plex Sans TC', monospace; font-size: 11px; }
 
   /* Policy */
   .policy-section { background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: var(--space-3); }
   .policy-header { display: flex; align-items: baseline; gap: var(--space-3); margin-bottom: var(--space-2); }
-  .policy-header h3 { margin: 0; font-size: 13px; font-weight: 600; }
+  .policy-header h3 { margin: 0; font-size: 13px; font-weight: 500; }
   .policy-list { display: flex; flex-direction: column; gap: 4px; margin: 0 0 var(--space-2); }
   .policy-list div { display: flex; gap: var(--space-3); }
   .policy-list dt { color: var(--text-secondary); min-width: 110px; font-size: 12px; }
