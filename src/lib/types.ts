@@ -1,5 +1,6 @@
 ﻿// 與 PLAN §5 對應的 TS 型別。enum 字串值採 PascalCase（與 serde 序列化一致）。
 
+export type Theme = 'Dark' | 'Light';
 export type MatchBy = 'FullPath' | 'FileName';
 export type AffinityMode = 'All' | 'NoSmtSibling' | 'PCoresOnly' | 'Custom' | 'Prefer';
 export type CpuPriority = 'Idle' | 'BelowNormal' | 'Normal' | 'AboveNormal' | 'High';
@@ -47,6 +48,7 @@ export interface Settings {
   closeToTray: boolean;
   pollIntervalMs: number;
   showAdvancedPriorities: boolean;
+  theme: Theme;
 }
 
 export interface LogicalProcessor {

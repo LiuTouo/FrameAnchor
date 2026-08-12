@@ -46,7 +46,6 @@
   async function doUpdate() {
     const curState = $updateState;
     if (!curState || curState.status !== 'Available') return;
-
     updateConfirmOpen = true;
   }
 
@@ -73,8 +72,9 @@
 </script>
 
 {#if $settings}
+  <!-- ── 一般 ── -->
   <h2>{$t('settings.general')}</h2>
-  <div class="panel">
+  <div class="section">
     <label class="opt">
       <input
         type="checkbox"
@@ -99,25 +99,6 @@
       />
       <span>{$t('settings.closeToTray')}</span>
     </label>
-    <label class="opt">
-      <input
-        type="checkbox"
-        checked={$settings.showAdvancedPriorities}
-        onchange={(e) => save({ showAdvancedPriorities: e.currentTarget.checked })}
-      />
-      <span>{$t('settings.showAdvanced')}</span>
-    </label>
-
-    <div class="opt row">
-      <span>{$t('settings.language')}</span>
-      <select
-        value={$settings.language}
-        onchange={(e) => save({ language: e.currentTarget.value })}
-      >
-        <option value="zh-TW">繁體中文</option>
-        <option value="en">English</option>
-      </select>
-    </div>
 
     <div class="opt col">
       <span>
@@ -136,21 +117,58 @@
       />
       <span class="hint">{$t('settings.pollHint')}</span>
     </div>
+
+    <label class="opt">
+      <input
+        type="checkbox"
+        checked={$settings.showAdvancedPriorities}
+        onchange={(e) => save({ showAdvancedPriorities: e.currentTarget.checked })}
+      />
+      <span>{$t('settings.showAdvanced')}</span>
+    </label>
   </div>
 
-  <h2>{$t('settings.about')}</h2>
-  <div class="panel">
+  <!-- ── 外觀 ── -->
+  <h2>{$t('settings.appearance')}</h2>
+  <div class="section">
     <div class="opt row">
-      <span class="hint">FrameAnchor · {$t('settings.version')} {$updateState?.currentVersion ?? '0.0.0'}</span>
-      {#if $isPortable}
-        <span class="hint tag">{$t('settings.portableBuild')}</span>
-      {/if}
+      <span>{$t('settings.language')}</span>
+      <select
+        value={$settings.language}
+        onchange={(e) => save({ language: e.currentTarget.value })}
+      >
+        <option value="zh-TW">繁體中文</option>
+        <option value="en">English</option>
+      </select>
     </div>
 
-    <!-- 更新狀態與控制 -->
     <div class="opt row">
-      {#if $updateState && $updateState.status !== 'Idle'}
-        <span class="hint">
+      <span>{$t('settings.theme')}</span>
+      <select
+        value={$settings.theme}
+        onchange={(e) => save({ theme: e.currentTarget.value as 'Dark' | 'Light' })}
+      >
+        <option value="Dark">{$t('settings.themeDark')}</option>
+        <option value="Light">{$t('settings.themeLight')}</option>
+      </select>
+    </div>
+  </div>
+
+  <!-- ── 更新與版本 ── -->
+  <h2>{$t('settings.updateSection')}</h2>
+  <div class="section">
+    <div class="opt row">
+      <span class="hint">
+        FrameAnchor · {$t('settings.version')} {$updateState?.currentVersion ?? '0.0.0'}
+        {#if $isPortable}
+          <span class="tag">{$t('settings.portableBuild')}</span>
+        {/if}
+      </span>
+    </div>
+
+    <div class="opt row">
+      <span class="hint">
+        {#if $updateState && $updateState.status !== 'Idle'}
           {statusLabel($updateState.status)}
           {#if $updateState.latestVersion && $updateState.status === 'Available'}
             · {$updateState.latestVersion}
@@ -158,8 +176,8 @@
           {#if $updateState.progress !== null && $updateState.status === 'Downloading'}
             · {$updateState.progress}%
           {/if}
-        </span>
-      {/if}
+        {/if}
+      </span>
 
       {#if $updateState?.status === 'Available'}
         <button onclick={doUpdate} disabled={installing}>
@@ -174,12 +192,19 @@
 
     {#if $updateState?.error}
       <div class="opt">
-        <span class="hint error">{$t('settings.updateErrorDetail', { values: { error: $updateState.error } })}</span>
+        <span class="error-msg" role="alert">
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" fill="currentColor"/></svg>
+          {$t('settings.updateErrorDetail', { values: { error: $updateState.error } })}
+        </span>
       </div>
     {/if}
+  </div>
 
+  <!-- ── 資料 ── -->
+  <h2>{$t('settings.data')}</h2>
+  <div class="section">
     <div class="opt row">
-      <span class="hint">{dataDir}</span>
+      <span class="hint mono">{dataDir}</span>
       <button onclick={() => ipc.openDataFolder()}>{$t('settings.dataFolder')}</button>
     </div>
   </div>
@@ -199,49 +224,64 @@
 <style>
   h2 {
     font-size: 14px;
-    margin: 4px 0 10px;
+    margin: 0 0 var(--space-3);
   }
+
   h2:not(:first-child) {
-    margin-top: 24px;
+    margin-top: var(--space-6);
   }
-  .panel {
-    background: var(--panel);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 14px 16px;
+
+  .section {
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: var(--space-3);
     max-width: 560px;
   }
+
   .opt {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: var(--space-2);
     cursor: pointer;
   }
+
   .opt.row,
   .opt.col {
     cursor: default;
   }
+
   .opt.row {
     justify-content: space-between;
   }
+
   .opt.col {
     flex-direction: column;
     align-items: stretch;
-    gap: 6px;
+    gap: var(--space-2);
   }
+
   input[type='range'] {
     accent-color: var(--accent);
   }
+
   .tag {
-    background: var(--panel-2);
+    background: var(--surface-2);
     padding: 1px 6px;
-    border-radius: 4px;
+    border-radius: var(--radius-xs);
     font-size: 11px;
+    margin-left: var(--space-2);
   }
-  .error {
-    color: #f87171;
+
+  .error-msg {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-1);
+    color: var(--danger);
+    font-size: 12px;
+  }
+
+  .mono {
+    font-family: Consolas, 'Cascadia Code', monospace;
+    font-size: 11px;
   }
 </style>

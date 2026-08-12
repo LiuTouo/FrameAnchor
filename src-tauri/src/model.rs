@@ -22,6 +22,13 @@ impl Default for Config {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
@@ -37,10 +44,15 @@ pub struct Settings {
     pub poll_interval_ms: u64,
     #[serde(default)]
     pub show_advanced_priorities: bool,
+    #[serde(default = "default_theme")]
+    pub theme: Theme,
 }
 
 fn default_language() -> String {
     "zh-TW".to_string()
+}
+fn default_theme() -> Theme {
+    Theme::Dark
 }
 fn default_true() -> bool {
     true
@@ -58,6 +70,7 @@ impl Default for Settings {
             close_to_tray: true,
             poll_interval_ms: default_poll_interval(),
             show_advanced_priorities: false,
+            theme: default_theme(),
         }
     }
 }
@@ -317,5 +330,35 @@ mod tests {
         assert!(json.contains("\"recommendation\""));
         assert!(json.contains("\"FullPath\""));
         assert!(json.contains("\"High\""));
+    }
+
+    /// 舊 config 沒有 theme 欄位 → 預設為 Dark
+    #[test]
+    fn old_config_without_theme_defaults_to_dark() {
+        let json = r#"{
+            "version": 1,
+            "settings": {
+                "language": "en",
+                "startWithWindows": false,
+                "startMinimized": true,
+                "closeToTray": true,
+                "pollIntervalMs": 1000,
+                "showAdvancedPriorities": false
+            }
+        }"#;
+        let cfg: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.settings.theme, Theme::Dark);
+    }
+
+    /// theme roundtrip：Dark ↔ Light 序列化/反序列化保留
+    #[test]
+    fn theme_roundtrip() {
+        let mut cfg = Config::default();
+        cfg.settings.theme = Theme::Light;
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains("\"theme\""));
+        assert!(json.contains("\"Light\""));
+        let back: Config = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.settings.theme, Theme::Light);
     }
 }

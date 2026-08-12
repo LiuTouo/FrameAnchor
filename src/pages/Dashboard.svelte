@@ -21,6 +21,13 @@
       : null,
   );
 
+  // 執行中進程數量摘要
+  let runningCount = $derived(sortedApplied.length);
+  // 互斥分類：OK = 完全成功，Partial = 無錯誤但非全部 OK，Failed = 有錯誤
+  let okCount = $derived(sortedApplied.filter((p) => !p.error && p.affinityOk && p.priorityOk && p.ioOk !== false && p.memOk !== false).length);
+  let failCount = $derived(sortedApplied.filter((p) => p.error != null).length);
+  let partialCount = $derived(runningCount - okCount - failCount);
+
   // 自動選擇第一個 PID；當前選擇消失時切至下一個；清單為空時清除
   $effect(() => {
     const list = sortedApplied;
@@ -61,56 +68,158 @@
   );
 </script>
 
-<h2>{$t('dashboard.cpuTitle')}</h2>
+<!-- 頁首：執行狀態摘要 -->
+<div class="page-header">
+  <h2>{$t('dashboard.cpuTitle')}</h2>
+  {#if runningCount > 0}
+    <div class="summary-strip" role="status" aria-label={$t('dashboard.summaryLabel', { values: { count: runningCount } })}>
+      <span class="summary-badge ok">
+        <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="currentColor"/></svg>
+        {$t('dashboard.summaryOk', { values: { count: okCount } })}
+      </span>
+      {#if partialCount > 0}
+        <span class="summary-badge warn">
+          <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M12 2L2 22h20L12 2zm0 3.99L19.53 20H4.47L12 5.99zM11 16h2v2h-2zm0-6h2v4h-2z" fill="currentColor"/></svg>
+          {$t('dashboard.summaryPartial', { values: { count: partialCount } })}
+        </span>
+      {/if}
+      {#if failCount > 0}
+        <span class="summary-badge fail">
+          <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" fill="currentColor"/></svg>
+          {$t('dashboard.summaryFail', { values: { count: failCount } })}
+        </span>
+      {/if}
+    </div>
+  {/if}
+</div>
+
+<!-- CPU 使用率面板 -->
 {#if sortedApplied.length > 0 && $topology}
   <div class="selector-row">
-    <select bind:value={selectedPid} aria-label={$t('dashboard.selectProcess')}>
+    <label for="pid-select" class="selector-label">{$t('dashboard.selectProcess')}</label>
+    <select id="pid-select" bind:value={selectedPid}>
       {#each sortedApplied as p (p.pid)}
         <option value={p.pid}>{p.exeName} ({p.pid}) — {p.ruleName}</option>
       {/each}
     </select>
-    <span class="hint system-note">{$t('dashboard.systemPerCoreNote')}</span>
+    <span class="hint">{$t('dashboard.systemPerCoreNote')}</span>
   </div>
   <TopologyGrid topology={$topology} usage={$usage} {covered} />
-  <div class="hint legend">{$t('dashboard.coveredLegend')}</div>
+  <div class="legend-row" aria-label={$t('dashboard.coveredLegend')}>
+    <span class="legend-dot covered"></span>
+    <span class="hint">{$t('dashboard.coveredLegend')}</span>
+    <span class="legend-dot smt"></span>
+    <span class="hint">{$t('dashboard.smtLegend')}</span>
+  </div>
 {:else}
-  <p class="hint empty-cpu">{$t('dashboard.emptyCpuPanel')}</p>
+  <div class="panel empty-state">
+    <svg viewBox="0 0 24 24" width="32" height="32" aria-hidden="true"><path d="M3 3h18v18H3V3zm2 2v14h14V5H5zm2 2h10v2H7V7zm0 4h6v2H7v-2z" fill="currentColor" opacity="0.3"/></svg>
+    <p>{$t('dashboard.emptyCpuPanel')}</p>
+  </div>
 {/if}
 
+<!-- 已套用進程表格 -->
 <h2>{$t('dashboard.appliedTitle')}</h2>
 <AppliedTable applied={$applied} />
 
 <style>
+  .page-header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-3);
+    margin-bottom: var(--space-4);
+  }
+
+  .page-header h2 {
+    margin: 0;
+    font-size: 15px;
+  }
+
+  .summary-strip {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .summary-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 1px 8px;
+    border-radius: var(--radius-full);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 20px;
+  }
+
+  .summary-badge.ok {
+    background: var(--success-muted);
+    color: var(--success);
+  }
+
+  .summary-badge.warn {
+    background: var(--warning-muted);
+    color: var(--warning);
+  }
+
+  .summary-badge.fail {
+    background: var(--danger-muted);
+    color: var(--danger);
+  }
+
   h2 {
     font-size: 14px;
-    margin: 4px 0 10px;
+    margin: var(--space-6) 0 var(--space-3);
   }
-  h2:not(:first-child) {
-    margin-top: 24px;
-  }
+
   .selector-row {
     display: flex;
     align-items: center;
-    gap: 10px;
-    margin-bottom: 10px;
+    gap: var(--space-3);
+    margin-bottom: var(--space-3);
     flex-wrap: wrap;
   }
+
+  .selector-label {
+    color: var(--text-secondary);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
   .selector-row select {
-    background: var(--panel-2);
-    color: var(--text);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 4px 8px;
-    font-size: 13px;
-    max-width: 320px;
+    max-width: 340px;
   }
-  .system-note {
-    font-size: 11px;
+
+  .legend-row {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-top: var(--space-2);
   }
-  .legend {
-    margin-top: 8px;
+
+  .legend-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    flex-shrink: 0;
   }
-  .empty-cpu {
-    margin: 20px 0;
+
+  .legend-dot.covered {
+    border: 2px solid var(--accent);
+    background: transparent;
+  }
+
+  .legend-dot.smt {
+    border: 1px solid var(--border-default);
+    background: var(--surface-2);
+  }
+
+  .empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-3);
+    color: var(--text-secondary);
   }
 </style>

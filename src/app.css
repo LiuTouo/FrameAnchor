@@ -1,16 +1,130 @@
-:root {
-  --accent: #4f8cff;
-  --bg: #0f1724;
-  --panel: #16202f;
-  --panel-2: #1b2740;
-  --border: #26324a;
-  --text: #dbe2ec;
-  --muted: #8b98ab;
-  --danger: #ff5f6b;
-  --ok: #3ecf8e;
+/* ── 設計代幣：深色主題（預設） ── */
+:root,
+[data-theme='dark'] {
+  /* 表面 */
+  --surface-0: #0b0f18;
+  --surface-1: #131926;
+  --surface-2: #1a2233;
+  --surface-3: #212b40;
+
+  /* 文字 */
+  --text-primary: #e2e8f2;
+  --text-secondary: #8e9baf;
+  --text-muted: #5b6980;
+
+  /* 邊框 */
+  --border-subtle: #232d40;
+  --border-default: #2e3a50;
+
+  /* 品牌 */
+  --accent: #5b9cf5;
+  --accent-hover: #7ab4ff;
+  --accent-muted: rgba(91, 156, 245, 0.12);
+  --accent-text: #ffffff;
+
+  /* 狀態色 */
+  --success: #34d399;
+  --success-muted: rgba(52, 211, 153, 0.12);
+  --warning: #f0a33c;
+  --warning-muted: rgba(240, 163, 60, 0.12);
+  --danger: #f7616b;
+  --danger-hover: #f98088;
+  --danger-muted: rgba(247, 97, 107, 0.12);
+
+  /* 陰影 */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.35);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.4);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.5);
+
+  /* 疊加 */
+  --overlay: rgba(3, 6, 12, 0.7);
 }
 
-* {
+/* ── 設計代幣：淺色主題 ── */
+[data-theme='light'] {
+  --surface-0: #f5f6f8;
+  --surface-1: #ffffff;
+  --surface-2: #f0f1f4;
+  --surface-3: #e5e7ec;
+
+  --text-primary: #1a1f2e;
+  --text-secondary: #5b6270;
+  --text-muted: #9098a8;
+
+  --border-subtle: #e1e4ea;
+  --border-default: #cdd2db;
+
+  --accent: #3b7de0;
+  --accent-hover: #5b9cf5;
+  --accent-muted: rgba(59, 125, 224, 0.1);
+  --accent-text: #ffffff;
+
+  --success: #16a34a;
+  --success-muted: rgba(22, 163, 74, 0.1);
+  --warning: #d97706;
+  --warning-muted: rgba(217, 119, 6, 0.1);
+  --danger: #e04450;
+  --danger-hover: #f7616b;
+  --danger-muted: rgba(224, 68, 80, 0.1);
+
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 6px 20px rgba(0, 0, 0, 0.1);
+  --shadow-lg: 0 12px 40px rgba(0, 0, 0, 0.14);
+
+  --overlay: rgba(10, 14, 22, 0.45);
+}
+
+/* ── 不隨主題變化的固定代幣 ── */
+:root {
+  /* 向後相容別名（舊組件仍使用舊變數名稱） */
+  --bg: var(--surface-0);
+  --panel: var(--surface-1);
+  --panel-2: var(--surface-2);
+  --border: var(--border-default);
+  --text: var(--text-primary);
+  --muted: var(--text-secondary);
+  --ok: var(--success);
+
+  /* 圓角 */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-full: 9999px;
+
+  /* 間距 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  /* 控制項高度 */
+  --control-sm: 28px;
+  --control-md: 32px;
+  --control-lg: 36px;
+
+  /* 焦點環 */
+  --focus-ring: 0 0 0 2px var(--surface-0), 0 0 0 3px var(--accent);
+
+  /* 捲軸 */
+  --scrollbar-width: 8px;
+  --scrollbar-track: transparent;
+  --scrollbar-thumb: var(--surface-3);
+  --scrollbar-thumb-hover: var(--text-muted);
+
+  /* 動畫 */
+  --transition-fast: 120ms ease;
+  --transition-normal: 200ms ease;
+}
+
+/* ── 全域重設 ── */
+*,
+*::before,
+*::after {
   box-sizing: border-box;
 }
 
@@ -22,48 +136,131 @@ body,
 }
 
 body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: 'Segoe UI', 'Microsoft JhengHei', sans-serif;
+  background: var(--surface-0);
+  color: var(--text-primary);
+  font-family: 'Segoe UI', 'Microsoft JhengHei', system-ui, sans-serif;
   font-size: 13px;
+  line-height: 1.5;
   overflow: hidden;
   user-select: none;
+  -webkit-font-smoothing: antialiased;
 }
 
+/* ── 焦點可見（鍵盤導航時顯示焦點環；滑鼠點擊時不顯示） ── */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+  border-radius: var(--radius-sm);
+}
+
+/* ── reduced-motion ── */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* ── 按鈕 ── */
 button {
   font: inherit;
-  color: var(--text);
-  background: var(--panel-2);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 12px;
+  color: var(--text-primary);
+  background: var(--surface-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-3);
+  height: var(--control-md);
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  transition: background var(--transition-fast), border-color var(--transition-fast),
+    color var(--transition-fast);
+  white-space: nowrap;
 }
 
 button:hover:not(:disabled) {
+  background: var(--surface-3);
   border-color: var(--accent);
 }
 
+button:active:not(:disabled) {
+  background: var(--surface-2);
+}
+
 button:disabled {
-  opacity: 0.45;
+  opacity: 0.4;
   cursor: default;
 }
 
 button.primary {
   background: var(--accent);
   border-color: var(--accent);
+  color: var(--accent-text);
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+button.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+button.danger:hover:not(:disabled) {
+  background: var(--danger-muted);
+}
+
+button.danger.primary {
+  background: var(--danger);
+  border-color: var(--danger);
   color: #fff;
 }
 
+button.danger.primary:hover:not(:disabled) {
+  background: var(--danger-hover);
+  border-color: var(--danger-hover);
+}
+
+button.small {
+  height: var(--control-sm);
+  font-size: 12px;
+  padding: 0 var(--space-2);
+}
+
+/* ── 輸入框 ── */
 input[type='text'],
+input[type='number'],
 input:not([type]),
-select {
+select,
+textarea {
   font: inherit;
-  color: var(--text);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 5px 8px;
+  color: var(--text-primary);
+  background: var(--surface-0);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  padding: 0 var(--space-2);
+  height: var(--control-md);
+  transition: border-color var(--transition-fast);
+}
+
+input[type='text']:focus,
+input[type='number']:focus,
+input:not([type]):focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+input[type='text']::placeholder,
+input:not([type])::placeholder {
+  color: var(--text-muted);
 }
 
 input[type='checkbox'] {
@@ -71,18 +268,162 @@ input[type='checkbox'] {
   height: 15px;
   accent-color: var(--accent);
   cursor: pointer;
+  flex-shrink: 0;
 }
 
+input[type='range'] {
+  accent-color: var(--accent);
+}
+
+/* ── select ── */
+select {
+  cursor: pointer;
+  appearance: none;
+  padding-right: 24px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%238e9baf'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 8px center;
+}
+
+/* ── badge ── */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: var(--radius-xs);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  letter-spacing: 0.02em;
+}
+
+/* ── hint / muted 文字 ── */
 .hint {
-  color: var(--muted);
+  color: var(--text-secondary);
   font-size: 12px;
 }
 
-.badge {
-  display: inline-block;
-  padding: 0 4px;
-  border-radius: 4px;
-  font-size: 10px;
+/* ── 面板（結構性容器） ── */
+.panel {
+  background: var(--surface-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: var(--space-4) var(--space-4);
+}
+
+/* ── 表格 ── */
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+
+th,
+td {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  text-align: right;
+  white-space: nowrap;
+}
+
+th:first-child,
+td:first-child {
+  text-align: left;
+}
+
+th {
+  color: var(--text-secondary);
+  font-size: 12px;
   font-weight: 600;
-  line-height: 15px;
+}
+
+/* ── 空狀態 / 錯誤狀態 ── */
+.empty-state {
+  padding: var(--space-6);
+  text-align: center;
+  color: var(--text-secondary);
+  background: var(--surface-1);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.error-state {
+  color: var(--danger);
+  font-size: 12px;
+  margin-top: var(--space-2);
+}
+
+/* ── 工具列 ── */
+.toolbar {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+/* ── 捲動表格容器 ── */
+.table-scroll {
+  overflow-x: auto;
+  margin-bottom: var(--space-2);
+}
+
+/* ── 等寬字 ── */
+.mono {
+  font-family: Consolas, 'Cascadia Code', monospace;
+  font-size: 11px;
+}
+
+/* ── 進度條 ── */
+.progress-track {
+  height: 6px;
+  background: var(--surface-2);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+
+.progress-track > div {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s;
+  border-radius: var(--radius-full);
+}
+
+/* ── 全域捲軸樣式 ── */
+/* Firefox fallback */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+/* WebKit / WebView2 垂直捲軸 */
+::-webkit-scrollbar {
+  width: var(--scrollbar-width);
+  height: var(--scrollbar-width);
+}
+
+::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: var(--radius-full);
+  border: 2px solid transparent;
+  background-clip: content-box;
+  min-height: 32px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: content-box;
+}
+
+/* 水平捲軸額外樣式：避免 border 造成高度塌陷 */
+::-webkit-scrollbar-thumb:horizontal {
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+/* 捲軸角落（水平和垂直捲軸交會處） */
+::-webkit-scrollbar-corner {
+  background: var(--scrollbar-track);
 }

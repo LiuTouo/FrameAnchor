@@ -159,4 +159,22 @@ mod tests {
 
         let _ = std::fs::remove_file(&path);
     }
+
+    /// 舊 config 不含 theme 欄位 → 預設 Dark
+    #[test]
+    fn old_config_without_theme_defaults_to_dark() {
+        let path = temp_path("no_theme.json");
+        let json = r#"{
+            "version": 1,
+            "settings": {
+                "language": "en",
+                "pollIntervalMs": 2000
+            }
+        }"#;
+        std::fs::write(&path, json).unwrap();
+        let cfg = load_from(&path);
+        assert_eq!(cfg.settings.theme, crate::model::Theme::Dark);
+        assert_eq!(cfg.settings.poll_interval_ms, 2000);
+        let _ = std::fs::remove_file(&path);
+    }
 }
