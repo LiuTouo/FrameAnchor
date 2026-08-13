@@ -54,6 +54,8 @@ export const computeRecommendedCores = (bestLp: number, severeLps: number[]) =>
   invoke<number[]>('compute_recommended_cores', { bestLp, severeLps });
 export const getCurrentCpuFingerprint = () => invoke<string>('get_current_cpu_fingerprint');
 export const restorePreviousGpuAffinity = () => invoke<void>('restore_previous_gpu_affinity');
+export const applyGpuAffinity = (instanceId: string, lp: number) =>
+  invoke<void>('apply_gpu_affinity', { instanceId, lp });
 export const startGpuBenchmark = (config: BenchmarkConfig) =>
   invoke<void>('start_gpu_benchmark', { config });
 export const cancelBenchmark = () => invoke<void>('cancel_benchmark');

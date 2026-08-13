@@ -123,7 +123,7 @@
     padding: 7px 10px;
     color: var(--text-secondary);
     font-size: 11px;
-    font-weight: 500;
+    font-weight: var(--font-weight-medium);
     border-bottom: 2px solid var(--border-subtle);
   }
 
@@ -150,7 +150,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-weight: 500;
+    font-weight: var(--font-weight-medium);
   }
 
   .cell-pid {
@@ -180,7 +180,7 @@
     align-items: center;
     gap: 4px;
     font-size: 12px;
-    font-weight: 500;
+    font-weight: var(--font-weight-medium);
     white-space: nowrap;
   }
 

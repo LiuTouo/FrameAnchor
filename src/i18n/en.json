@@ -162,6 +162,7 @@
     "sample": "Sample (s)",
     "repetitions": "Rounds (1-3)",
     "fullscreen": "Fullscreen",
+    "fullscreenResolutionHint": "Fullscreen uses the current display resolution",
     "width": "Width",
     "height": "Height",
     "fpsCap": "FPS cap (0 = unlimited)",
@@ -194,6 +195,7 @@
     "progress": "Progress {pct}%",
     "eta": "ETA ~{minutes} min",
     "cancel": "Cancel benchmark",
+    "cancelling": "Cancelling…",
     "resultsTitle": "Results",
     "colLp": "Core",
     "colAvg": "Avg FPS",
@@ -248,7 +250,12 @@
     "noDetail": "No details",
     "storageInfo": "Total {bytes} / {count} sessions",
     "recoveryBanner": "A previous GPU change was not fully restored. Restart FrameAnchor or restore manually before starting a new test or applying.",
-    "cpuTag": "CPU"
+    "cpuTag": "CPU",
+    "manualAffinityTitle": "Manual GPU interrupt affinity",
+    "manualAffinityLpSelect": "Pin to core",
+    "manualApply": "Apply to GPU",
+    "manualApplyConfirmTitle": "Apply GPU interrupt affinity?",
+    "manualApplyConfirmBody": "Set GPU interrupt affinity of {gpu} to core {lp}? The screen may blink for a few seconds."
   },
   "errors": {
     "ACCESS_DENIED": "Access denied (possibly protected by anti-cheat)",

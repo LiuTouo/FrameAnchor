@@ -13,6 +13,7 @@ pub mod recommend;
 pub mod recovery;
 pub mod runner;
 pub mod storage;
+pub mod window_win;
 
 // ── GPU 基準測試領域型別 ────────────────────────────────────────────────
 
@@ -110,10 +111,10 @@ fn default_true() -> bool {
     true
 }
 fn default_width() -> u32 {
-    640
+    1280
 }
 fn default_height() -> u32 {
-    480
+    720
 }
 
 impl Default for BenchmarkConfig {
@@ -145,8 +146,8 @@ impl Default for BenchmarkConfig {
 fn default_vulkan_args() -> Vec<String> {
     vec![
         "--fullscreen=1".to_string(),
-        "--width=640".to_string(),
-        "--height=480".to_string(),
+        "--width=1280".to_string(),
+        "--height=720".to_string(),
         "--fps_cap=0".to_string(),
         "--triple_buffering=0".to_string(),
     ]
@@ -456,5 +457,42 @@ mod tests {
         assert!(json.contains("\"recoveryRequired\""));
         assert!(json.contains("\"Running\""));
         assert!(json.contains("\"Collecting\""));
+    }
+
+    #[test]
+    fn default_config_uses_product_defaults() {
+        let c = BenchmarkConfig::default();
+        assert!(c.fullscreen, "產品預設應為全螢幕");
+        assert_eq!(c.width, 1280);
+        assert_eq!(c.height, 720);
+        assert_eq!(c.width, default_width());
+        assert_eq!(c.height, default_height());
+    }
+
+    #[test]
+    fn default_vulkan_args_match_default_config() {
+        let c = BenchmarkConfig::default();
+        assert_eq!(c.vulkan_args, default_vulkan_args());
+        let args = default_vulkan_args();
+        assert!(args.iter().any(|a| a == "--fullscreen=1"));
+        assert!(args.iter().any(|a| a == "--width=1280"));
+        assert!(args.iter().any(|a| a == "--height=720"));
+    }
+
+    #[test]
+    fn missing_fields_get_product_defaults() {
+        let c: BenchmarkConfig = serde_json::from_str("{}").unwrap();
+        assert!(c.fullscreen);
+        assert_eq!(c.width, 1280);
+        assert_eq!(c.height, 720);
+    }
+
+    #[test]
+    fn explicit_fields_not_overwritten() {
+        let c: BenchmarkConfig =
+            serde_json::from_str(r#"{"fullscreen":false,"width":800,"height":600}"#).unwrap();
+        assert!(!c.fullscreen);
+        assert_eq!(c.width, 800);
+        assert_eq!(c.height, 600);
     }
 }

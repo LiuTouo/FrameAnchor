@@ -154,6 +154,7 @@ fn main() {
             benchmark::ipc::get_benchmark_storage_info,
             benchmark::ipc::get_gpu_affinity_policy,
             benchmark::ipc::apply_best_gpu_affinity,
+            benchmark::ipc::apply_gpu_affinity,
             benchmark::ipc::get_benchmark_apply_status,
             benchmark::ipc::list_importable_sessions,
             benchmark::ipc::compute_recommended_cores,

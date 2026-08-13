@@ -373,7 +373,7 @@
   .section-title {
     margin: 0 0 var(--space-2);
     font-size: 12px;
-    font-weight: 500;
+    font-weight: var(--font-weight-medium);
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.05em;
@@ -387,7 +387,7 @@
     border: none;
     color: var(--text-primary);
     font: inherit;
-    font-weight: 500;
+    font-weight: var(--font-weight-medium);
     font-size: 13px;
     padding: 0;
     cursor: pointer;
@@ -431,7 +431,7 @@
   .field-label {
     color: var(--text-muted);
     font-size: 11px;
-    font-weight: 500;
+    font-weight: var(--font-weight-medium);
   }
 
   .exe-path {

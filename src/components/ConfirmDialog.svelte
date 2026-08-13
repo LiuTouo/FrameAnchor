@@ -197,7 +197,7 @@
   h2 {
     margin: 0 0 var(--space-2);
     font-size: 15px;
-    font-weight: 500;
+    font-weight: var(--font-weight-medium);
   }
 
   p {

@@ -20,12 +20,17 @@
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
 
   type Segment = 'test' | 'results';
-  type ConfirmAction = 'start' | 'applyBest' | 'restore' | 'deleteHistory';
+  type ConfirmAction = 'start' | 'applyBest' | 'restore' | 'deleteHistory' | 'manualApply';
 
   // ── 區段控制 ──
   let segment = $state<Segment>('test');
   const isRunning = $derived($benchmarkState?.status === 'Running');
   const recoveryRequired = $derived($benchmarkState?.recoveryRequired ?? false);
+  // 取消已請求但尚未終結：顯示「取消中」並避免重複點擊。
+  // cancelRequested 來自後端 state；cancelSent 是本地立即回饋（不等下一個 progress 事件）。
+  const cancelRequested = $derived($benchmarkState?.cancelRequested ?? false);
+  let cancelSent = $state(false);
+  const cancelPending = $derived(isRunning && (cancelRequested || cancelSent));
 
   function switchSegment(s: Segment) {
     if (isRunning && s !== segment) return; // 執行中禁止切換
@@ -47,8 +52,9 @@
   let repetitions = $state(1);
   let fullscreen = $state(true);
   let vulkanOptionsOpen = $state(true);
-  let width = $state(640);
-  let height = $state(480);
+  let width = $state(1280);
+  let height = $state(720);
+  let manualLp = $state<number | null>(null);
   let fpsCap = $state(0);
   let tripleBuffer = $state(false);
 
@@ -62,10 +68,16 @@
   let policyLoading = $state(false);
   let handledTerminal = $state<string | null>(null);
 
+  const group0Limit = $derived(Math.min($topology?.totalLp ?? 0, 64));
   const supportedLps = $derived(
-    $topology ? $topology.logicalProcessors.map((p) => p.index).sort((a, b) => a - b) : [],
+    $topology
+      ? $topology.logicalProcessors
+          .map((p) => p.index)
+          .filter((lp) => lp < group0Limit)
+          .sort((a, b) => a - b)
+      : [],
   );
-  const lpList = $derived(lps.length ? lps : supportedLps);
+  const lpList = $derived(lps);
   const restartCount = $derived(lpList.length * repetitions);
   const estMinutes = $derived(
     Math.max(1, Math.round((restartCount * (sampleSecs + warmUpSecs + 19)) / 60)),
@@ -83,7 +95,26 @@
   $effect(() => {
     const topo = $topology;
     if (topo && !lpsInitialized) {
-      lps = topo.logicalProcessors.map((p) => p.index).sort((a, b) => a - b);
+      const limit = Math.min(topo.totalLp, 64);
+      if (topo.hasHybrid) {
+        lps = topo.physicalCores
+          .filter((c) => c.isPCore)
+          .flatMap((c) => c.lpIndices.slice(0, 1))
+          .filter((lp) => lp < limit)
+          .sort((a, b) => a - b);
+      } else {
+        lps = topo.physicalCores
+          .flatMap((c) => c.lpIndices.slice(0, 1))
+          .filter((lp) => lp < limit)
+          .sort((a, b) => a - b);
+      }
+      if (lps.length === 0) {
+        lps = topo.logicalProcessors
+          .map((p) => p.index)
+          .filter((lp) => lp < limit)
+          .sort((a, b) => a - b);
+      }
+      manualLp = lps[0] ?? null;
       lpsInitialized = true;
     }
   });
@@ -154,7 +185,7 @@
   }
 
   async function doStart() {
-    confirmAction = null; busy = true;
+    confirmAction = null; busy = true; cancelSent = false;
     try {
       await ipc.startGpuBenchmark({ candidateLps: lps, gpuInstanceId: selectedGpu, workload, warmUpSecs, sampleSecs, repetitions, syncWorkloadAffinity: false, fullscreen, width, height, fpsCap, tripleBuffer, vulkanArgs: buildVulkanArgs(), workloadExePath: null, presentmonPath: null, gamePath: null, windowTitle: null });
       errMsg = null;
@@ -163,8 +194,10 @@
   }
 
   async function doCancel() {
+    if (cancelPending) return; // 已請求取消，避免重複送出
     busy = true;
-    try { await ipc.cancelBenchmark(); } catch (e) { errMsg = String(e); }
+    try { await ipc.cancelBenchmark(); cancelSent = true; }
+    catch (e) { errMsg = String(e); }
     finally { busy = false; }
   }
 
@@ -186,6 +219,16 @@
   async function confirmRestorePrevious() {
     confirmAction = null; busy = true;
     try { await ipc.restorePreviousGpuAffinity(); errMsg = null; await refreshPolicyFor(policyGpu); }
+    catch (e) { errMsg = String(e); }
+    finally { busy = false; }
+  }
+
+  // ── 手動套用 GPU 中斷親和性 ──
+  async function manualApplyClicked() { if (manualLp != null && selectedGpu) confirmAction = 'manualApply'; }
+  async function confirmManualApply() {
+    if (manualLp == null || !selectedGpu) return;
+    confirmAction = null; busy = true;
+    try { await ipc.applyGpuAffinity(selectedGpu, manualLp); errMsg = null; await refreshPolicyFor(selectedGpu); }
     catch (e) { errMsg = String(e); }
     finally { busy = false; }
   }
@@ -377,7 +420,7 @@
           <div><dt>{$t('gpuTest.colStatus')}</dt><dd>{stageLabel($benchmarkState?.stage)}</dd></div>
         </dl>
         <div class="progress-track" aria-hidden="true"><div style="width: {($benchmarkState?.progressPct ?? 0)}%"></div></div>
-        <div class="action-row"><button class="danger" disabled={busy} onclick={doCancel}>{$t('gpuTest.cancel')}</button></div>
+        <div class="action-row"><button class="danger" disabled={busy || cancelPending} onclick={doCancel}>{cancelPending ? $t('gpuTest.cancelling') : $t('gpuTest.cancel')}</button></div>
       </section>
     {:else}
       <!-- 設定表單 -->
@@ -431,8 +474,9 @@
               {#if vulkanOptionsOpen}
                 <div class="vulkan-opts">
                   <label class="field check"><input type="checkbox" bind:checked={fullscreen} /><span>{$t('gpuTest.fullscreen')}</span></label>
-                  <label class="field"><span class="field-label">{$t('gpuTest.width')}</span><input type="number" bind:value={width} min="1" /></label>
-                  <label class="field"><span class="field-label">{$t('gpuTest.height')}</span><input type="number" bind:value={height} min="1" /></label>
+                  <label class="field"><span class="field-label">{$t('gpuTest.width')}</span><input type="number" bind:value={width} min="1" disabled={fullscreen} /></label>
+                  <label class="field"><span class="field-label">{$t('gpuTest.height')}</span><input type="number" bind:value={height} min="1" disabled={fullscreen} /></label>
+                  {#if fullscreen}<span class="hint full-width">{$t('gpuTest.fullscreenResolutionHint')}</span>{/if}
                   <label class="field"><span class="field-label">{$t('gpuTest.fpsCap')}</span><input type="number" bind:value={fpsCap} min="0" /></label>
                   <label class="field check"><input type="checkbox" bind:checked={tripleBuffer} /><span>{$t('gpuTest.tripleBuffer')}</span></label>
                 </div>
@@ -446,6 +490,46 @@
         <div class="action-row">
           <span class="hint">{$t('gpuTest.riskEstimate', { values: { minutes: estMinutes } })} · {$t('gpuTest.restartCount', { values: { count: restartCount } })}</span>
           <button class="primary" disabled={busy || recoveryRequired || $gpuDevices.length === 0} onclick={startClicked}>{$t('gpuTest.start')}</button>
+        </div>
+      </section>
+
+      <!-- 手動 GPU 中斷親和性 -->
+      <section class="panel">
+        <h2>{$t('gpuTest.manualAffinityTitle')}</h2>
+        <div class="form-grid">
+          <label class="field">
+            <span class="field-label">{$t('gpuTest.manualAffinityLpSelect')}</span>
+            <select bind:value={manualLp} disabled={supportedLps.length === 0}>
+              <option value={null} disabled selected={manualLp == null}>—</option>
+              {#each supportedLps as i (i)}
+                <option value={i}>LP {i}</option>
+              {/each}
+            </select>
+          </label>
+          {#if selectedGpu}
+            <div class="field">
+              <span class="field-label">{$t('gpuTest.policyLp')}</span>
+              {#if policyLoading}
+                <span class="hint">{$t('gpuTest.policyLoading')}</span>
+              {:else}
+                <span class="mono">{policyLp != null ? `LP ${policyLp}` : $t('gpuTest.policyNone')}</span>
+              {/if}
+            </div>
+          {/if}
+        </div>
+        <div class="action-row">
+          <span class="hint">{$t('gpuTest.gpuSelect')}: {$gpuDevices.find((d) => d.instanceId === selectedGpu)?.friendlyName ?? (selectedGpu || $t('gpuTest.noGpu'))}</span>
+          <div class="policy-actions">
+            <button
+              class="primary"
+              disabled={busy || isRunning || recoveryRequired || manualLp == null || !selectedGpu}
+              onclick={manualApplyClicked}
+            >{$t('gpuTest.manualApply')}</button>
+            <button
+              disabled={busy || isRunning || recoveryRequired}
+              onclick={restorePrevious}
+            >{$t('gpuTest.restore')}</button>
+          </div>
         </div>
       </section>
     {/if}
@@ -602,6 +686,7 @@
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <ConfirmDialog open={confirmAction === 'start'} title={$t('gpuTest.riskTitle') as string} message={$t('gpuTest.riskBody', { values: { gpu: $gpuDevices.find((d) => d.instanceId === selectedGpu)?.friendlyName ?? selectedGpu, count: restartCount } }) as string} detail={$t('gpuTest.riskEstimate', { values: { minutes: estMinutes } }) as string} confirmLabel={$t('gpuTest.riskConfirm') as string} cancelLabel={$t('gpuTest.riskCancel') as string} {busy} onconfirm={doStart} oncancel={() => (confirmAction = null)} />
   <ConfirmDialog open={confirmAction === 'applyBest'} title={$t('gpuTest.applyBestTitle') as string} message={$t('gpuTest.applyBestConfirm', { values: { lp: detail?.summary.bestLp ?? '', gpu: $gpuDevices.find((d) => d.instanceId === detail?.summary.gpuInstanceId)?.friendlyName ?? detail?.summary.gpuInstanceId ?? '' } }) as string} confirmLabel={$t('common.confirm') as string} cancelLabel={$t('common.cancel') as string} {busy} onconfirm={confirmApplyBest} oncancel={() => (confirmAction = null)} />
+  <ConfirmDialog open={confirmAction === 'manualApply'} title={$t('gpuTest.manualApplyConfirmTitle') as string} message={$t('gpuTest.manualApplyConfirmBody', { values: { lp: manualLp ?? '', gpu: $gpuDevices.find((d) => d.instanceId === selectedGpu)?.friendlyName ?? selectedGpu } }) as string} confirmLabel={$t('common.confirm') as string} cancelLabel={$t('common.cancel') as string} {busy} onconfirm={confirmManualApply} oncancel={() => (confirmAction = null)} />
   <ConfirmDialog open={confirmAction === 'restore'} title={$t('gpuTest.restoreTitle') as string} message={$t('gpuTest.restoreConfirm') as string} confirmLabel={$t('gpuTest.restore') as string} cancelLabel={$t('common.cancel') as string} {busy} onconfirm={confirmRestorePrevious} oncancel={() => (confirmAction = null)} />
   <ConfirmDialog open={confirmAction === 'deleteHistory'} title={$t('gpuTest.deleteTitle') as string} message={$t('gpuTest.deleteConfirm') as string} confirmLabel={$t('gpuTest.delete') as string} cancelLabel={$t('common.cancel') as string} danger {busy} onconfirm={confirmDeleteHistory} oncancel={() => { confirmAction = null; deleteTargetId = null; }} />
 </div>
@@ -628,13 +713,13 @@
     padding: var(--space-2) var(--space-4);
     height: 32px;
     font-size: 13px;
-    font-weight: 500;
+    font-weight: var(--font-weight-medium);
     color: var(--text-secondary);
     cursor: pointer;
     transition: all var(--transition-fast);
   }
   .segment-btn:hover:not(:disabled) { color: var(--text-primary); }
-  .segment-btn.active { background: var(--surface-0); color: var(--text-primary); font-weight: 500; box-shadow: var(--shadow-xs); }
+  .segment-btn.active { background: var(--surface-0); color: var(--text-primary); font-weight: var(--font-weight-medium); box-shadow: var(--shadow-xs); }
   .segment-btn:disabled { opacity: 0.4; cursor: default; }
 
   /* ── Recovery banner ── */
@@ -642,7 +727,7 @@
     display: flex; align-items: center; gap: var(--space-2);
     padding: var(--space-3); background: var(--danger-muted);
     border: 1px solid var(--danger); border-radius: var(--radius-md);
-    color: var(--danger); font-weight: 500; font-size: 13px;
+    color: var(--danger); font-weight: var(--font-weight-medium); font-size: 13px;
   }
 
   /* ── 面板 ── */
@@ -655,7 +740,7 @@
   .field { display: flex; flex-direction: column; gap: 4px; }
   .field.check { flex-direction: row; align-items: center; gap: var(--space-2); }
   .field.full-width { grid-column: 1 / -1; }
-  .field-label { color: var(--text-secondary); font-size: 12px; font-weight: 500; }
+  .field-label { color: var(--text-secondary); font-size: 12px; font-weight: var(--font-weight-medium); }
 
   .lp-chips { display: flex; flex-wrap: wrap; gap: 5px; }
   .lp-chips button { min-width: 32px; padding: 3px 8px; text-align: center; font-size: 12px; }
@@ -696,13 +781,13 @@
   .session-item:hover { background: var(--surface-2); }
   .session-item.active { background: var(--accent-muted); border-left: 3px solid var(--accent); padding-left: calc(var(--space-3) - 3px); }
   .session-item-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-1); }
-  .session-date { font-size: 12px; font-weight: 500; }
+  .session-date { font-size: 12px; font-weight: var(--font-weight-medium); }
   .session-item-meta { display: flex; gap: var(--space-2); font-size: 11px; }
   .session-item-foot { display: flex; justify-content: space-between; gap: var(--space-2); }
   .empty-hint { padding: var(--space-4); text-align: center; }
 
   /* Status badges */
-  .badge { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; font-weight: 500; padding: 0 5px; border-radius: var(--radius-xs); line-height: 16px; }
+  .badge { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; font-weight: var(--font-weight-medium); padding: 0 5px; border-radius: var(--radius-xs); line-height: 16px; }
   .badge.status-completed { background: var(--success-muted); color: var(--success); }
   .badge.status-failed, .badge.status-cancelled { background: var(--danger-muted); color: var(--danger); }
   .badge.best { background: var(--accent); color: var(--accent-text); }
@@ -719,11 +804,11 @@
   .metric-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
   .metric-table th, .metric-table td { padding: 5px 8px; border-bottom: 1px solid var(--border-subtle); text-align: right; white-space: nowrap; }
   .metric-table th:first-child, .metric-table td:first-child { text-align: left; }
-  .metric-table th { color: var(--text-secondary); font-size: 11px; font-weight: 500; }
-  td.best { background: var(--accent-muted); color: var(--accent); font-weight: 500; }
+  .metric-table th { color: var(--text-secondary); font-size: 11px; font-weight: var(--font-weight-medium); }
+  td.best { background: var(--accent-muted); color: var(--accent); font-weight: var(--font-weight-medium); }
   td.second { background: color-mix(in srgb, var(--accent-muted) 50%, transparent); }
   td.unusual-value { color: var(--warning); }
-  .lp-cell { font-weight: 500; }
+  .lp-cell { font-weight: var(--font-weight-medium); }
 
   /* Meta */
   .meta-strip { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-5); margin-bottom: var(--space-4); }
@@ -733,7 +818,7 @@
   /* Policy */
   .policy-section { background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: var(--space-3); }
   .policy-header { display: flex; align-items: baseline; gap: var(--space-3); margin-bottom: var(--space-2); }
-  .policy-header h3 { margin: 0; font-size: 13px; font-weight: 500; }
+  .policy-header h3 { margin: 0; font-size: 13px; font-weight: var(--font-weight-semibold); }
   .policy-list { display: flex; flex-direction: column; gap: 4px; margin: 0 0 var(--space-2); }
   .policy-list div { display: flex; gap: var(--space-3); }
   .policy-list dt { color: var(--text-secondary); min-width: 110px; font-size: 12px; }

@@ -20,6 +20,7 @@ use super::assets::{self, BenchmarkAssets};
 use super::metrics::{best_lp, compute_lp_result, merge_rounds, parse_presentmon_csv, severe_lps};
 use super::recovery::{self, RecoveryStage};
 use super::storage;
+use super::window_win::WorkloadWindow;
 use super::{
     cpu_fingerprint_with, BenchmarkConfig, BenchmarkProgress, CpuIdentity, LpResult, SessionDetail,
     SessionStatus, SessionSummary, WorkloadKind,
@@ -38,6 +39,12 @@ pub const MAX_CAPTURE_ATTEMPTS: u32 = 3;
 /// 無 FPS 上限 workload 可能產生每秒上萬個 Present；v2.5.1 預設 2048，
 /// 提升到 8192 降低 consumer 短暫落後時遺失事件的機率。
 pub const PRESENTMON_CIRCULAR_BUFFER_SIZE: u32 = 8192;
+/// 長 sleep / capture wait 的取消輪詢間隔（毫秒）。runner 以這個粒度檢查
+/// cancel，避免被 5s 穩定、warmup 或 PresentMon 等待長時間阻塞。
+pub const CANCEL_POLL_MS: u64 = 100;
+/// workload spawn 後，等待其 top-level window 出現的上限（毫秒）。
+/// 期間以 [`CANCEL_POLL_MS`] 輪詢，可被取消中斷。
+pub const WORKLOAD_WINDOW_WAIT_MS: u64 = 3000;
 
 /// 子程序控制邊界。`spawn` 回傳 pid（owned handle），終結時由 runner 統一 `kill`。
 pub trait ProcessRunner: Send + Sync {
@@ -153,6 +160,8 @@ pub struct RunContext {
     pub baseline: Option<AffinityPolicy>,
     /// 本 session 擁有的子程序 pid（終結時全部終止）
     pub owned_processes: Vec<u32>,
+    /// workload 視窗調整（僅 Vulkan windowed 使用；測試注入 fake）
+    pub window: Arc<dyn WorkloadWindow>,
 }
 
 /// runner 的最終結果
@@ -171,6 +180,123 @@ pub struct RunResult {
 enum TerminalReason {
     Cancelled,
     Error(String),
+}
+
+/// capture wait 的結果
+enum CaptureWaitOutcome {
+    /// PresentMon 自行退出
+    Exited,
+    /// 逾時未退出
+    TimedOut,
+    /// 等待期間收到取消
+    Cancelled,
+    /// wait 本身回報錯誤
+    Failed(String),
+}
+
+/// 可中斷 sleep：以 [`CANCEL_POLL_MS`] 分段睡，每段檢查 cancel。
+/// 回傳 true = 已取消（sleep 被提前中斷）。
+fn sleep_interruptible(ctx: &RunContext, ms: u64) -> bool {
+    let mut remaining = ms;
+    while remaining > 0 {
+        if ctx.cancel.is_cancelled() {
+            return true;
+        }
+        let step = remaining.min(CANCEL_POLL_MS);
+        ctx.sleeper.sleep(step);
+        remaining -= step;
+    }
+    ctx.cancel.is_cancelled()
+}
+
+/// 可中斷地等待 PresentMon 退出。以單一等待預算 `timeout_ms` 計算：每輪先
+/// 非阻塞輪詢 `wait_exit(pid, 0)`（已退出即回 Exited），再以 [`CANCEL_POLL_MS`]
+/// 分段睡兼作取消輪詢節奏。預算完全由累計 sleep 時間扣減，production 的
+/// `wait_exit(0)` 立即回、sleeper 真的睡，故實際逾時 == `timeout_ms`（不再因
+/// `wait_exit` 阻塞 + sleep 而 double）；fake sleeper（不真的睡）在有限輪數內
+/// 收斂，測試不空轉。取消輪詢粒度維持 ≤ [`CANCEL_POLL_MS`]。
+fn wait_capture(ctx: &RunContext, pid: u32, timeout_ms: u64) -> CaptureWaitOutcome {
+    let mut remaining = timeout_ms;
+    loop {
+        if ctx.cancel.is_cancelled() {
+            return CaptureWaitOutcome::Cancelled;
+        }
+        // timeout 0 = 非阻塞輪詢：只檢查一次是否已退出，不做任何等待。
+        match ctx.processes.wait_exit(pid, 0) {
+            Ok(true) => return CaptureWaitOutcome::Exited,
+            Ok(false) => {}
+            Err(e) => return CaptureWaitOutcome::Failed(e),
+        }
+        if remaining == 0 {
+            return CaptureWaitOutcome::TimedOut;
+        }
+        let step = remaining.min(CANCEL_POLL_MS);
+        ctx.sleeper.sleep(step);
+        remaining -= step;
+    }
+}
+
+/// 是否對內建 Vulkan workload 安裝關閉防護：僅限內建 lava-triangle
+/// （`workload_exe_path` 為 None 才用內建資源）。D3D9 與自訂 exe 不保護。
+fn should_guard_close(config: &BenchmarkConfig) -> bool {
+    config.workload == WorkloadKind::Vulkan && config.workload_exe_path.is_none()
+}
+
+/// 以 [`CANCEL_POLL_MS`] 輪詢 `op` 直到它回 `Ok(true)`；`Ok(false)` 表示視窗尚未
+/// 建立，在 [`WORKLOAD_WINDOW_WAIT_MS`] 預算內重試；`Err` 或預算用盡只 log warn，
+/// 不影響 benchmark（保留預設狀態）。等待可被 cancel 中斷。
+fn poll_window_ready(
+    ctx: &RunContext,
+    wl_pid: u32,
+    what: &str,
+    mut op: impl FnMut() -> Result<bool, String>,
+) {
+    let mut remaining = WORKLOAD_WINDOW_WAIT_MS;
+    loop {
+        match op() {
+            Ok(true) => return,
+            Ok(false) => {
+                if remaining == 0 || ctx.cancel.is_cancelled() {
+                    log::warn!("{what}：找不到 workload pid {wl_pid} 的 top-level visible window");
+                    return;
+                }
+                let step = remaining.min(CANCEL_POLL_MS);
+                ctx.sleeper.sleep(step);
+                remaining -= step;
+            }
+            Err(e) => {
+                log::warn!("{what} 失敗（pid={wl_pid}）: {e}");
+                return;
+            }
+        }
+    }
+}
+
+/// Vulkan windowed 模式：等待 workload 的 top-level window 出現並把 client
+/// area 調成 config.width×height。
+fn resize_workload_window(ctx: &RunContext, wl_pid: u32) {
+    poll_window_ready(ctx, wl_pid, "調整 workload 視窗", || {
+        ctx.window
+            .find_and_resize(wl_pid, ctx.config.width, ctx.config.height)
+    });
+}
+
+/// 停用 workload 視窗的關閉能力（SC_CLOSE），防使用者誤關。
+fn guard_workload_window(ctx: &RunContext, wl_pid: u32) {
+    poll_window_ready(ctx, wl_pid, "停用 workload 關閉鈕", || {
+        ctx.window.guard_close(wl_pid)
+    });
+}
+
+/// 內建 Vulkan workload：先安裝關閉防護（windowed 與 fullscreen 都做），
+/// windowed 再調整 client size。
+fn prepare_workload_window(ctx: &RunContext, wl_pid: u32) {
+    if should_guard_close(&ctx.config) {
+        guard_workload_window(ctx, wl_pid);
+    }
+    if ctx.config.workload == WorkloadKind::Vulkan && !ctx.config.fullscreen {
+        resize_workload_window(ctx, wl_pid);
+    }
 }
 
 /// 主要入口：執行整個基準測試並回傳最終結果。
@@ -265,7 +391,10 @@ pub fn run_benchmark(ctx: &mut RunContext) -> RunResult {
                 reason = Some(TerminalReason::Error(codes::GPU_RESTART_FAILED.to_string()));
                 break 'outer;
             }
-            ctx.sleeper.sleep(RESTART_STABILIZE_MS);
+            if sleep_interruptible(ctx, RESTART_STABILIZE_MS) {
+                reason = Some(TerminalReason::Cancelled);
+                break 'outer;
+            }
             if let Err(e) = require_journal(&ctx.journal_path).and_then(|j| {
                 recovery::advance_to_at(&ctx.journal_path, &j, RecoveryStage::DeviceRestarted)
             }) {
@@ -303,10 +432,14 @@ pub fn run_benchmark(ctx: &mut RunContext) -> RunResult {
             // 將 workload 鎖在單一 LP 會導致 Vulkan present 事件全無、PresentMon
             // 無法產生 CSV（BENCHMARK_CAPTURE_MISSING）。
 
+            // 3.5) 內建 Vulkan：安裝關閉防護；windowed 另調整 client size
+            prepare_workload_window(ctx, wl_pid);
+
             // 4) 啟動固定等待 + 設定 warm-up
-            ctx.sleeper
-                .sleep(WORKLOAD_STARTUP_MS + (ctx.config.warm_up_secs as u64) * 1000);
-            if ctx.cancel.is_cancelled() {
+            if sleep_interruptible(
+                ctx,
+                WORKLOAD_STARTUP_MS + (ctx.config.warm_up_secs as u64) * 1000,
+            ) {
                 reason = Some(TerminalReason::Cancelled);
                 break 'outer;
             }
@@ -325,6 +458,10 @@ pub fn run_benchmark(ctx: &mut RunContext) -> RunResult {
             let csv = session_dir.join(format!("round-{round}-lp-{lp}.csv"));
             let mut capture_attempt: u32 = 1;
             let mut capture_result = run_capture(ctx, round, lp, wl_pid, &csv, capture_attempt);
+            if ctx.cancel.is_cancelled() {
+                reason = Some(TerminalReason::Cancelled);
+                break 'outer;
+            }
             while capture_attempt < MAX_CAPTURE_ATTEMPTS && should_retry_capture(&capture_result) {
                 log::warn!(
                     "capture round-{round}-lp-{lp} attempt {capture_attempt} 失敗（{:?}），進行 retry",
@@ -343,8 +480,7 @@ pub fn run_benchmark(ctx: &mut RunContext) -> RunResult {
                     reason = Some(TerminalReason::Error(codes::GPU_RESTART_FAILED.to_string()));
                     break 'outer;
                 }
-                ctx.sleeper.sleep(RESTART_STABILIZE_MS);
-                if ctx.cancel.is_cancelled() {
+                if sleep_interruptible(ctx, RESTART_STABILIZE_MS) {
                     reason = Some(TerminalReason::Cancelled);
                     break 'outer;
                 }
@@ -363,14 +499,20 @@ pub fn run_benchmark(ctx: &mut RunContext) -> RunResult {
                         break 'outer;
                     }
                 };
-                ctx.sleeper
-                    .sleep(WORKLOAD_STARTUP_MS + (ctx.config.warm_up_secs as u64) * 1000);
-                if ctx.cancel.is_cancelled() {
+                prepare_workload_window(ctx, wl_pid2);
+                if sleep_interruptible(
+                    ctx,
+                    WORKLOAD_STARTUP_MS + (ctx.config.warm_up_secs as u64) * 1000,
+                ) {
                     reason = Some(TerminalReason::Cancelled);
                     break 'outer;
                 }
                 capture_attempt += 1;
                 capture_result = run_capture(ctx, round, lp, wl_pid2, &csv, capture_attempt);
+            }
+            if ctx.cancel.is_cancelled() {
+                reason = Some(TerminalReason::Cancelled);
+                break 'outer;
             }
             if let Err(e) = capture_result {
                 if e == codes::BENCHMARK_CAPTURE_MISSING || e == codes::BENCHMARK_CAPTURE_EMPTY {
@@ -691,14 +833,18 @@ fn run_capture(
             return Err(codes::BENCHMARK_PRESENTMON_FAILED.to_string());
         }
     };
-    // 3) 等待 PresentMon 自停
-    let wait = ctx.processes.wait_exit(
+    // 3) 等待 PresentMon 自停（可中斷）
+    let wait = wait_capture(
+        ctx,
         pm_pid,
         (ctx.config.sample_secs as u64 + CAPTURE_WAIT_MARGIN_S) * 1000,
     );
-    let wait_completed = wait.is_ok();
-    let wait_timed_out = matches!(&wait, Ok(false));
-    let wait_error = wait.as_ref().err().cloned();
+    let (wait_completed, wait_timed_out, wait_error) = match &wait {
+        CaptureWaitOutcome::Exited => (true, false, None),
+        CaptureWaitOutcome::TimedOut => (true, true, None),
+        CaptureWaitOutcome::Cancelled => (true, false, None),
+        CaptureWaitOutcome::Failed(e) => (false, false, Some(e.clone())),
+    };
     // 4) 終止前先取 exit code / output tail（kill 會 reap 並丟掉 pipe 內容）
     let pm_exit_code = if wait_completed && !wait_timed_out {
         ctx.processes.exit_code(pm_pid)
@@ -718,11 +864,11 @@ fn run_capture(
     let _ = ctx.processes.kill(wl_pid);
     ctx.owned_processes.clear();
     let result = match &wait {
-        Err(e) => {
+        CaptureWaitOutcome::Failed(e) => {
             log::warn!("PresentMon wait 失敗: {e}");
             Err(codes::BENCHMARK_PRESENTMON_FAILED.to_string())
         }
-        Ok(false) => {
+        CaptureWaitOutcome::TimedOut => {
             // PresentMon 卡住：不靜默繼續，回穩定代碼；已驗證的部分結果由呼叫端保留
             log::error!(
                 "PresentMon 逾時未退出（sample={}s + margin={}s），round-{round}-lp-{lp} 失敗",
@@ -731,7 +877,13 @@ fn run_capture(
             );
             Err(codes::BENCHMARK_PRESENTMON_TIMEOUT.to_string())
         }
-        Ok(true) => validate_capture(csv),
+        CaptureWaitOutcome::Cancelled => {
+            log::info!(
+                "capture round-{round}-lp-{lp} 收到取消，提前終止 PresentMon 與 workload"
+            );
+            Err("cancelled".to_string())
+        }
+        CaptureWaitOutcome::Exited => validate_capture(csv),
     };
     // 6) 記錄診斷（成功與失敗都寫）
     let (csv_exists, csv_size) = csv_meta(csv);
@@ -1277,29 +1429,84 @@ pub mod fake {
         }
     }
 
-    /// 第 N 次 sleep 時觸發取消（測試「執行中取消」用）
+    /// 累計 sleep 達 `trigger_after_ms` 毫秒時觸發取消（測試「執行中取消」用）。
+    /// 累計毫秒與 runner 的 sleep_interruptible / wait_capture 同源，因此
+    /// 可精準落在 startup/warmup/capture wait 的某一時點。
     pub struct CancelAfterSleeper {
         pub cancel: Arc<FakeCancel>,
-        pub trigger_after: usize,
-        count: Mutex<usize>,
+        pub trigger_after_ms: u64,
+        elapsed: Mutex<u64>,
     }
 
     impl CancelAfterSleeper {
-        pub fn new(cancel: Arc<FakeCancel>, trigger_after: usize) -> Self {
+        pub fn new(cancel: Arc<FakeCancel>, trigger_after_ms: u64) -> Self {
             Self {
                 cancel,
-                trigger_after,
-                count: Mutex::new(0),
+                trigger_after_ms,
+                elapsed: Mutex::new(0),
             }
+        }
+
+        /// 目前累計 sleep 毫秒（測試斷言「取消是否提前中斷」用）
+        pub fn elapsed_ms(&self) -> u64 {
+            *self.elapsed.lock().unwrap()
         }
     }
 
     impl Sleep for CancelAfterSleeper {
-        fn sleep(&self, _ms: u64) {
-            let mut c = self.count.lock().unwrap();
-            *c += 1;
-            if *c >= self.trigger_after {
+        fn sleep(&self, ms: u64) {
+            let mut e = self.elapsed.lock().unwrap();
+            *e += ms;
+            if *e >= self.trigger_after_ms {
                 self.cancel.set(true);
+            }
+        }
+    }
+
+    /// 記錄 resize 呼叫的 fake window（不碰真實 Win32）
+    pub struct FakeWindow {
+        pub calls: Mutex<Vec<(u32, u32, u32)>>,
+        /// find_and_resize 回傳值：Some(Ok(true))=找到、Some(Ok(false))=未找到、
+        /// Some(Err)=resize 失敗、None=預設 Ok(true)
+        pub result: Mutex<Option<Result<bool, String>>>,
+        /// guard_close 呼叫紀錄（pid）
+        pub guard_calls: Mutex<Vec<u32>>,
+        /// guard_close 回傳值：Some(Ok(true))=找到、Some(Ok(false))=未找到、
+        /// Some(Err)=guard 失敗、None=預設 Ok(true)
+        pub guard_result: Mutex<Option<Result<bool, String>>>,
+    }
+
+    impl FakeWindow {
+        pub fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                result: Mutex::new(None),
+                guard_calls: Mutex::new(Vec::new()),
+                guard_result: Mutex::new(None),
+            }
+        }
+        pub fn calls_log(&self) -> Vec<(u32, u32, u32)> {
+            self.calls.lock().unwrap().clone()
+        }
+        pub fn guard_calls_log(&self) -> Vec<u32> {
+            self.guard_calls.lock().unwrap().clone()
+        }
+    }
+
+    impl WorkloadWindow for FakeWindow {
+        fn find_and_resize(&self, pid: u32, width: u32, height: u32) -> Result<bool, String> {
+            self.calls.lock().unwrap().push((pid, width, height));
+            match self.result.lock().unwrap().clone() {
+                Some(r) => r,
+                None => Ok(true),
+            }
+        }
+
+        fn guard_close(&self, pid: u32) -> Result<bool, String> {
+            self.guard_calls.lock().unwrap().push(pid);
+            match self.guard_result.lock().unwrap().clone() {
+                Some(r) => r,
+                None => Ok(true),
             }
         }
     }
@@ -1380,6 +1587,28 @@ mod tests {
         }
     }
 
+    /// 明確自訂尺寸 → workload_command 從 config.width/height 直接組出 args，
+    /// 不被 product default 覆寫（D3D9 路徑直接讀欄位，最貼近序列化後的值）。
+    #[test]
+    fn workload_command_preserves_explicit_dimensions() {
+        let dir = temp_root("wl_cmd_dims");
+        let assets = make_assets(&dir);
+        let config = BenchmarkConfig {
+            workload: WorkloadKind::D3D9,
+            fullscreen: false,
+            width: 800,
+            height: 600,
+            ..Default::default()
+        };
+        let (_exe, args) = workload_command(&assets, &config);
+        assert!(args.contains(&"--width=800".to_string()));
+        assert!(args.contains(&"--height=600".to_string()));
+        assert!(args.contains(&"--fullscreen=0".to_string()));
+        assert!(!args.contains(&"--width=1280".to_string()));
+        assert!(!args.contains(&"--height=720".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// 一組有效的 fake CSV（LP 不同 frametime）
     fn csv_for_lp(lp: u32) -> String {
         // LP 越低 fps 越高（frametime 越低）→ 讓 best_lp 可預期
@@ -1418,6 +1647,7 @@ mod tests {
             on_progress: on_progress.unwrap_or_else(|| Box::new(|_| {})),
             baseline: None,
             owned_processes: Vec::new(),
+            window: Arc::new(fake::FakeWindow::new()),
         }
     }
 
@@ -1593,15 +1823,15 @@ mod tests {
             .unwrap()
             .push_str(&csv_for_lp(0));
         let cancel = Arc::new(FakeCancel::new());
-        // 第 2 次 sleep 後取消（restart 穩定 + workload 啟動等待之後）
-        let sleeper = Arc::new(CancelAfterSleeper::new(cancel.clone(), 2));
+        // restart 穩定（5000ms）之後、warmup（5000+1000ms）期間的 8000ms 處取消
+        let sleeper = Arc::new(CancelAfterSleeper::new(cancel.clone(), 8000));
 
         let mut ctx = build_ctx(
             &root,
             backend.clone() as Arc<dyn GpuBackend>,
             processes.clone() as Arc<dyn ProcessRunner>,
             cancel as Arc<dyn CancelSignal>,
-            sleeper as Arc<dyn Sleep>,
+            sleeper.clone() as Arc<dyn Sleep>,
             base_config(),
             &journal,
             None,
@@ -1609,6 +1839,8 @@ mod tests {
         let result = run_benchmark(&mut ctx);
 
         assert_eq!(result.status, SessionStatus::Cancelled);
+        // 取消在 warmup 期間（11000ms 前）就被偵測，未睡滿 stabilize+warmup
+        assert!(sleeper.elapsed_ms() < 11000);
         // workload 已啟動，取消後必須被終止
         assert!(processes
             .spawn_log()
@@ -2704,9 +2936,9 @@ mod tests {
         // LP 0 第一次 missing → 觸發 retry；retry 期間 cancel
         processes.first_attempt_missing.lock().unwrap().insert(0);
         let cancel = Arc::new(FakeCancel::new());
-        // 第 3 次顯式 sleep 後取消：第一次 restart 穩定 + first attempt startup
-        // warmup + recovery restart 穩定；此時不應建立 retry workload。
-        let sleeper = Arc::new(CancelAfterSleeper::new(cancel.clone(), 3));
+        // 累計 13000ms 取消：落在 retry restart 穩定（11000..16000ms）期間，
+        // 此時不應建立 retry workload。
+        let sleeper = Arc::new(CancelAfterSleeper::new(cancel.clone(), 13000));
         let mut config = base_config();
         config.candidate_lps = vec![0];
 
@@ -2725,6 +2957,430 @@ mod tests {
         assert_eq!(result.status, SessionStatus::Cancelled);
         assert_eq!(backend.current_policy(GPU_A), baseline, "必須還原原始策略");
         assert!(!journal.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// capture wait（PresentMon 卡住不退出）期間取消 → 提前中斷、終止 owned、
+    /// 還原策略、狀態 Cancelled。
+    #[test]
+    fn cancel_during_capture_wait_interrupts_and_kills() {
+        let root = temp_root("cancel_capture");
+        let journal = root.join("journal.json");
+        let backend = Arc::new(FakeBackend::new(vec![device(GPU_A)]));
+        let baseline = AffinityPolicy {
+            instance_id: GPU_A.to_string(),
+            device_policy: RegistryValueSnapshot::dword(4),
+            assignment_set_override: RegistryValueSnapshot::binary(vec![0x08]),
+        };
+        backend.set_policy(baseline.clone());
+        let processes = Arc::new(FakeProcessRunner::new());
+        // PresentMon 卡住：wait_exit 一直 Ok(false)
+        processes.presentmon_timeout.store(true, Ordering::SeqCst);
+        let cancel = Arc::new(FakeCancel::new());
+        // stabilize(5000) + warmup(6000) = 11000ms 後進入 capture wait；
+        // 11500ms 處取消（capture 開始後 ~500ms），不該等到 18s 逾時。
+        let sleeper = Arc::new(CancelAfterSleeper::new(cancel.clone(), 11500));
+        let mut config = base_config();
+        config.candidate_lps = vec![0];
+
+        let mut ctx = build_ctx(
+            &root,
+            backend.clone() as Arc<dyn GpuBackend>,
+            processes.clone() as Arc<dyn ProcessRunner>,
+            cancel as Arc<dyn CancelSignal>,
+            sleeper as Arc<dyn Sleep>,
+            config,
+            &journal,
+            None,
+        );
+        let result = run_benchmark(&mut ctx);
+
+        assert_eq!(result.status, SessionStatus::Cancelled);
+        assert!(!processes.killed_log().is_empty(), "取消時必須終止 owned 子程序");
+        assert_eq!(backend.current_policy(GPU_A), baseline, "必須還原原始策略");
+        assert!(!journal.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Vulkan windowed → 對 workload PID 要求 client area 設成 config width×height
+    #[test]
+    fn windowed_vulkan_resizes_client_area_to_config() {
+        let root = temp_root("win_vk");
+        let journal = root.join("journal.json");
+        let backend = Arc::new(FakeBackend::new(vec![device(GPU_A)]));
+        backend.set_policy(AffinityPolicy {
+            instance_id: GPU_A.to_string(),
+            device_policy: RegistryValueSnapshot::dword(4),
+            assignment_set_override: RegistryValueSnapshot::binary(vec![0x08]),
+        });
+        let processes = Arc::new(FakeProcessRunner::new());
+        processes
+            .presentmon_csv
+            .lock()
+            .unwrap()
+            .push_str(&csv_for_lp(0));
+        let cancel = FakeCancel::new();
+        let window = Arc::new(fake::FakeWindow::new());
+        let mut config = base_config();
+        config.candidate_lps = vec![0];
+        config.fullscreen = false;
+        config.width = 640;
+        config.height = 480;
+
+        let mut ctx = build_ctx(
+            &root,
+            backend.clone() as Arc<dyn GpuBackend>,
+            processes.clone() as Arc<dyn ProcessRunner>,
+            Arc::new(cancel) as Arc<dyn CancelSignal>,
+            Arc::new(NoopSleeper) as Arc<dyn Sleep>,
+            config,
+            &journal,
+            None,
+        );
+        ctx.window = window.clone();
+        let result = run_benchmark(&mut ctx);
+        assert_eq!(result.status, SessionStatus::Completed, "err={:?}", result.error);
+
+        // 每次 spawn workload（含 retry）都要求 resize 成 (640, 480)
+        let wl_pids: Vec<u32> = processes
+            .spawn_log()
+            .iter()
+            .filter(|(n, _, _)| !n.contains("PresentMon"))
+            .map(|(_, p, _)| *p)
+            .collect();
+        let calls = window.calls_log();
+        assert!(!calls.is_empty(), "windowed Vulkan 必須呼叫 resize");
+        for (pid, w, h) in &calls {
+            assert!(wl_pids.contains(pid), "resize 目標必須是 spawned workload PID");
+            assert_eq!(*w, 640);
+            assert_eq!(*h, 480);
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// fullscreen Vulkan → 不強制 resize
+    #[test]
+    fn fullscreen_vulkan_does_not_resize() {
+        let root = temp_root("fs_vk");
+        let journal = root.join("journal.json");
+        let backend = Arc::new(FakeBackend::new(vec![device(GPU_A)]));
+        backend.set_policy(AffinityPolicy {
+            instance_id: GPU_A.to_string(),
+            device_policy: RegistryValueSnapshot::dword(4),
+            assignment_set_override: RegistryValueSnapshot::binary(vec![0x08]),
+        });
+        let processes = Arc::new(FakeProcessRunner::new());
+        processes
+            .presentmon_csv
+            .lock()
+            .unwrap()
+            .push_str(&csv_for_lp(0));
+        let cancel = FakeCancel::new();
+        let window = Arc::new(fake::FakeWindow::new());
+        let mut config = base_config();
+        config.candidate_lps = vec![0];
+        config.fullscreen = true;
+
+        let mut ctx = build_ctx(
+            &root,
+            backend.clone() as Arc<dyn GpuBackend>,
+            processes.clone() as Arc<dyn ProcessRunner>,
+            Arc::new(cancel) as Arc<dyn CancelSignal>,
+            Arc::new(NoopSleeper) as Arc<dyn Sleep>,
+            config,
+            &journal,
+            None,
+        );
+        ctx.window = window.clone();
+        let result = run_benchmark(&mut ctx);
+        assert_eq!(result.status, SessionStatus::Completed);
+        assert!(window.calls_log().is_empty(), "fullscreen Vulkan 不該 resize");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// D3D9（即使非 fullscreen）→ 不強制 resize
+    #[test]
+    fn d3d9_does_not_resize() {
+        let root = temp_root("d3d9");
+        let journal = root.join("journal.json");
+        let backend = Arc::new(FakeBackend::new(vec![device(GPU_A)]));
+        backend.set_policy(AffinityPolicy {
+            instance_id: GPU_A.to_string(),
+            device_policy: RegistryValueSnapshot::dword(4),
+            assignment_set_override: RegistryValueSnapshot::binary(vec![0x08]),
+        });
+        let processes = Arc::new(FakeProcessRunner::new());
+        processes
+            .presentmon_csv
+            .lock()
+            .unwrap()
+            .push_str(&csv_for_lp(0));
+        let cancel = FakeCancel::new();
+        let window = Arc::new(fake::FakeWindow::new());
+        let mut config = base_config();
+        config.candidate_lps = vec![0];
+        config.workload = WorkloadKind::D3D9;
+        config.fullscreen = false;
+
+        let mut ctx = build_ctx(
+            &root,
+            backend.clone() as Arc<dyn GpuBackend>,
+            processes.clone() as Arc<dyn ProcessRunner>,
+            Arc::new(cancel) as Arc<dyn CancelSignal>,
+            Arc::new(NoopSleeper) as Arc<dyn Sleep>,
+            config,
+            &journal,
+            None,
+        );
+        ctx.window = window.clone();
+        let result = run_benchmark(&mut ctx);
+        assert_eq!(result.status, SessionStatus::Completed);
+        assert!(window.calls_log().is_empty(), "D3D9 不該 resize");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 內建 Vulkan windowed → 安裝關閉防護 + resize client area
+    #[test]
+    fn windowed_vulkan_guards_close_and_resizes() {
+        let root = temp_root("guard_win");
+        let journal = root.join("journal.json");
+        let backend = Arc::new(FakeBackend::new(vec![device(GPU_A)]));
+        backend.set_policy(AffinityPolicy {
+            instance_id: GPU_A.to_string(),
+            device_policy: RegistryValueSnapshot::dword(4),
+            assignment_set_override: RegistryValueSnapshot::binary(vec![0x08]),
+        });
+        let processes = Arc::new(FakeProcessRunner::new());
+        processes
+            .presentmon_csv
+            .lock()
+            .unwrap()
+            .push_str(&csv_for_lp(0));
+        let cancel = FakeCancel::new();
+        let window = Arc::new(fake::FakeWindow::new());
+        let mut config = base_config();
+        config.candidate_lps = vec![0];
+        config.fullscreen = false;
+
+        let mut ctx = build_ctx(
+            &root,
+            backend.clone() as Arc<dyn GpuBackend>,
+            processes.clone() as Arc<dyn ProcessRunner>,
+            Arc::new(cancel) as Arc<dyn CancelSignal>,
+            Arc::new(NoopSleeper) as Arc<dyn Sleep>,
+            config,
+            &journal,
+            None,
+        );
+        ctx.window = window.clone();
+        let result = run_benchmark(&mut ctx);
+        assert_eq!(result.status, SessionStatus::Completed);
+
+        let wl_pids: Vec<u32> = processes
+            .spawn_log()
+            .iter()
+            .filter(|(n, _, _)| !n.contains("PresentMon"))
+            .map(|(_, p, _)| *p)
+            .collect();
+        let guards = window.guard_calls_log();
+        assert!(!guards.is_empty(), "windowed Vulkan 必須安裝關閉防護");
+        for pid in &guards {
+            assert!(wl_pids.contains(pid), "guard 目標必須是 spawned workload PID");
+        }
+        assert!(
+            !window.calls_log().is_empty(),
+            "windowed Vulkan 仍須 resize client area"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 內建 Vulkan fullscreen → 安裝關閉防護，但不 resize
+    #[test]
+    fn fullscreen_vulkan_guards_close_but_does_not_resize() {
+        let root = temp_root("guard_fs");
+        let journal = root.join("journal.json");
+        let backend = Arc::new(FakeBackend::new(vec![device(GPU_A)]));
+        backend.set_policy(AffinityPolicy {
+            instance_id: GPU_A.to_string(),
+            device_policy: RegistryValueSnapshot::dword(4),
+            assignment_set_override: RegistryValueSnapshot::binary(vec![0x08]),
+        });
+        let processes = Arc::new(FakeProcessRunner::new());
+        processes
+            .presentmon_csv
+            .lock()
+            .unwrap()
+            .push_str(&csv_for_lp(0));
+        let cancel = FakeCancel::new();
+        let window = Arc::new(fake::FakeWindow::new());
+        let mut config = base_config();
+        config.candidate_lps = vec![0];
+        config.fullscreen = true;
+
+        let mut ctx = build_ctx(
+            &root,
+            backend.clone() as Arc<dyn GpuBackend>,
+            processes.clone() as Arc<dyn ProcessRunner>,
+            Arc::new(cancel) as Arc<dyn CancelSignal>,
+            Arc::new(NoopSleeper) as Arc<dyn Sleep>,
+            config,
+            &journal,
+            None,
+        );
+        ctx.window = window.clone();
+        let result = run_benchmark(&mut ctx);
+        assert_eq!(result.status, SessionStatus::Completed);
+
+        assert!(
+            !window.guard_calls_log().is_empty(),
+            "fullscreen Vulkan 也須安裝關閉防護"
+        );
+        assert!(
+            window.calls_log().is_empty(),
+            "fullscreen Vulkan 不該 resize"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// D3D9 → 不安裝關閉防護、不 resize
+    #[test]
+    fn d3d9_does_not_guard() {
+        let root = temp_root("guard_d3d9");
+        let journal = root.join("journal.json");
+        let backend = Arc::new(FakeBackend::new(vec![device(GPU_A)]));
+        backend.set_policy(AffinityPolicy {
+            instance_id: GPU_A.to_string(),
+            device_policy: RegistryValueSnapshot::dword(4),
+            assignment_set_override: RegistryValueSnapshot::binary(vec![0x08]),
+        });
+        let processes = Arc::new(FakeProcessRunner::new());
+        processes
+            .presentmon_csv
+            .lock()
+            .unwrap()
+            .push_str(&csv_for_lp(0));
+        let cancel = FakeCancel::new();
+        let window = Arc::new(fake::FakeWindow::new());
+        let mut config = base_config();
+        config.candidate_lps = vec![0];
+        config.workload = WorkloadKind::D3D9;
+        config.fullscreen = false;
+
+        let mut ctx = build_ctx(
+            &root,
+            backend.clone() as Arc<dyn GpuBackend>,
+            processes.clone() as Arc<dyn ProcessRunner>,
+            Arc::new(cancel) as Arc<dyn CancelSignal>,
+            Arc::new(NoopSleeper) as Arc<dyn Sleep>,
+            config,
+            &journal,
+            None,
+        );
+        ctx.window = window.clone();
+        let result = run_benchmark(&mut ctx);
+        assert_eq!(result.status, SessionStatus::Completed);
+        assert!(
+            window.guard_calls_log().is_empty(),
+            "D3D9 不該安裝關閉防護"
+        );
+        assert!(window.calls_log().is_empty(), "D3D9 不該 resize");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 自訂 Vulkan executable（workload_exe_path 覆寫）→ 不安裝關閉防護
+    #[test]
+    fn custom_vulkan_executable_does_not_guard() {
+        let root = temp_root("guard_custom");
+        let journal = root.join("journal.json");
+        let backend = Arc::new(FakeBackend::new(vec![device(GPU_A)]));
+        backend.set_policy(AffinityPolicy {
+            instance_id: GPU_A.to_string(),
+            device_policy: RegistryValueSnapshot::dword(4),
+            assignment_set_override: RegistryValueSnapshot::binary(vec![0x08]),
+        });
+        let processes = Arc::new(FakeProcessRunner::new());
+        processes
+            .presentmon_csv
+            .lock()
+            .unwrap()
+            .push_str(&csv_for_lp(0));
+        let cancel = FakeCancel::new();
+        let window = Arc::new(fake::FakeWindow::new());
+        let mut config = base_config();
+        config.candidate_lps = vec![0];
+        config.workload_exe_path = Some("custom-lava.exe".to_string());
+        config.fullscreen = true;
+
+        let mut ctx = build_ctx(
+            &root,
+            backend.clone() as Arc<dyn GpuBackend>,
+            processes.clone() as Arc<dyn ProcessRunner>,
+            Arc::new(cancel) as Arc<dyn CancelSignal>,
+            Arc::new(NoopSleeper) as Arc<dyn Sleep>,
+            config,
+            &journal,
+            None,
+        );
+        ctx.window = window.clone();
+        let result = run_benchmark(&mut ctx);
+        assert_eq!(result.status, SessionStatus::Completed);
+        assert!(
+            window.guard_calls_log().is_empty(),
+            "自訂 Vulkan exe 不該安裝關閉防護"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// guard 安裝失敗（helper 回 Err）→ 只 log warn，benchmark 仍正常完成
+    #[test]
+    fn guard_failure_does_not_fail_benchmark() {
+        let root = temp_root("guard_fail");
+        let journal = root.join("journal.json");
+        let backend = Arc::new(FakeBackend::new(vec![device(GPU_A)]));
+        backend.set_policy(AffinityPolicy {
+            instance_id: GPU_A.to_string(),
+            device_policy: RegistryValueSnapshot::dword(4),
+            assignment_set_override: RegistryValueSnapshot::binary(vec![0x08]),
+        });
+        let processes = Arc::new(FakeProcessRunner::new());
+        processes
+            .presentmon_csv
+            .lock()
+            .unwrap()
+            .push_str(&csv_for_lp(0));
+        let cancel = FakeCancel::new();
+        let window = Arc::new(fake::FakeWindow::new());
+        window
+            .guard_result
+            .lock()
+            .unwrap()
+            .replace(Err("guard 失敗".to_string()));
+        let mut config = base_config();
+        config.candidate_lps = vec![0];
+        config.fullscreen = false;
+
+        let mut ctx = build_ctx(
+            &root,
+            backend.clone() as Arc<dyn GpuBackend>,
+            processes.clone() as Arc<dyn ProcessRunner>,
+            Arc::new(cancel) as Arc<dyn CancelSignal>,
+            Arc::new(NoopSleeper) as Arc<dyn Sleep>,
+            config,
+            &journal,
+            None,
+        );
+        ctx.window = window.clone();
+        let result = run_benchmark(&mut ctx);
+        assert_eq!(
+            result.status,
+            SessionStatus::Completed,
+            "guard 失敗不得中斷 benchmark: err={:?}",
+            result.error
+        );
+        assert!(
+            !window.guard_calls_log().is_empty(),
+            "guard 失敗前仍應有呼叫紀錄"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

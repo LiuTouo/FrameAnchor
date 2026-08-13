@@ -149,7 +149,7 @@
     padding: 1px 8px;
     border-radius: var(--radius-full);
     font-size: 12px;
-    font-weight: 500;
+    font-weight: var(--font-weight-medium);
     line-height: 20px;
   }
 

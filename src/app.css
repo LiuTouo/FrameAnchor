@@ -1,8 +1,24 @@
-/* ── 字型：IBM Plex Sans TC Medium ── */
+/* ── 字型：IBM Plex Sans TC ── */
+@font-face {
+  font-family: 'IBM Plex Sans TC';
+  src: url('./assets/fonts/IBMPlexSansTC-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
 @font-face {
   font-family: 'IBM Plex Sans TC';
   src: url('./assets/fonts/IBMPlexSansTC-Medium.woff2') format('woff2');
   font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'IBM Plex Sans TC';
+  src: url('./assets/fonts/IBMPlexSansTC-SemiBold.woff2') format('woff2');
+  font-weight: 600;
   font-style: normal;
   font-display: swap;
 }
@@ -87,6 +103,11 @@
 
 /* ── 不隨主題變化的固定代幣 ── */
 :root {
+  /* 字重階層：正文／控制項強調／標題 */
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+
   /* 向後相容別名（舊組件仍使用舊變數名稱） */
   --bg: var(--surface-0);
   --panel: var(--surface-1);
@@ -148,11 +169,30 @@ body {
   background: var(--surface-0);
   color: var(--text-primary);
   font-family: 'IBM Plex Sans TC', system-ui, sans-serif;
+  font-weight: var(--font-weight-regular);
   font-size: 13px;
   line-height: 1.5;
   overflow: hidden;
   user-select: none;
   -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+strong,
+b {
+  font-weight: var(--font-weight-semibold);
 }
 
 /* ── 焦點可見（鍵盤導航時顯示焦點環；滑鼠點擊時不顯示） ── */
@@ -301,7 +341,7 @@ select {
   padding: 0 6px;
   border-radius: var(--radius-xs);
   font-size: 10px;
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
   line-height: 16px;
   letter-spacing: 0.02em;
 }
@@ -343,7 +383,7 @@ td:first-child {
 th {
   color: var(--text-secondary);
   font-size: 12px;
-  font-weight: 500;
+  font-weight: var(--font-weight-medium);
 }
 
 /* ── 空狀態 / 錯誤狀態 ── */

@@ -2,11 +2,44 @@
 //   - PresentMon-2.5.1-x64.exe（GameTechDev/PresentMon，MIT）
 //   - lava-triangle.exe + LICENSE（valleyofdoom/AutoGpuAffinity 1.0.0 內附的
 //     liblava Vulkan workload，MIT）
+// 下載後以 mt.exe 嵌入 lava-triangle.manifest（宣告 PerMonitorV2 DPI 感知），
+// 再計算 hash，確保 vendor 的二進位檔含 DPI 清單。
 // 資產已 vendor 在 git 內；此 script 供重新取得/校驗 manifest。
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+
+const MANIFEST = 'scripts/lava-triangle.manifest';
+
+/** 在 Windows Kits 10 安裝中尋找 x64 mt.exe，取最高 SDK 版本。 */
+function findMtExe() {
+  const base = 'C:\\Program Files (x86)\\Windows Kits\\10\\bin';
+  if (!existsSync(base)) return null;
+  const dirs = readdirSync(base, { withFileTypes: true })
+    .filter(d => d.isDirectory() && /^\d+\.\d+\.\d+\.\d+$/.test(d.name))
+    .map(d => d.name)
+    .sort()
+    .reverse();
+  for (const ver of dirs) {
+    const mt = path.join(base, ver, 'x64', 'mt.exe');
+    if (existsSync(mt)) return mt;
+  }
+  return null;
+}
+
+/** 將 manifest 嵌入 PE 的 RT_MANIFEST 資源（#1），覆寫原有 manifest。 */
+function embedManifest(exe) {
+  const mt = findMtExe();
+  if (!mt) {
+    throw new Error(
+      '找不到 Windows SDK mt.exe。請安裝 Windows 10 SDK（含 Windows Kits 10\\bin\\<ver>\\x64\\mt.exe）。',
+    );
+  }
+  console.log(`嵌入 manifest: ${MANIFEST} → ${exe}（mt=${mt}）`);
+  const res = spawnSync(mt, ['-manifest', MANIFEST, `-outputresource:${exe};#1`], { stdio: 'inherit' });
+  if (res.status !== 0) throw new Error(`mt.exe 嵌入 manifest 失敗，exit=${res.status}`);
+}
 
 const DIR = 'src-tauri/resources/benchmark';
 const TMP = 'scripts/.assets-tmp';
@@ -58,6 +91,9 @@ try {
   if (existsSync(lavaLic)) copy(lavaLic, path.join(DIR, 'LICENSE-liblava.txt'));
   copy(pmLic, path.join(DIR, 'LICENSE-PresentMon.txt'));
   rmSync(path.join(DIR, 'PresentMon-1.10.0-x64.exe'), { force: true });
+
+  // 嵌入 DPI 感知 manifest（PerMonitorV2），讓全螢幕覆蓋縮放 >100% 的整個桌面
+  embedManifest(path.join(DIR, 'lava-triangle.exe'));
 
   const manifest = [
     '# FrameAnchor GPU 基準測試內建資源的固定 SHA-256。',

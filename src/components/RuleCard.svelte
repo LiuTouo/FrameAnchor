@@ -399,7 +399,7 @@
   }
   .name {
     width: 160px;
-    font-weight: 500;
+    font-weight: var(--font-weight-medium);
   }
   .exe {
     flex: 1;
@@ -432,7 +432,7 @@
   .label {
     color: var(--muted);
     font-size: 11px;
-    font-weight: 500;
+    font-weight: var(--font-weight-medium);
     margin-bottom: 5px;
   }
   .row {

@@ -162,6 +162,7 @@
     "sample": "取樣（秒）",
     "repetitions": "輪數（1-3）",
     "fullscreen": "全螢幕",
+    "fullscreenResolutionHint": "全螢幕模式使用目前顯示器解析度",
     "width": "寬度",
     "height": "高度",
     "fpsCap": "FPS 上限（0=不限）",
@@ -194,6 +195,7 @@
     "progress": "進度 {pct}%",
     "eta": "剩餘約 {minutes} 分鐘",
     "cancel": "取消測試",
+    "cancelling": "取消中…",
     "resultsTitle": "測試結果",
     "colLp": "核心",
     "colAvg": "平均 FPS",
@@ -248,7 +250,12 @@
     "noDetail": "無詳細資料",
     "storageInfo": "總佔用 {bytes} / {count} 筆",
     "recoveryBanner": "上次 GPU 變更未完整還原。請重啟 FrameAnchor 或先手動還原，才能開始新測試或套用。",
-    "cpuTag": "CPU"
+    "cpuTag": "CPU",
+    "manualAffinityTitle": "手動 GPU 中斷親和性",
+    "manualAffinityLpSelect": "鎖定核心",
+    "manualApply": "套用到 GPU",
+    "manualApplyConfirmTitle": "套用 GPU 中斷親和性？",
+    "manualApplyConfirmBody": "將 {gpu} 的 GPU 中斷親和性設為核心 {lp}？畫面可能閃爍數秒。"
   },
   "errors": {
     "ACCESS_DENIED": "存取被拒（可能受反作弊保護）",

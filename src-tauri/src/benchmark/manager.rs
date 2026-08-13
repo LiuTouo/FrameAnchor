@@ -23,6 +23,7 @@ use super::process_win::RealProcessRunner;
 use super::recovery::{self, RecoveryJournal, RecoveryStage};
 use super::runner::{self, CancelSignal, ProcessRunner, RunContext};
 use super::storage;
+use super::window_win::RealWorkloadWindow;
 use super::{
     cpu_fingerprint_with, detect_cpu_identity, ApplyStatus, BenchmarkConfig, BenchmarkStage,
     BenchmarkState, CpuIdentity, SessionStatus, SessionSummary, WorkloadKind,
@@ -37,9 +38,7 @@ pub fn restore_record_path() -> PathBuf {
 // ── 協調流程（free function，可注入路徑測試）────────────────────────────
 
 /// 把已完成 session 的最佳 LP 套用到對應 GPU。
-/// 步驟：相容性驗證 → BasicDisplay 防呆 → 快照 + 還原日誌 → 寫策略 →
-/// 重啟裝置 → 驗證 → 持久化一層還原記錄 → 清除日誌。
-/// 任何失敗都嘗試還原「本次快照」；還原成功才清日誌，失敗保留日誌等啟動重試。
+/// 步驟：相容性驗證 → BasicDisplay 防呆 → 委派到 [`apply_affinity_to_gpu`]。
 /// `sleeper` 與 `cpu_identity` 注入，讓測試不真睡、不依賴真實 CPU 身分。
 pub fn apply_best_affinity(
     backend: &dyn GpuBackend,
@@ -88,16 +87,32 @@ pub fn apply_best_affinity(
         return Err(codes::GPU_BASIC_DISPLAY_DISABLED.to_string());
     }
 
-    // 4) 快照目前策略 + 寫還原日誌（第一次變更之前）
+    // 4) 委派到共享 mutation 路徑
+    apply_affinity_to_gpu(backend, sleeper, instance_id, best_lp, journal_path, restore_path)
+}
+
+/// 將 GPU 中斷親和性套用到指定 LP。
+/// 步驟：快照 + 還原日誌 → 寫策略 → 重啟裝置 → 驗證 → 持久化還原記錄 → 清除日誌。
+/// 任何失敗都嘗試還原「本次快照」；還原成功才清日誌，失敗保留日誌等啟動重試。
+/// 呼叫端負責所有前置驗證（LP 範圍、GPU 存在、BasicDisplay、recovery_required）。
+pub fn apply_affinity_to_gpu(
+    backend: &dyn GpuBackend,
+    sleeper: &dyn Sleep,
+    instance_id: &str,
+    lp: u32,
+    journal_path: &Path,
+    restore_path: &Path,
+) -> Result<(), String> {
+    // 1) 快照目前策略 + 寫還原日誌（第一次變更之前）
     let snapshot = backend
         .read_affinity_policy(instance_id)
         .map_err(|e| e.code().to_string())?;
     recovery::begin_at(journal_path, &snapshot)?;
 
-    // 5) 寫入新策略：DevicePolicy=4（DWORD）+ AssignmentSetOverride=單 LP mask（REG_BINARY）
-    let override_bytes = single_lp_mask_bytes(best_lp);
+    // 2) 寫入新策略：DevicePolicy=4（DWORD）+ AssignmentSetOverride=單 LP mask（REG_BINARY）
+    let override_bytes = single_lp_mask_bytes(lp);
     let new_policy = AffinityPolicy {
-        instance_id: instance_id.clone(),
+        instance_id: instance_id.to_string(),
         device_policy: RegistryValueSnapshot::dword(DEVICE_POLICY_SINGLE_PROCESSOR),
         assignment_set_override: RegistryValueSnapshot::binary(override_bytes.clone()),
     };
@@ -111,7 +126,7 @@ pub fn apply_best_affinity(
     let journal = require_journal(journal_path)?;
     recovery::advance_to_at(journal_path, &journal, RecoveryStage::PolicyApplied)?;
 
-    // 6) 重啟裝置（disable→停頓→enable→停頓）
+    // 3) 重啟裝置（disable→停頓→enable→停頓）
     if let Err(_e) = backend.restart_device(instance_id, sleeper) {
         let restored = restore_snapshot(backend, sleeper, &snapshot).is_ok();
         if restored {
@@ -122,7 +137,7 @@ pub fn apply_best_affinity(
     let journal = require_journal(journal_path)?;
     recovery::advance_to_at(journal_path, &journal, RecoveryStage::DeviceRestarted)?;
 
-    // 7) 驗證新策略已生效（AssignmentSetOverride 逐位元組比對）
+    // 4) 驗證新策略已生效（AssignmentSetOverride 逐位元組比對）
     let read_back = backend
         .read_affinity_policy(instance_id)
         .map_err(|e| e.code().to_string())?;
@@ -136,7 +151,7 @@ pub fn apply_best_affinity(
         return Err(codes::GPU_APPLY_FAILED.to_string());
     }
 
-    // 8) 持久化一層還原記錄，清除日誌
+    // 5) 持久化一層還原記錄，清除日誌
     write_restore_record(restore_path, &snapshot)?;
     recovery::clear_at(journal_path)?;
     Ok(())
@@ -360,6 +375,68 @@ impl BenchmarkManager {
         )
     }
 
+    /// 手動套用 GPU 中斷親和性到指定 LP。前置驗證：recovery、執行中、
+    /// LP 範圍、GPU 存在、BasicDisplay；驗證後委派到共享 mutation 路徑。
+    pub fn apply_gpu_affinity(
+        &self,
+        topo: &Topology,
+        instance_id: &str,
+        lp: u32,
+    ) -> Result<(), String> {
+        self.apply_gpu_affinity_at(
+            topo,
+            instance_id,
+            lp,
+            &recovery::recovery_path(),
+            &restore_record_path(),
+        )
+    }
+
+    /// 手動套用 GPU 中斷親和性到指定 LP（可注入還原日誌與還原記錄路徑供測試隔離）。
+    /// 前置驗證與 [`apply_gpu_affinity`] 相同。
+    pub fn apply_gpu_affinity_at(
+        &self,
+        topo: &Topology,
+        instance_id: &str,
+        lp: u32,
+        journal_path: &Path,
+        restore_path: &Path,
+    ) -> Result<(), String> {
+        if self.recovery_required() {
+            return Err(codes::BENCHMARK_RECOVERY_REQUIRED.to_string());
+        }
+        if self.is_running() {
+            return Err(codes::BENCHMARK_ALREADY_RUNNING.to_string());
+        }
+        if lp >= topo.total_lp.min(64) {
+            return Err(codes::BENCHMARK_SESSION_INCOMPATIBLE.to_string());
+        }
+        let present = self
+            .backend
+            .enumerate_present_adapters()
+            .map_err(|e| e.code().to_string())?
+            .iter()
+            .any(|d| d.instance_id.eq_ignore_ascii_case(instance_id));
+        if !present {
+            return Err(codes::GPU_NOT_FOUND.to_string());
+        }
+        if !self
+            .backend
+            .basic_display_enabled()
+            .map_err(|e| e.code().to_string())?
+        {
+            return Err(codes::GPU_BASIC_DISPLAY_DISABLED.to_string());
+        }
+        apply_affinity_to_gpu(
+            self.backend.as_ref(),
+            self.sleeper.as_ref(),
+            instance_id,
+            lp,
+            journal_path,
+            restore_path,
+        )
+    }
+
     /// 還原到先前策略。這是使用者顯式還原，不因 recovery_required 封鎖。
     pub fn restore_previous(&self) -> Result<(), String> {
         restore_previous_affinity(
@@ -460,6 +537,7 @@ impl BenchmarkManager {
             }),
             baseline: None,
             owned_processes: Vec::new(),
+            window: Arc::new(RealWorkloadWindow::new()),
         };
 
         tauri::async_runtime::spawn_blocking(move || {
@@ -860,8 +938,8 @@ mod tests {
     fn apply_blocks_when_basic_display_disabled() {
         let dir = temp_dir("basic");
         let storage_root = dir.join("benchmarks");
-        let mut backend = FakeBackend::new(vec![device(GPU_A)]);
-        backend.basic_display_on = false;
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        backend.basic_display_on.store(false, Ordering::SeqCst);
         let sid = completed_session(&storage_root, &topo(), GPU_A, 3);
         let err = apply_best_affinity(
             &backend,
@@ -1487,6 +1565,144 @@ mod tests {
         assert!(!ids.contains(&bad_gpu));
         assert!(!ids.contains(&running));
         assert!(!ids.contains(&no_best));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── apply_affinity_to_gpu（共享 mutation 路徑）──
+
+    #[test]
+    fn shared_apply_writes_policy_and_records() {
+        let dir = temp_dir("shared_ok");
+        let journal = dir.join("journal.json");
+        let restore = dir.join("restore.json");
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        backend.set_policy(policy_on(GPU_A, 2, 0b1));
+
+        apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 3, &journal, &restore).unwrap();
+
+        let cur = backend.current_policy(GPU_A);
+        assert_dword(&cur, "DevicePolicy", DEVICE_POLICY_SINGLE_PROCESSOR);
+        assert_override_mask(&cur, 1u32 << 3);
+        assert_eq!(backend.restart_count(), 1);
+        assert!(!journal.exists(), "成功後日誌應清除");
+        assert!(restore.exists(), "一層還原記錄應寫入");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shared_apply_write_failure_restores() {
+        let dir = temp_dir("shared_wfail");
+        let journal = dir.join("journal.json");
+        let restore = dir.join("restore.json");
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        let original = policy_on(GPU_A, 2, 0b1);
+        backend.set_policy(original.clone());
+        backend.fail_next_write();
+
+        let err =
+            apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore).unwrap_err();
+        assert_eq!(err, codes::GPU_APPLY_FAILED);
+        assert_eq!(backend.current_policy(GPU_A), original);
+        assert!(!journal.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── BenchmarkManager.apply_gpu_affinity ──
+
+    fn manager_with_gpu(gpu: &str) -> (BenchmarkManager, Arc<FakeBackend>) {
+        let fake = Arc::new(FakeBackend::new(vec![device(gpu)]));
+        let backend = fake.clone() as Arc<dyn GpuBackend>;
+        (BenchmarkManager::new(backend), fake)
+    }
+
+    #[test]
+    fn apply_gpu_affinity_success_writes_correct_mask() {
+        let dir = temp_dir("mgr_ok");
+        let journal = dir.join("journal.json");
+        let restore = dir.join("restore.json");
+        let (m, fake) = manager_with_gpu(GPU_A);
+        fake.set_policy(policy_on(GPU_A, 2, 0b1));
+
+        m.apply_gpu_affinity_at(&topo(), GPU_A, 5, &journal, &restore)
+            .unwrap();
+
+        let cur = m.backend.read_affinity_policy(GPU_A).unwrap();
+        assert_dword(&cur, "DevicePolicy", DEVICE_POLICY_SINGLE_PROCESSOR);
+        assert_override_mask(&cur, 1u32 << 5);
+        assert!(!journal.exists(), "成功後日誌應清除");
+        assert!(restore.exists(), "一層還原記錄應寫入");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_gpu_affinity_rejects_invalid_lp_outside_range() {
+        let (m, _fake) = manager_with_gpu(GPU_A);
+        // 8-LP 拓撲，lp=8 超出範圍
+        let err = m.apply_gpu_affinity(&topo(), GPU_A, 8).unwrap_err();
+        assert_eq!(err, codes::BENCHMARK_SESSION_INCOMPATIBLE);
+    }
+
+    #[test]
+    fn apply_gpu_affinity_rejects_lp_64() {
+        let (m, _fake) = manager_with_gpu(GPU_A);
+        let topo64 = topo_64();
+        // 64-LP 拓撲，lp=64 超出 group 0 上限
+        let err = m.apply_gpu_affinity(&topo64, GPU_A, 64).unwrap_err();
+        assert_eq!(err, codes::BENCHMARK_SESSION_INCOMPATIBLE);
+    }
+
+    #[test]
+    fn apply_gpu_affinity_rejects_missing_gpu() {
+        let (m, _fake) = manager_with_gpu(GPU_A);
+        // 本機只有 GPU_A，GPU_B 不存在
+        let err = m.apply_gpu_affinity(&topo(), GPU_B, 3).unwrap_err();
+        assert_eq!(err, codes::GPU_NOT_FOUND);
+    }
+
+    #[test]
+    fn apply_gpu_affinity_blocks_when_running() {
+        let (m, _fake) = manager_with_gpu(GPU_A);
+        m.state.write().unwrap().status = SessionStatus::Running;
+        let err = m.apply_gpu_affinity(&topo(), GPU_A, 3).unwrap_err();
+        assert_eq!(err, codes::BENCHMARK_ALREADY_RUNNING);
+    }
+
+    #[test]
+    fn apply_gpu_affinity_blocks_recovery_required() {
+        let (m, _fake) = manager_with_gpu(GPU_A);
+        m.recovery_required.store(true, Ordering::Relaxed);
+        let err = m.apply_gpu_affinity(&topo(), GPU_A, 3).unwrap_err();
+        assert_eq!(err, codes::BENCHMARK_RECOVERY_REQUIRED);
+    }
+
+    #[test]
+    fn apply_gpu_affinity_blocks_basic_display_disabled() {
+        let (m, fake) = manager_with_gpu(GPU_A);
+        fake.basic_display_on.store(false, Ordering::SeqCst);
+        let err = m.apply_gpu_affinity(&topo(), GPU_A, 3).unwrap_err();
+        assert_eq!(err, codes::GPU_BASIC_DISPLAY_DISABLED);
+    }
+
+    #[test]
+    fn apply_gpu_affinity_write_failure_restores_and_clears_journal() {
+        let dir = temp_dir("mgr_writefail");
+        let journal = dir.join("journal.json");
+        let restore = dir.join("restore.json");
+        let (m, fake) = manager_with_gpu(GPU_A);
+        let original = policy_on(GPU_A, 2, 0b1);
+        fake.set_policy(original.clone());
+        fake.fail_next_write();
+
+        let err =
+            m.apply_gpu_affinity_at(&topo(), GPU_A, 4, &journal, &restore)
+                .unwrap_err();
+        assert_eq!(err, codes::GPU_APPLY_FAILED);
+        // 還原成功 → 策略回原樣，日誌清除
+        assert_eq!(
+            m.backend.read_affinity_policy(GPU_A).unwrap(),
+            original
+        );
+        assert!(!journal.exists(), "還原成功後日誌應清除");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

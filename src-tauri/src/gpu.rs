@@ -606,7 +606,7 @@ pub mod fake {
     /// 可注入的記憶體 backend。`policies` 即「目前的註冊表狀態」。
     pub struct FakeBackend {
         pub devices: Vec<GpuDevice>,
-        pub basic_display_on: bool,
+        pub basic_display_on: AtomicBool,
         /// 下一次 restart 的 disable 階段失敗（一次性，之後恢復）
         pub fail_next_restart: AtomicBool,
         /// 持續讓 disable 失敗（enable 永不嘗試）
@@ -625,7 +625,7 @@ pub mod fake {
         pub fn new(devices: Vec<GpuDevice>) -> Self {
             Self {
                 devices,
-                basic_display_on: true,
+                basic_display_on: AtomicBool::new(true),
                 fail_next_restart: AtomicBool::new(false),
                 disable_fails: AtomicBool::new(false),
                 enable_fails: AtomicBool::new(false),
@@ -708,7 +708,7 @@ pub mod fake {
         }
 
         fn basic_display_enabled(&self) -> Result<bool, GpuError> {
-            Ok(self.basic_display_on)
+            Ok(self.basic_display_on.load(Ordering::SeqCst))
         }
     }
 }

@@ -82,6 +82,18 @@ pub fn apply_best_gpu_affinity(
     state.benchmark.apply_best(&state.topology, &session_id)
 }
 
+/// 手動套用 GPU 中斷親和性到指定 LP（不經 session；前置驗證 recovery/執行中/LP/GPU/BasicDisplay）
+#[tauri::command]
+pub fn apply_gpu_affinity(
+    state: State<Arc<AppState>>,
+    instance_id: String,
+    lp: u32,
+) -> Result<(), String> {
+    state
+        .benchmark
+        .apply_gpu_affinity(&state.topology, &instance_id, lp)
+}
+
 /// 查詢歷史 session 現在可否套用（不做變更；相容性判定只在後端）
 #[tauri::command]
 pub fn get_benchmark_apply_status(state: State<Arc<AppState>>, session_id: String) -> ApplyStatus {
