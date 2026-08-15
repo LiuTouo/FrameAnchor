@@ -36,7 +36,8 @@
     "ioFail": "I/O 失敗",
     "memFail": "記憶體失敗",
     "partialWarning": "親和性成功，優先級失敗",
-    "priorityFail": "優先級失敗（可能受反作弊保護）"
+    "priorityFail": "優先級失敗（可能受反作弊保護）",
+    "threadIdealPartial": "偏好核心已套用到 {succeeded}/{attempted} 個執行緒"
   },
   "rules": {
     "addRule": "＋ 新增規則（瀏覽執行中視窗）",

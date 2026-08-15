@@ -328,18 +328,30 @@ pub fn kill_orphan_webviews() {
     }
 }
 
+/// 執行緒 ideal processor 套用結果（attempted = 隸屬該 pid 的全部執行緒，succeeded = 成功設定數）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadIdealOutcome {
+    pub attempted: usize,
+    pub succeeded: usize,
+}
+
 /// 軟綁定：進程所有執行緒設 ideal processor（偏好核心，round-robin）。
-/// 單一執行緒失敗跳過（best-effort），回傳成功設定數。
-pub fn set_threads_ideal(pid: u32, cores: &[u32]) -> usize {
+/// 單一執行緒失敗跳過（best-effort），回傳 attempted/succeeded 供呼叫端分類。
+pub fn set_threads_ideal(pid: u32, cores: &[u32]) -> ThreadIdealOutcome {
+    let zero = ThreadIdealOutcome {
+        attempted: 0,
+        succeeded: 0,
+    };
     if cores.is_empty() {
-        return 0;
+        return zero;
     }
-    let mut count = 0usize;
+    let mut attempted = 0usize;
+    let mut succeeded = 0usize;
     let mut idx = 0usize;
     unsafe {
         let snap = match CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) {
             Ok(h) => h,
-            Err(_) => return 0,
+            Err(_) => return zero,
         };
         let mut entry = THREADENTRY32 {
             dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
@@ -348,6 +360,7 @@ pub fn set_threads_ideal(pid: u32, cores: &[u32]) -> usize {
         if Thread32First(snap, &mut entry).is_ok() {
             loop {
                 if entry.th32OwnerProcessID == pid {
+                    attempted += 1;
                     let preferred = PROCESSOR_NUMBER {
                         Group: 0, // v1 只支援 group 0（前 64 LP）
                         Number: cores[idx % cores.len()] as u8,
@@ -355,7 +368,7 @@ pub fn set_threads_ideal(pid: u32, cores: &[u32]) -> usize {
                     };
                     if let Ok(t) = OpenThread(THREAD_SET_INFORMATION, false, entry.th32ThreadID) {
                         if SetThreadIdealProcessorEx(t, &preferred, None).is_ok() {
-                            count += 1;
+                            succeeded += 1;
                         }
                         let _ = CloseHandle(t);
                     }
@@ -368,7 +381,10 @@ pub fn set_threads_ideal(pid: u32, cores: &[u32]) -> usize {
         }
         let _ = CloseHandle(snap);
     }
-    count
+    ThreadIdealOutcome {
+        attempted,
+        succeeded,
+    }
 }
 
 // ── CPU Sets API（Windows 10 1703+）──────────────────────────────────────
@@ -438,6 +454,25 @@ pub fn set_cpu_sets(pid: u32, cores: &[u32]) -> Result<(), ProcessError> {
             .map_err(|_| ProcessError::from_last_open())?
     };
     let result = unsafe { SetProcessDefaultCpuSets(h, Some(&set_ids)) };
+    let _ = unsafe { CloseHandle(h) };
+    if result.as_bool() {
+        Ok(())
+    } else {
+        let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
+        Err(ProcessError::Win32(code))
+    }
+}
+
+/// 清除 process-default CPU Sets 指派（All 模式還原用）。
+/// Microsoft 合約：SetProcessDefaultCpuSets 傳 CpuSetIds=NULL、count=0 才清除指派；
+/// 傳入全部列舉 set 是「指派全部」，不等於清除。
+pub fn clear_cpu_sets(pid: u32) -> Result<(), ProcessError> {
+    // 只要求 PROCESS_SET_LIMITED_INFORMATION（與 set_cpu_sets 相同）
+    let h = unsafe {
+        OpenProcess(PROCESS_SET_LIMITED_INFORMATION, false, pid)
+            .map_err(|_| ProcessError::from_last_open())?
+    };
+    let result = unsafe { SetProcessDefaultCpuSets(h, None) };
     let _ = unsafe { CloseHandle(h) };
     if result.as_bool() {
         Ok(())

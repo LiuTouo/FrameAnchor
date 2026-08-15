@@ -87,6 +87,8 @@ export interface AppliedProcess {
   currentCores: number[];
   currentPriority: string;
   softAffinity: boolean; // true = 軟綁定，currentCores 為偏好清單
+  threadIdealAttempted: number | null; // 執行緒 ideal 嘗試數；null = 非此路徑
+  threadIdealSucceeded: number | null; // 執行緒 ideal 成功數；succeeded < attempted = partial
 }
 
 export interface WindowInfo {

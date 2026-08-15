@@ -13,7 +13,7 @@ use tauri::AppHandle;
 use windows::Win32::Foundation::HANDLE;
 
 use crate::error::{codes, ProcessError};
-use crate::model::{AffinityMode, MatchBy, Rule};
+use crate::model::{AffinityMode, AffinitySpec, MatchBy, Rule};
 use crate::topology::{self, Topology};
 use crate::{commands, priority, process, AppState};
 
@@ -35,6 +35,9 @@ pub struct AppliedProcess {
     pub current_priority: String,
     /// true = 軟綁定（Prefer 模式），current_cores 為偏好清單而非實際 mask
     pub soft_affinity: bool,
+    /// 執行緒 ideal 套用統計；None = 未走執行緒 ideal 路徑。partial = succeeded < attempted
+    pub thread_ideal_attempted: Option<usize>,
+    pub thread_ideal_succeeded: Option<usize>,
 }
 
 /// watcher 內部狀態（含重試資訊，不序列化給前端）
@@ -46,6 +49,8 @@ pub struct AppliedEntry {
     /// 其他錯誤的剩餘重試次數
     pub retries_left: u8,
     pub next_retry: Option<Instant>,
+    /// 套用時記錄的 process creation time（0 = 未知），PID 重用偵測用
+    pub created: u64,
 }
 
 /// 早期取得並快取的 process handle（AppState.handles 的值）。
@@ -63,74 +68,172 @@ const MAX_RETRIES: u8 = 3;
 /// 數百 ms~數秒才完成保護），1 秒級的 poll 太慢會錯過窗口。
 const DISCOVERY_INTERVAL: Duration = Duration::from_millis(100);
 
-/// Affinity 套用結果（三層降級）
+/// Affinity 套用結果（三層降級：硬綁定 → CPU Sets → 執行緒 ideal）
 enum AffinityResult {
     /// 硬綁定成功（SetProcessAffinityMask），攜帶實際設定的核心清單
     HardOk { cores: Vec<u32> },
-    /// 軟綁定成功（SetThreadIdealProcessorEx，逐 thread）
-    SoftOk {
-        cores: Vec<u32>,
-        thread_count: usize,
-    },
     /// CPU Sets 成功（SetProcessDefaultCpuSets）
     CpuSetsOk { cores: Vec<u32> },
+    /// 執行緒 ideal 全成功（軟成功）
+    SoftOk {
+        cores: Vec<u32>,
+        attempted: usize,
+        succeeded: usize,
+    },
+    /// 執行緒 ideal 部分成功（partial，不算完整成功）
+    SoftPartial {
+        cores: Vec<u32>,
+        attempted: usize,
+        succeeded: usize,
+    },
     /// 三層全部失敗
     AllFailed,
 }
 
-/// 對進程套用 affinity，逐層降級：硬綁定 → 軟綁定 → CPU Sets
-fn apply_affinity(
-    pid: u32,
-    h: Option<HANDLE>,
-    spec: &crate::model::AffinitySpec,
-    topo: &Topology,
-) -> AffinityResult {
-    let cores: Vec<u32> = match spec.mode {
-        AffinityMode::All => {
-            let all_cores: Vec<u32> = (0..topo.total_lp).collect();
-            return AffinityResult::HardOk { cores: all_cores };
-        }
+/// 執行緒 ideal 套用結果分類
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThreadIdealClass {
+    /// 零個執行緒成功（或無執行緒）→ 視為失敗
+    Zero,
+    /// 部分成功
+    Partial,
+    /// 全部成功
+    Full,
+}
+
+/// 依 attempted/succeeded 分類執行緒 ideal 結果。
+fn classify_thread_ideal(attempted: usize, succeeded: usize) -> ThreadIdealClass {
+    if attempted == 0 || succeeded == 0 {
+        ThreadIdealClass::Zero
+    } else if succeeded >= attempted {
+        ThreadIdealClass::Full
+    } else {
+        ThreadIdealClass::Partial
+    }
+}
+
+/// cores → affinity mask，過濾 c >= 64 避免 1<<64 未定義行為。
+fn mask_from_cores(cores: &[u32]) -> u64 {
+    cores
+        .iter()
+        .fold(0u64, |m, &c| if c < 64 { m | (1u64 << c) } else { m })
+}
+
+/// 依模式解析目標核心清單（group 0，最多 64 LP）。
+fn cores_for_mode(spec: &AffinitySpec, topo: &Topology) -> Vec<u32> {
+    match spec.mode {
         AffinityMode::Prefer => spec
             .cores
             .iter()
             .copied()
-            .filter(|&c| c < topo.total_lp)
+            .filter(|&c| c < topo.total_lp && c < 64)
             .collect(),
         _ => topology::mask_to_indices(topology::resolve_mask(spec, topo)),
-    };
+    }
+}
 
+/// 判斷 applied 條目是否因 PID 重用而過期（純邏輯，可測試）。
+/// `stored_created`：套用時記錄的 creation time（0 = 未知）；`current_created`：現在查到的（None = 查不到）。
+fn is_reused(exe_name_changed: bool, stored_created: u64, current_created: Option<u64>) -> bool {
+    if exe_name_changed {
+        return true;
+    }
+    // exe 同名：只有已知基線（stored_created != 0）且現在查得到且不同，才算重用。
+    // 查不到（受保護進程）→ 保守保留既有身份，不因查詢失敗就丟棄已證實的緩存。
+    match current_created {
+        Some(t) => stored_created != 0 && t != stored_created,
+        None => false,
+    }
+}
+
+/// 對進程套用 affinity，逐層降級：硬綁定 → CPU Sets → 執行緒 ideal。
+/// All 模式還原是否算成功（純邏輯，可測試）：硬綁定還原 與 CPU Sets 清除 都須成功。
+fn all_restore_succeeded(hard_ok: bool, clear_ok: bool) -> bool {
+    hard_ok && clear_ok
+}
+
+/// 對進程套用 affinity。All 模式 = 還原（硬綁定設回全核心 + 清除 CPU Sets 指派）；
+/// 非 All = 三層降級 硬綁定 → CPU Sets → 執行緒 ideal。
+fn apply_affinity(
+    pid: u32,
+    h: Option<HANDLE>,
+    spec: &AffinitySpec,
+    topo: &Topology,
+) -> AffinityResult {
+    let cores = cores_for_mode(spec, topo);
     if cores.is_empty() {
         return AffinityResult::AllFailed;
     }
 
-    // Tier 1: 硬綁定（SetProcessAffinityMask）
+    // All 模式：還原必須「硬綁定設回全核心」與「清除 process-default CPU Sets 指派」
+    // 兩者都成功，否則不宣告還原完成（進入 retry，不單回報顯示成功）。
+    if spec.mode == AffinityMode::All {
+        let hard_ok = h
+            .map(|h| process::set_affinity(h, mask_from_cores(&cores)).is_ok())
+            .unwrap_or(false);
+        let clear_ok = process::clear_cpu_sets(pid).is_ok();
+        if !all_restore_succeeded(hard_ok, clear_ok) {
+            log::warn!("All 模式還原不完整 PID {pid}: hard={hard_ok} clear={clear_ok}");
+            return AffinityResult::AllFailed;
+        }
+        // 回讀實際有效硬綁定 mask（不單報告期望值）
+        if let Some(h) = h {
+            if let Ok(actual) = process::get_affinity(h) {
+                return AffinityResult::HardOk {
+                    cores: topology::mask_to_indices(actual),
+                };
+            }
+        }
+        return AffinityResult::HardOk { cores };
+    }
+
+    // 非 All：Tier 1 硬綁定（SetProcessAffinityMask）
     if let Some(h) = h {
-        let mask = cores.iter().fold(0u64, |m, &c| m | (1u64 << c));
+        let mask = mask_from_cores(&cores);
         if process::set_affinity(h, mask).is_ok() {
             return AffinityResult::HardOk { cores };
         }
-        log::info!("硬綁定失敗 PID {pid}，降級到軟綁定");
+        log::info!("硬綁定失敗 PID {pid}，降級到 CPU Sets");
     }
 
-    // Tier 2: 軟綁定（SetThreadIdealProcessorEx，逐 thread）
-    let n = process::set_threads_ideal(pid, &cores);
-    if n > 0 {
-        log::info!("軟綁定成功 PID {pid}: {n} 執行緒");
-        return AffinityResult::SoftOk {
-            cores,
-            thread_count: n,
-        };
-    }
-    log::info!("軟綁定失敗 PID {pid}，降級到 CPU Sets");
-
-    // Tier 3: CPU Sets（SetProcessDefaultCpuSets）
+    // Tier 2: CPU Sets（SetProcessDefaultCpuSets）
     match process::set_cpu_sets(pid, &cores) {
         Ok(()) => {
             log::info!("CPU Sets 成功 PID {pid}");
-            AffinityResult::CpuSetsOk { cores }
+            return AffinityResult::CpuSetsOk { cores };
         }
-        Err(e) => {
-            log::warn!("CPU Sets 失敗 PID {pid}: {e}");
+        Err(e) => log::warn!("CPU Sets 失敗 PID {pid}: {e}"),
+    }
+
+    // Tier 3: 執行緒 ideal processor（軟提示）
+    let outcome = process::set_threads_ideal(pid, &cores);
+    match classify_thread_ideal(outcome.attempted, outcome.succeeded) {
+        ThreadIdealClass::Full => {
+            log::info!(
+                "執行緒 ideal 全成功 PID {pid}: {}/{}",
+                outcome.succeeded,
+                outcome.attempted
+            );
+            AffinityResult::SoftOk {
+                cores,
+                attempted: outcome.attempted,
+                succeeded: outcome.succeeded,
+            }
+        }
+        ThreadIdealClass::Partial => {
+            log::info!(
+                "執行緒 ideal 部分成功 PID {pid}: {}/{}",
+                outcome.succeeded,
+                outcome.attempted
+            );
+            AffinityResult::SoftPartial {
+                cores,
+                attempted: outcome.attempted,
+                succeeded: outcome.succeeded,
+            }
+        }
+        ThreadIdealClass::Zero => {
+            log::warn!("執行緒 ideal 失敗 PID {pid}: 0/{}", outcome.attempted);
             AffinityResult::AllFailed
         }
     }
@@ -175,6 +278,15 @@ fn ensure_handle(state: &Arc<AppState>, pid: u32) -> Result<HANDLE, ProcessError
         },
     );
     Ok(h)
+}
+
+/// 取得 pid 的 creation time：優先用快取 handle 的 created（反作弊保護後仍可用），
+/// 否則現查。查不到回 0（未知，呼叫端保守處理）。
+fn fetch_created(state: &Arc<AppState>, pid: u32) -> u64 {
+    if let Some(c) = state.handles.read().unwrap().get(&pid) {
+        return c.created;
+    }
+    process::creation_time_by_pid(pid).unwrap_or(0)
 }
 
 pub fn spawn(app: AppHandle, state: Arc<AppState>) {
@@ -240,6 +352,7 @@ fn discovery_pass(app: &AppHandle, state: &Arc<AppState>) {
         };
         log::info!("套用規則「{}」→ {} (PID {})", rule.name, exe_name, pid);
         let handle = ensure_handle(state, pid);
+        let created = fetch_created(state, pid);
         let entry = apply_and_build(
             pid,
             &exe_name,
@@ -247,7 +360,7 @@ fn discovery_pass(app: &AppHandle, state: &Arc<AppState>) {
             &state.topology,
             Instant::now(),
             interval,
-            handle,
+            (handle, created),
         );
         if let Some(err) = &entry.info.error {
             log::warn!("套用失敗 {} (PID {}): {}", exe_name, pid, err);
@@ -285,9 +398,13 @@ fn tick(app: &AppHandle, state: &Arc<AppState>, interval_ms: u64) {
             handles.retain(|pid, _| alive.contains(pid));
             // PID 重用偵測：creation time 不符 → 丟棄舊 handle。
             // 受保護進程連 QUERY_LIMITED 都可能被剝 → None → 保留快取。
+            // created == 0（未知基線）→ 保守保留，不因後續可查就誤判重用。
             let stale: Vec<u32> = handles
                 .iter()
                 .filter(|(pid, c)| {
+                    if c.created == 0 {
+                        return false;
+                    }
                     process::creation_time_by_pid(**pid)
                         .map(|t| t != c.created)
                         .unwrap_or(false)
@@ -299,15 +416,17 @@ fn tick(app: &AppHandle, state: &Arc<AppState>, interval_ms: u64) {
             }
         }
 
-        // 2) PID 重用防護：還活著但 exe 變了 → 移除，當新進程重新比對
+        // 2) PID 重用防護：還活著但 exe 變了 或 creation time 變了 → 移除，當新進程重新比對
         let stale: Vec<u32> = applied
             .iter()
             .filter(|(pid, e)| {
-                procs
-                    .iter()
-                    .find(|p| p.pid == **pid)
-                    .map(|p| !p.exe_name.eq_ignore_ascii_case(&e.exe_name))
-                    .unwrap_or(false)
+                procs.iter().find(|p| p.pid == **pid).is_some_and(|p| {
+                    if !p.exe_name.eq_ignore_ascii_case(&e.exe_name) {
+                        return true;
+                    }
+                    // exe 同名：比對 creation time（查不到 = 受保護 → 保守保留）
+                    is_reused(false, e.created, process::creation_time_by_pid(p.pid))
+                })
             })
             .map(|(pid, _)| *pid)
             .collect();
@@ -341,6 +460,7 @@ fn tick(app: &AppHandle, state: &Arc<AppState>, interval_ms: u64) {
             };
             log::info!("套用規則「{}」→ {} (PID {})", rule.name, p.exe_name, p.pid);
             let handle = ensure_handle(state, p.pid);
+            let created = fetch_created(state, p.pid);
             let entry = apply_and_build(
                 p.pid,
                 &p.exe_name,
@@ -348,7 +468,7 @@ fn tick(app: &AppHandle, state: &Arc<AppState>, interval_ms: u64) {
                 &state.topology,
                 now,
                 interval_ms,
-                handle,
+                (handle, created),
             );
             if let Some(err) = &entry.info.error {
                 log::warn!("套用失敗 {} (PID {}): {}", p.exe_name, p.pid, err);
@@ -376,6 +496,7 @@ fn tick(app: &AppHandle, state: &Arc<AppState>, interval_ms: u64) {
             if let Some(rule) = rule {
                 log::info!("重試套用「{}」→ PID {}", rule.name, pid);
                 let handle = ensure_handle(state, pid);
+                let created = fetch_created(state, pid);
                 let mut entry = apply_and_build(
                     pid,
                     &exe_name,
@@ -383,7 +504,7 @@ fn tick(app: &AppHandle, state: &Arc<AppState>, interval_ms: u64) {
                     &state.topology,
                     now,
                     interval_ms,
-                    handle,
+                    (handle, created),
                 );
                 if entry.info.error.is_some() && !entry.access_denied {
                     let prev = applied.get(&pid).map(|e| e.retries_left).unwrap_or(1);
@@ -401,7 +522,7 @@ fn tick(app: &AppHandle, state: &Arc<AppState>, interval_ms: u64) {
 }
 
 /// 對單一進程套用規則，回傳完整狀態（含重試排程）。
-/// 三層 affinity fallback：硬綁定 → 軟綁定 → CPU Sets。
+/// 三層 affinity fallback：硬綁定 → CPU Sets → 執行緒 ideal。
 /// handle 由呼叫端透過 ensure_handle 取得（快取的早期 handle 或現開）。
 fn apply_and_build(
     pid: u32,
@@ -410,8 +531,9 @@ fn apply_and_build(
     topo: &Topology,
     now: Instant,
     interval_ms: u64,
-    handle_result: Result<HANDLE, ProcessError>,
+    handle: (Result<HANDLE, ProcessError>, u64),
 ) -> AppliedEntry {
+    let (handle_result, created) = handle;
     let mut info = AppliedProcess {
         pid,
         exe_name: exe_name.to_string(),
@@ -426,6 +548,8 @@ fn apply_and_build(
         current_cores: Vec::new(),
         current_priority: String::new(),
         soft_affinity: false,
+        thread_ideal_attempted: None,
+        thread_ideal_succeeded: None,
     };
 
     // Phase A: handle 由呼叫端 ensure_handle 提供（快取早期 handle 或現開）
@@ -442,19 +566,34 @@ fn apply_and_build(
             info.affinity_ok = true;
             info.current_cores = cores;
         }
-        AffinityResult::SoftOk {
-            cores,
-            thread_count,
-        } => {
-            info.affinity_ok = true;
-            info.soft_affinity = true;
-            info.current_cores = cores;
-            log::info!("軟綁定 fallback PID {pid}: {thread_count} 執行緒");
-        }
         AffinityResult::CpuSetsOk { cores } => {
             info.affinity_ok = true;
             info.current_cores = cores;
             log::info!("CPU Sets fallback PID {pid}");
+        }
+        AffinityResult::SoftOk {
+            cores,
+            attempted,
+            succeeded,
+        } => {
+            info.affinity_ok = true;
+            info.soft_affinity = true;
+            info.current_cores = cores;
+            info.thread_ideal_attempted = Some(attempted);
+            info.thread_ideal_succeeded = Some(succeeded);
+            log::info!("執行緒 ideal fallback PID {pid}: {succeeded}/{attempted}");
+        }
+        AffinityResult::SoftPartial {
+            cores,
+            attempted,
+            succeeded,
+        } => {
+            // partial：不設 affinity_ok（不視為完整成功），也不設 error（非失敗需重試）
+            info.soft_affinity = true;
+            info.current_cores = cores;
+            info.thread_ideal_attempted = Some(attempted);
+            info.thread_ideal_succeeded = Some(succeeded);
+            log::info!("執行緒 ideal 部分套用 PID {pid}: {succeeded}/{attempted}");
         }
         AffinityResult::AllFailed => {
             // handle 開啟失敗 → ACCESS_DENIED；否則是一般失敗
@@ -506,6 +645,7 @@ fn apply_and_build(
         } else {
             None
         },
+        created,
     }
 }
 
@@ -553,5 +693,103 @@ mod tests {
         assert!(matches(&r, "game.EXE", None));
         assert!(matches(&r, "GAME.EXE", Some(r"D:\elsewhere\GAME.EXE")));
         assert!(!matches(&r, "other.exe", None));
+    }
+
+    fn topo(n: u32) -> Topology {
+        topology::build_topology((0..n).map(|c| (vec![c], 0, false)).collect())
+    }
+
+    fn spec(mode: AffinityMode, cores: &[u32]) -> AffinitySpec {
+        AffinitySpec {
+            mode,
+            cores: cores.to_vec(),
+        }
+    }
+
+    #[test]
+    fn classify_zero_when_no_threads_or_no_success() {
+        assert_eq!(classify_thread_ideal(0, 0), ThreadIdealClass::Zero);
+        assert_eq!(classify_thread_ideal(5, 0), ThreadIdealClass::Zero);
+    }
+
+    #[test]
+    fn classify_full_when_all_succeeded() {
+        assert_eq!(classify_thread_ideal(5, 5), ThreadIdealClass::Full);
+    }
+
+    #[test]
+    fn classify_partial_when_some_succeeded() {
+        assert_eq!(classify_thread_ideal(5, 3), ThreadIdealClass::Partial);
+        assert_eq!(classify_thread_ideal(5, 1), ThreadIdealClass::Partial);
+    }
+
+    #[test]
+    fn mask_from_cores_safe_and_no_shift_overflow() {
+        assert_eq!(mask_from_cores(&[0, 2, 4]), 0b10101);
+        assert_eq!(mask_from_cores(&[63]), 1u64 << 63);
+        assert_eq!(mask_from_cores(&[64]), 0); // 過濾掉，避免 1<<64 UB
+        assert_eq!(mask_from_cores(&[]), 0);
+    }
+
+    #[test]
+    fn cores_all_covers_every_lp() {
+        let t = topo(8);
+        assert_eq!(cores_for_mode(&spec(AffinityMode::All, &[]), &t), (0..8).collect::<Vec<u32>>());
+    }
+
+    #[test]
+    fn cores_prefer_filters_out_of_range() {
+        let t = topo(8);
+        assert_eq!(
+            cores_for_mode(&spec(AffinityMode::Prefer, &[0, 1, 99]), &t),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn cores_custom_resolves_mask() {
+        let t = topo(8);
+        assert_eq!(
+            cores_for_mode(&spec(AffinityMode::Custom, &[0, 2, 4]), &t),
+            vec![0, 2, 4]
+        );
+    }
+
+    #[test]
+    fn reused_when_exe_name_changed() {
+        assert!(is_reused(true, 0, None));
+    }
+
+    #[test]
+    fn reused_when_same_name_but_creation_differs() {
+        assert!(is_reused(false, 123, Some(456)));
+    }
+
+    #[test]
+    fn not_reused_when_same_name_same_creation() {
+        assert!(!is_reused(false, 123, Some(123)));
+    }
+
+    #[test]
+    fn not_reused_when_creation_unknown_at_apply() {
+        // stored_created == 0（受保護進程取不到基線）→ 保守保留，即使現在可查到
+        assert!(!is_reused(false, 0, Some(456)));
+    }
+
+    #[test]
+    fn not_reused_when_creation_unqueryable_now() {
+        // 現在查不到（受保護）→ 保守保留，不因查詢失敗丟棄已證實身份
+        assert!(!is_reused(false, 123, None));
+    }
+
+    #[test]
+    fn all_clear_failure_is_not_success() {
+        // All 還原：硬綁定還原 與 CPU Sets 清除 都須成功才算成功
+        assert!(all_restore_succeeded(true, true));
+        // CPU Sets 清除失敗 → 不算成功（不得宣告限制已移除）
+        assert!(!all_restore_succeeded(true, false));
+        // 硬綁定還原失敗 → 不算成功
+        assert!(!all_restore_succeeded(false, true));
+        assert!(!all_restore_succeeded(false, false));
     }
 }

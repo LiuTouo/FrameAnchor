@@ -26,6 +26,16 @@
   function errText(code: string): string {
     return $t(`errors.${KNOWN_ERRORS.includes(code) ? code : 'unknown'}`);
   }
+
+  // 執行緒 ideal 部分成功：有嘗試、有成功，但未全部成功
+  function isThreadIdealPartial(a: AppliedProcess): boolean {
+    return (
+      a.threadIdealAttempted != null &&
+      a.threadIdealSucceeded != null &&
+      a.threadIdealSucceeded > 0 &&
+      a.threadIdealSucceeded < a.threadIdealAttempted
+    );
+  }
 </script>
 
 {#if applied.length === 0}
@@ -80,7 +90,11 @@
                   <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z" fill="currentColor"/></svg>
                   <span>{$t('dashboard.partialWarning')}</span>
                 </span>
-                {#if !a.affinityOk && !a.error}
+                {#if isThreadIdealPartial(a)}
+                  <div class="sub-fail">
+                    {$t('dashboard.threadIdealPartial', { values: { succeeded: a.threadIdealSucceeded ?? 0, attempted: a.threadIdealAttempted ?? 0 } })}
+                  </div>
+                {:else if !a.affinityOk && !a.error}
                   <div class="sub-fail">{$t('dashboard.statusFail')}</div>
                 {/if}
                 {#if !a.priorityOk}

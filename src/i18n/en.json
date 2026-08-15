@@ -36,7 +36,8 @@
     "ioFail": "I/O failed",
     "memFail": "Memory failed",
     "partialWarning": "Affinity OK, priority failed",
-    "priorityFail": "Priority failed (may be anti-cheat protected)"
+    "priorityFail": "Priority failed (may be anti-cheat protected)",
+    "threadIdealPartial": "Preferred cores applied to {succeeded} of {attempted} threads"
   },
   "rules": {
     "addRule": "+ Add rule (browse running windows)",
