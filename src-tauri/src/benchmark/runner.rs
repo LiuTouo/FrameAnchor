@@ -49,14 +49,19 @@ pub const CANCEL_POLL_MS: u64 = 100;
 /// workload spawn 後，等待其 top-level window 出現的上限（毫秒）。
 /// 期間以 [`CANCEL_POLL_MS`] 輪詢，可被取消中斷。
 pub const WORKLOAD_WINDOW_WAIT_MS: u64 = 3000;
-/// 固定調適排程：篩選 round 數（所有有效候選 LP 都測前 3 round）。
-pub const SCREENING_ROUNDS: u32 = 3;
-/// 固定調適排程：總 round 數（3 篩選 + 2 確認）。
-pub const TOTAL_ROUNDS: u32 = 5;
-/// 確認 round 數（前 2 名 finalists 再測 2 round）。
-pub const CONFIRMATION_ROUNDS: u32 = 2;
-/// 最多 finalists 數。
+/// 篩選 round 數：所有選定 LP 一律測 2 round，只用來選前 2 名 finalists，
+/// 絕不混入確認推論證據（Passed/Equivalent/Inconclusive）。
+pub const SCREENING_ROUNDS: u32 = 2;
+/// 確認（confirmation）最少 round 數：前 2 名 finalists 先各測 3 個配對 round。
+pub const CONFIRMATION_MIN_ROUNDS: u32 = 3;
+/// 確認（confirmation）最多 round 數：證據不足時最多擴充到 5 個配對 round。
+pub const CONFIRMATION_MAX_ROUNDS: u32 = 5;
+/// 最多 finalists 數（使用者決策：Top 2 only）。
 pub const MAX_FINALISTS: usize = 2;
+/// bootstrap 穩定性區間的下百分位（第 5 百分位）；小型樣本決策啟發式，非信賴區間。
+pub const INTERVAL_LOW_PERCENTILE: f64 = 0.05;
+/// bootstrap 穩定性區間的上百分位（第 95 百分位）；小型樣本決策啟發式，非信賴區間。
+pub const INTERVAL_HIGH_PERCENTILE: f64 = 0.95;
 
 /// 子程序控制邊界。`spawn` 回傳 pid（owned handle），終結時由 runner 統一 `kill`。
 pub trait ProcessRunner: Send + Sync {
@@ -523,9 +528,10 @@ pub fn run_benchmark(ctx: &mut RunContext) -> RunResult {
     let session_dir = ctx.storage_root.join(&ctx.session_id);
     // LP → round → CSV 路徑（每個 (lp, round) 最多擷取一次）
     let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
-    // 計劃測試數 = N*3 + min(N,2)*2（篩選全 LP 3 round + 確認前 2 名 2 round）
+    // 進度分母取「最多」capture 數 = N*2 + 2*5（篩選全 LP 2 round + 確認前 2 名最多 5 round）。
+    // 實際可能於 2N+6（3 確認 round）就停，進度不會超過 100、也不承諾較短時間。
     let n = lps.len() as u32;
-    let total_tests = n * SCREENING_ROUNDS + n.min(MAX_FINALISTS as u32) * CONFIRMATION_ROUNDS;
+    let total_tests = n * SCREENING_ROUNDS + (MAX_FINALISTS as u32) * CONFIRMATION_MAX_ROUNDS;
     let mut done = 0u32;
     let mut reason: Option<TerminalReason> = None;
     // MISSING/EMPTY 的處置分兩類（見 capture_step 分支）：
@@ -571,12 +577,15 @@ pub fn run_benchmark(ctx: &mut RunContext) -> RunResult {
         finalists = select_finalists(&round_csvs, SCREENING_ROUNDS);
     }
 
-    // 確認階段：rounds SCREENING_ROUNDS..TOTAL_ROUNDS，僅 finalists（需恰好 2 名）。
+    // 確認階段：只測前 2 名 finalists，配對/區塊排序（round_order 旋轉 + 反轉平衡）。
+    // 先跑 3 個配對 round，之後每個完整 round 邊界評估證據；決定性（Passed/Equivalent）
+    // 即提早停止，否則最多擴充到 5 個配對 round。
+    let mut confirmation_rounds_done: u32 = 0;
     if reason.is_none()
         && isolated_capture_error.is_none()
         && finalists.len() == MAX_FINALISTS
     {
-        'confirmation: for round in SCREENING_ROUNDS..TOTAL_ROUNDS {
+        'confirmation: for round in SCREENING_ROUNDS..(SCREENING_ROUNDS + CONFIRMATION_MAX_ROUNDS) {
             for &lp in round_order(round, &finalists).iter() {
                 if ctx.cancel.is_cancelled() {
                     reason = Some(TerminalReason::Cancelled);
@@ -602,6 +611,24 @@ pub fn run_benchmark(ctx: &mut RunContext) -> RunResult {
                         reason = Some(r);
                         break 'confirmation;
                     }
+                }
+            }
+            if reason.is_some() || isolated_capture_error.is_some() {
+                break 'confirmation;
+            }
+            confirmation_rounds_done += 1;
+            // 只在完整 round 邊界、且已達最少確認 round 數時評估是否提早停止。
+            if confirmation_rounds_done >= CONFIRMATION_MIN_ROUNDS {
+                match evaluate_confirmation(
+                    &round_csvs,
+                    finalists[0],
+                    finalists[1],
+                    confirmation_rounds_done,
+                ) {
+                    ConfirmationVerdict::Passed | ConfirmationVerdict::Equivalent => {
+                        break 'confirmation;
+                    }
+                    ConfirmationVerdict::Continue => {}
                 }
             }
         }
@@ -662,8 +689,9 @@ pub fn run_benchmark(ctx: &mut RunContext) -> RunResult {
                 );
             }
             let severe = severe_lps(&results);
-            let reliability = compute_reliability(&round_csvs, &results, ctx.config.repetitions);
-            // 穩健候選（跨 round 中位數分數）驅動 best_lp 與推薦，不再用聚合 dense-rank best_lp
+            let reliability =
+                compute_reliability(&round_csvs, &results, &finalists, confirmation_rounds_done);
+            // 確認推論的候選 LP 驅動 best_lp 與推薦（套用閘仍要求 Passed）
             let best = reliability.candidate_lp;
             let recommended = best.map(|b| vec![b]).unwrap_or_default();
             detail.summary.reliability = reliability;
@@ -735,11 +763,8 @@ pub fn validate_config(
     if config.sample_secs == 0 {
         return Err(codes::BENCHMARK_INVALID_CONFIG.to_string());
     }
-    // 固定調適排程（3 篩選 + 2 確認）只支援 repetitions == 5；欄位保留供舊
-    // session 反序列化，但新 run 只接受 5。
-    if config.repetitions != TOTAL_ROUNDS {
-        return Err(codes::BENCHMARK_INVALID_CONFIG.to_string());
-    }
+    // 新排程固定為 2 篩選 + 3..=5 確認，與 `repetitions` 欄位無關；該欄位保留供
+    // 舊 session 反序列化，新 run 一律忽略。
     if effective_lps(config, topo).is_empty() {
         return Err(codes::BENCHMARK_INVALID_CONFIG.to_string());
     }
@@ -1249,11 +1274,6 @@ pub const GUARDRAIL_MAX_DEFICIT_PCT: f64 = -0.5;
 /// 護欄：候選 spike rate 相較亞軍最多允許超出（絕對百分點）。
 pub const SPIKE_GUARD_PP: f64 = 5.0;
 
-/// Passed 所需勝場數 = ceil(60% × evaluated_rounds)。
-pub fn required_wins(evaluated_rounds: u32) -> u32 {
-    ((evaluated_rounds as f64) * 0.6).ceil() as u32
-}
-
 /// 由 per-round LpResult map 取某指標的逐 round 中位數（缺/非有限 → 略過）。
 fn median_of_metric(
     per_round: &HashMap<u32, LpResult>,
@@ -1329,114 +1349,266 @@ fn select_finalists(
     ranked.into_iter().take(MAX_FINALISTS).map(|c| c.lp).collect()
 }
 
-/// 計算可靠性摘要。`results` 為聚合（合併各 round）後每 LP 的指標（僅供舊版
-/// 改善欄位）；`round_csvs` 為 LP → round → CSV，供逐 round 競爭分數與勝者；
-/// `repetitions` 為本次 session 的預期 round 數。
-///
-/// 穩健候選 = 跨 round 競爭分數中位數最高者（平手取 worst-round 較高，再取較小
-/// LP）；亞軍依同規則。勝者 = 該 round 合格 LP 中分數最高者（平手取較小 LP）。
-///
-/// Passed 需同時滿足：
-/// 1. 至少 2 個 LP 各自在所有預期 round 皆有完整（competitive-eligible）結果，
-///    且預期 round ≥5。
-/// 2. 候選勝場 ≥ceil(60% × 預期 round)。
-/// 3. 複合分數優勢 ≥0.5%。
-/// 4. 護欄：候選 Avg FPS、1% low 相較亞軍（跨 round 中位數）各 ≥-0.5%，
-///    spike rate 未超出亞軍 5 個百分點。
-///
-/// Equivalent = 勝場與護欄皆達標但複合優勢 <0.5%（證據完整穩定、差異過小）。
-/// 其餘（round 不足、LP 不足、勝場不足、護欄倒退、證據不完整/無效）皆 Inconclusive。
-fn compute_reliability(
+/// 確認階段逐 round 的 (candidate, runner) 單 round 結果。任一 round 缺 CSV/不可算
+/// → None（證據不完整）。
+fn confirmation_pairs(
     round_csvs: &HashMap<u32, HashMap<u32, PathBuf>>,
-    results: &[LpResult],
-    repetitions: u32,
-) -> ReliabilitySummary {
-    let expected = repetitions.max(1);
-
-    // 逐 LP、逐 round 的單 round competitive-eligible 結果。
-    let per_round = build_per_round(round_csvs, expected);
-
-    // 合格 LP：所有預期 round 皆完整。
-    let mut eligible_lps: Vec<u32> = per_round
-        .iter()
-        .filter(|(_, rounds)| rounds.len() as u32 == expected)
-        .map(|(lp, _)| *lp)
-        .collect();
-    eligible_lps.sort_unstable();
-
-    // 逐 round 競爭分數、逐 round 勝者。
-    let mut per_lp_scores: HashMap<u32, Vec<f64>> = HashMap::new();
-    let mut round_winners: Vec<Option<u32>> = Vec::with_capacity(expected as usize);
-    for round in 0..expected {
-        let round_results: Vec<LpResult> = eligible_lps
-            .iter()
-            .filter_map(|lp| per_round.get(lp).and_then(|m| m.get(&round)).cloned())
-            .collect();
-        let med = round_medians(&round_results);
-        for lp in &eligible_lps {
-            if let Some(r) = per_round.get(lp).and_then(|m| m.get(&round)) {
-                if let Some(s) = competitive_score(r, &med) {
-                    per_lp_scores.entry(*lp).or_default().push(s);
-                }
-            }
-        }
-        let winner = eligible_lps
-            .iter()
-            .filter_map(|lp| {
-                per_round
-                    .get(lp)
-                    .and_then(|m| m.get(&round))
-                    .and_then(|r| competitive_score(r, &med).map(|s| (*lp, s)))
-            })
-            .max_by(|a, b| {
-                a.1.partial_cmp(&b.1)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| b.0.cmp(&a.0))
-            })
-            .map(|(lp, _)| lp);
-        round_winners.push(winner);
+    candidate: u32,
+    runner: u32,
+    confirmation_rounds: u32,
+) -> Option<Vec<(LpResult, LpResult)>> {
+    let mut out = Vec::with_capacity(confirmation_rounds as usize);
+    for round in SCREENING_ROUNDS..(SCREENING_ROUNDS + confirmation_rounds) {
+        let c = round_csvs
+            .get(&candidate)
+            .and_then(|m| m.get(&round))
+            .and_then(|csv| compute_lp_single_round(candidate, csv))?;
+        let r = round_csvs
+            .get(&runner)
+            .and_then(|m| m.get(&round))
+            .and_then(|csv| compute_lp_single_round(runner, csv))?;
+        out.push((c, r));
     }
+    Some(out)
+}
 
-    // 穩健候選/亞軍（跨 round 中位數分數）。
-    let ranked = robust_candidates(
-        &per_lp_scores
-            .iter()
-            .map(|(lp, s)| (*lp, s.clone()))
-            .collect::<Vec<_>>(),
-    );
-    let candidate = ranked.first().map(|c| c.lp);
-    let runner_up = ranked.get(1).map(|c| c.lp);
-    let candidate_median = ranked.first().map(|c| c.median_score);
-    let runner_median = ranked.get(1).map(|c| c.median_score);
+/// 逐確認 round 的配對效應（候選複合分數相較亞軍的優勢 %）。任一 round 缺完整
+/// competitive-eligible 分數 → None。
+fn confirmation_effects(pairs: &[(LpResult, LpResult)]) -> Option<Vec<f64>> {
+    let mut effects = Vec::with_capacity(pairs.len());
+    for (c, r) in pairs {
+        let med = round_medians(&[c.clone(), r.clone()]);
+        let sc = competitive_score(c, &med)?;
+        let sr = competitive_score(r, &med)?;
+        effects.push(improvement_pct(Some(sc), Some(sr))?);
+    }
+    Some(effects)
+}
 
-    let candidate_wins = round_winners.iter().filter(|w| **w == candidate).count() as u32;
-    let required = required_wins(expected);
+/// 確定性、無相依的配對 bootstrap 穩定性區間（bootstrap stability interval）。
+/// 對 K 個配對效應值，窮舉所有 K^K 個「放回抽樣」組合的平均（等同完整 bootstrap
+/// 分布），取第 5 與第 95 百分位為區間下/上界。無隨機種子、無外部相依；
+/// K ≤ 5 時組合數 ≤ 3125。回傳 (點估計 = 樣本平均, 下界, 上界)。
+///
+/// 這**不是**統計信賴區間、也不宣稱 90% 覆蓋率：n=3..=5 太小，無法支持任何
+/// 形式化顯著性宣稱。它是小型樣本的決策啟發式，只提供「超越 / 可忽略 / 未定」
+/// 三分類用的穩定性量度。
+pub fn paired_bootstrap_interval(effects: &[f64]) -> (f64, f64, f64) {
+    let k = effects.len();
+    assert!(k > 0, "paired_bootstrap_interval 需要至少一個效應值");
+    let total = k.pow(k as u32);
+    let mut means = Vec::with_capacity(total);
+    let mut idx = vec![0usize; k];
+    loop {
+        let sum: f64 = idx.iter().map(|&i| effects[i]).sum();
+        means.push(sum / k as f64);
+        let mut pos = 0;
+        while pos < k {
+            idx[pos] += 1;
+            if idx[pos] < k {
+                break;
+            }
+            idx[pos] = 0;
+            pos += 1;
+        }
+        if pos == k {
+            break;
+        }
+    }
+    means.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = means.len();
+    let point = effects.iter().sum::<f64>() / k as f64;
+    let lo = means[((INTERVAL_LOW_PERCENTILE * (n as f64 - 1.0)).floor() as usize).min(n - 1)];
+    let hi = means[((INTERVAL_HIGH_PERCENTILE * (n as f64 - 1.0)).floor() as usize).min(n - 1)];
+    (point, lo, hi)
+}
 
-    // 逐 round guardrail 指標（候選 vs 亞軍，跨 round 中位數）。
-    let candidate_map = candidate
-        .and_then(|c| per_round.get(&c).cloned())
-        .unwrap_or_default();
-    let runner_map = runner_up
-        .and_then(|ru| per_round.get(&ru).cloned())
-        .unwrap_or_default();
+/// 確認階段的逐 round 護欄（候選 vs 亞軍，跨確認 round 中位數）。
+/// 回傳 (Avg FPS 優勢 %, 1% low 優勢 %, spike rate 差 pp)。
+fn confirmation_guardrails(
+    pairs: &[(LpResult, LpResult)],
+) -> (Option<f64>, Option<f64>, Option<f64>) {
+    let mut candidate_map: HashMap<u32, LpResult> = HashMap::new();
+    let mut runner_map: HashMap<u32, LpResult> = HashMap::new();
+    for (i, (c, r)) in pairs.iter().enumerate() {
+        let round = SCREENING_ROUNDS + i as u32;
+        candidate_map.insert(round, c.clone());
+        runner_map.insert(round, r.clone());
+    }
     let candidate_avg = median_of_metric(&candidate_map, |r| r.avg_fps);
     let runner_avg = median_of_metric(&runner_map, |r| r.avg_fps);
     let candidate_p1 = median_of_metric(&candidate_map, |r| r.p1_low);
     let runner_p1 = median_of_metric(&runner_map, |r| r.p1_low);
     let candidate_spike = median_of_metric(&candidate_map, |r| r.spike_rate_pct);
     let runner_spike = median_of_metric(&runner_map, |r| r.spike_rate_pct);
+    (
+        improvement_pct(candidate_avg, runner_avg),
+        improvement_pct(candidate_p1, runner_p1),
+        match (candidate_spike, runner_spike) {
+            (Some(c), Some(r)) => Some(c - r),
+            _ => None,
+        },
+    )
+}
 
-    let avg_fps_advantage_pct = improvement_pct(candidate_avg, runner_avg);
-    let p1_low_advantage_pct = improvement_pct(candidate_p1, runner_p1);
-    let spike_rate_delta_pp = match (candidate_spike, runner_spike) {
-        (Some(c), Some(r)) => Some(c - r),
-        _ => None,
+/// 護欄是否通過（候選不得在 Avg FPS / 1% low 明顯倒退，spike 不得明顯變差）。
+fn guardrails_ok(avg_adv: Option<f64>, p1_adv: Option<f64>, spike_delta: Option<f64>) -> bool {
+    avg_adv.is_some_and(|v| v >= GUARDRAIL_MAX_DEFICIT_PCT)
+        && p1_adv.is_some_and(|v| v >= GUARDRAIL_MAX_DEFICIT_PCT)
+        && spike_delta.is_some_and(|d| d <= SPIKE_GUARD_PP)
+}
+
+/// 確認階段的停止/判定訊號。
+enum ConfirmationVerdict {
+    /// 證據尚未達決定性，繼續下一確認 round。
+    Continue,
+    /// 決定性：Passed。
+    Passed,
+    /// 決定性：Equivalent。
+    Equivalent,
+}
+
+/// 保守一致性規則（決定 Passed；適用於最多 5 個配對效應樣本）。
+///
+/// 逐 round 配對複合效應的一致性要求：
+/// - K=3（早期停止）：三個效應**全部** > [`COMPOSITE_ADVANTAGE_MIN_PCT`]（同向為正）。
+/// - K=4：四個效應**全部** > 門檻（若仍允許早期停止）。
+/// - K=5：**至少 4/5** 個效應 > 門檻。
+///
+/// 任何 K 都另需 bootstrap 穩定性區間下界 > 門檻，且護欄未倒退。
+/// 這是小型樣本的決策啟發式（decision heuristic），**不**宣稱形式化顯著性；
+/// 區間下界只是必要條件之一，不能單獨觸發 Passed。
+fn confirmation_passed(effects: &[f64], interval_lower: f64, rails_ok: bool) -> bool {
+    if !rails_ok {
+        return false;
+    }
+    let above = effects
+        .iter()
+        .filter(|&&e| e > COMPOSITE_ADVANTAGE_MIN_PCT)
+        .count();
+    let consistent = match effects.len() {
+        3 => above == 3,
+        4 => above == 4,
+        _ => above >= 4, // 5（或更多，實際上限 5）
     };
-    let composite_advantage_pct = improvement_pct(candidate_median, runner_median);
+    consistent && interval_lower > COMPOSITE_ADVANTAGE_MIN_PCT
+}
+
+/// 依目前確認證據決定是否可提早停止。判定標準：
+/// - Passed：見 [`confirmation_passed`] 的一致性規則（非僅靠區間下界）。
+/// - Equivalent：bootstrap 穩定性區間完全落在 ±門檻內（「觀測到的實務等效」，
+///   非統計證明的等效）。
+/// - 其餘（一致性不足、區間橫跨門檻、護欄倒退、證據不完整）→ Continue
+///   （續跑至上限後 Inconclusive）。
+fn evaluate_confirmation(
+    round_csvs: &HashMap<u32, HashMap<u32, PathBuf>>,
+    candidate: u32,
+    runner: u32,
+    confirmation_rounds: u32,
+) -> ConfirmationVerdict {
+    let Some(pairs) = confirmation_pairs(round_csvs, candidate, runner, confirmation_rounds) else {
+        return ConfirmationVerdict::Continue;
+    };
+    let Some(effects) = confirmation_effects(&pairs) else {
+        return ConfirmationVerdict::Continue;
+    };
+    let (_, lo, hi) = paired_bootstrap_interval(&effects);
+    let (avg, p1, spike) = confirmation_guardrails(&pairs);
+    let rails_ok = guardrails_ok(avg, p1, spike);
+    if confirmation_passed(&effects, lo, rails_ok) {
+        ConfirmationVerdict::Passed
+    } else if hi < COMPOSITE_ADVANTAGE_MIN_PCT && lo > -COMPOSITE_ADVANTAGE_MIN_PCT {
+        ConfirmationVerdict::Equivalent
+    } else {
+        ConfirmationVerdict::Continue
+    }
+}
+
+/// 計算可靠性摘要：只使用確認階段的獨立配對測量（篩選資料絕不混入推論）。
+/// `results` 為聚合結果（僅供舊版改善欄位）；`finalists` 為篩選選出的前 2 名
+/// （[候選, 亞軍]）；`confirmation_rounds` 為實際完成的確認 round 數（3..=5）。
+fn compute_reliability(
+    round_csvs: &HashMap<u32, HashMap<u32, PathBuf>>,
+    results: &[LpResult],
+    finalists: &[u32],
+    confirmation_rounds: u32,
+) -> ReliabilitySummary {
+    // 少於兩個 finalists（如 N=1）或無確認 round → Inconclusive，無推薦。
+    if finalists.len() < 2 || confirmation_rounds == 0 {
+        return ReliabilitySummary {
+            status: ReliabilityStatus::Inconclusive,
+            screening_rounds: SCREENING_ROUNDS,
+            confirmation_rounds,
+            stopping_reason: "inconclusive".to_string(),
+            ..Default::default()
+        };
+    }
+    let candidate = finalists[0];
+    let runner = finalists[1];
+
+    let pairs = confirmation_pairs(round_csvs, candidate, runner, confirmation_rounds);
+    let effects = pairs.as_ref().and_then(|p| confirmation_effects(p));
+    let (avg_adv, p1_adv, spike_delta) = match pairs.as_ref() {
+        Some(p) => confirmation_guardrails(p),
+        None => (None, None, None),
+    };
+
+    // 逐確認 round 勝者（僅供顯示；推論不依賴勝場門檻）。
+    let mut round_winners: Vec<Option<u32>> = Vec::with_capacity(confirmation_rounds as usize);
+    let mut candidate_wins = 0u32;
+    let mut complete = pairs.is_some() && effects.is_some();
+    if let Some(p) = &pairs {
+        for (c, r) in p {
+            let med = round_medians(&[c.clone(), r.clone()]);
+            match (competitive_score(c, &med), competitive_score(r, &med)) {
+                (Some(a), Some(b)) => {
+                    let w = if a > b {
+                        candidate
+                    } else if b > a {
+                        runner
+                    } else {
+                        candidate.min(runner)
+                    };
+                    if w == candidate {
+                        candidate_wins += 1;
+                    }
+                    round_winners.push(Some(w));
+                }
+                _ => {
+                    complete = false;
+                    round_winners.push(None);
+                }
+            }
+        }
+    }
+
+    // 效應點估計 + bootstrap 穩定性區間（非信賴區間）。
+    let (effect_estimate, interval_bounds) = match &effects {
+        Some(e) => {
+            let (point, lo, hi) = paired_bootstrap_interval(e);
+            (Some(point), Some((lo, hi)))
+        }
+        None => (None, None),
+    };
+
+    let rails_ok = guardrails_ok(avg_adv, p1_adv, spike_delta);
+
+    let (status, stopping_reason) = match (&effects, interval_bounds) {
+        (Some(e), Some((lo, hi))) if complete => {
+            if confirmation_passed(e, lo, rails_ok) {
+                (ReliabilityStatus::Passed, "passed".to_string())
+            } else if hi < COMPOSITE_ADVANTAGE_MIN_PCT && lo > -COMPOSITE_ADVANTAGE_MIN_PCT {
+                (ReliabilityStatus::Equivalent, "equivalent".to_string())
+            } else {
+                (ReliabilityStatus::Inconclusive, "inconclusive".to_string())
+            }
+        }
+        _ => (ReliabilityStatus::Inconclusive, "inconclusive".to_string()),
+    };
 
     // 舊版改善欄位（聚合結果）。
-    let candidate_res = candidate.and_then(|c| results.iter().find(|res| res.lp == c));
-    let runner_up_res = runner_up.and_then(|ru| results.iter().find(|res| res.lp == ru));
+    let candidate_res = results.iter().find(|res| res.lp == candidate);
+    let runner_up_res = results.iter().find(|res| res.lp == runner);
     let avg_fps_pct = improvement_pct(
         candidate_res.and_then(|r| r.avg_fps),
         runner_up_res.and_then(|r| r.avg_fps),
@@ -1450,42 +1622,26 @@ fn compute_reliability(
         runner_up_res.and_then(|r| r.p01_low),
     );
 
-    let complete =
-        eligible_lps.len() >= 2 && expected >= 5 && candidate.is_some() && runner_up.is_some();
-    let wins_ok = candidate_wins >= required;
-    let guardrails_ok = avg_fps_advantage_pct.is_some_and(|v| v >= GUARDRAIL_MAX_DEFICIT_PCT)
-        && p1_low_advantage_pct.is_some_and(|v| v >= GUARDRAIL_MAX_DEFICIT_PCT)
-        && spike_rate_delta_pp.is_some_and(|d| d <= SPIKE_GUARD_PP);
-
-    let status = if complete {
-        if wins_ok && guardrails_ok {
-            if composite_advantage_pct.is_some_and(|v| v >= COMPOSITE_ADVANTAGE_MIN_PCT) {
-                ReliabilityStatus::Passed
-            } else {
-                ReliabilityStatus::Equivalent
-            }
-        } else {
-            ReliabilityStatus::Inconclusive
-        }
-    } else {
-        ReliabilityStatus::Inconclusive
-    };
-
     ReliabilitySummary {
         status,
         per_round_winners: round_winners,
-        candidate_lp: candidate,
-        runner_up_lp: runner_up,
+        candidate_lp: Some(candidate),
+        runner_up_lp: Some(runner),
         candidate_wins,
         avg_fps_pct,
         p1_low_pct,
         p01_low_pct,
-        evaluated_rounds: expected,
-        required_wins: required,
-        composite_advantage_pct,
-        avg_fps_advantage_pct,
-        p1_low_advantage_pct,
-        spike_rate_delta_pp,
+        evaluated_rounds: confirmation_rounds,
+        required_wins: 0,
+        composite_advantage_pct: effect_estimate,
+        avg_fps_advantage_pct: avg_adv,
+        p1_low_advantage_pct: p1_adv,
+        spike_rate_delta_pp: spike_delta,
+        screening_rounds: SCREENING_ROUNDS,
+        confirmation_rounds,
+        ci_lower_pct: interval_bounds.map(|(lo, _)| lo),
+        ci_upper_pct: interval_bounds.map(|(_, hi)| hi),
+        stopping_reason,
     }
 }
 
@@ -2205,9 +2361,9 @@ mod tests {
     }
 
     #[test]
-    fn success_adaptive_merges_three_then_five_rounds() {
-        // 固定調適排程：篩選 3 round 全 LP，確認 2 round 僅前 2 名 finalists。
-        // 同內容 CSV → 穩健排名平手 → finalists = [1, 2]；LP3 只有 3 篩選 round。
+    fn success_merges_two_screening_plus_three_confirmation_rounds() {
+        // 新排程：2 篩選 round 全 LP + 3 確認 round 僅前 2 名 finalists。
+        // 同內容 CSV → 平手 → finalists = [1, 2]；確認效應為 0 → Equivalent，3 round 提早停。
         let root = temp_root("merge");
         let journal = root.join("journal.json");
         let backend = Arc::new(FakeBackend::new(vec![device(GPU_A)]));
@@ -2238,10 +2394,11 @@ mod tests {
             .iter()
             .map(|r| (r.lp, r.sample_count))
             .collect();
-        // finalists（LP1, LP2）合併 5 round（50×5=250）；非 finalist（LP3）合併 3 round（150）
+        // finalists（LP1, LP2）合併 2 篩選 + 3 確認 = 5 round（50×5=250）；
+        // 非 finalist（LP3）只測 2 篩選 round（50×2=100）。
         assert_eq!(sample_by_lp[&1], 250);
         assert_eq!(sample_by_lp[&2], 250);
-        assert_eq!(sample_by_lp[&3], 150);
+        assert_eq!(sample_by_lp[&3], 100);
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -2271,268 +2428,360 @@ mod tests {
         }
     }
 
-    /// 5 round 全勝 + 複合優勢明顯 → Passed
-    #[test]
-    fn reliability_passed_with_5_rounds_and_effect() {
-        let dir = temp_root("rel_pass");
-        let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
-        for round in 0..5 {
-            round_csvs
-                .entry(0)
+    /// 建置 K 個確認 round（round SCREENING_ROUNDS..SCREENING_ROUNDS+K）的
+    /// (candidate, runner) CSV map，逐 round 固定 frametime。
+    fn confirmation_csvs(
+        dir: &Path,
+        candidate: u32,
+        runner: u32,
+        k: u32,
+        c_frame: f64,
+        r_frame: f64,
+    ) -> HashMap<u32, HashMap<u32, PathBuf>> {
+        let mut m: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+        for round in SCREENING_ROUNDS..(SCREENING_ROUNDS + k) {
+            m.entry(candidate)
                 .or_default()
-                .insert(round, write_round_csv(&dir, round, 0, 10.0));
-            round_csvs
-                .entry(1)
+                .insert(round, write_round_csv(dir, round, candidate, c_frame));
+            m.entry(runner)
                 .or_default()
-                .insert(round, write_round_csv(&dir, round, 1, 11.0));
+                .insert(round, write_round_csv(dir, round, runner, r_frame));
         }
+        m
+    }
+
+    /// 建置確認 CSV map，逐 round 給定不同 (candidate, runner) frametime（供
+    /// 一致性規則測試：單一 round 效應刻意低於門檻）。
+    fn confirmation_csvs_varied(
+        dir: &Path,
+        candidate: u32,
+        runner: u32,
+        frames: &[(f64, f64)],
+    ) -> HashMap<u32, HashMap<u32, PathBuf>> {
+        let mut m: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+        for (i, &(cf, rf)) in frames.iter().enumerate() {
+            let round = SCREENING_ROUNDS + i as u32;
+            m.entry(candidate)
+                .or_default()
+                .insert(round, write_round_csv(dir, round, candidate, cf));
+            m.entry(runner)
+                .or_default()
+                .insert(round, write_round_csv(dir, round, runner, rf));
+        }
+        m
+    }
+
+    /// 候選確認效應明顯超越門檻 → 3 確認 round 即 Passed。
+    #[test]
+    fn reliability_passed_with_3_confirmation_rounds() {
+        let dir = temp_root("rel_pass");
+        let round_csvs = confirmation_csvs(&dir, 0, 1, 3, 10.0, 11.0);
         let results = vec![
             lp_res(0, 100.0, 100.0, 100.0, 0.0),
             lp_res(1, 90.909, 90.909, 90.909, 0.0),
         ];
-        let rel = compute_reliability(&round_csvs, &results, 5);
+        let rel = compute_reliability(&round_csvs, &results, &[0, 1], 3);
         assert_eq!(rel.status, ReliabilityStatus::Passed);
         assert_eq!(rel.candidate_lp, Some(0));
         assert_eq!(rel.runner_up_lp, Some(1));
-        assert_eq!(rel.candidate_wins, 5);
-        assert_eq!(rel.per_round_winners, vec![Some(0); 5]);
-        assert_eq!(rel.evaluated_rounds, 5);
-        assert_eq!(rel.required_wins, 3);
-        assert!(rel.composite_advantage_pct.unwrap() >= 0.5);
-        assert!(rel.avg_fps_pct.unwrap() >= 1.0);
+        assert_eq!(rel.evaluated_rounds, 3);
+        assert_eq!(rel.screening_rounds, 2);
+        assert_eq!(rel.confirmation_rounds, 3);
+        assert_eq!(rel.stopping_reason, "passed");
+        assert_eq!(rel.candidate_wins, 3);
+        assert_eq!(rel.per_round_winners, vec![Some(0); 3]);
+        assert!(rel.composite_advantage_pct.unwrap() > COMPOSITE_ADVANTAGE_MIN_PCT);
+        assert!(rel.ci_lower_pct.unwrap() > COMPOSITE_ADVANTAGE_MIN_PCT);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 7 round 中候選只勝 4 次（<ceil(60%)=5）→ Inconclusive
+    /// 3 確認 round 中有一輪效應未超越門檻（其餘兩輪明顯超越）→ 不得早期 Passed，
+    /// 即使 bootstrap 穩定性區間下界 > 門檻（區間不能單獨觸發 Passed）。
     #[test]
-    fn reliability_inconclusive_when_insufficient_wins() {
-        let dir = temp_root("rel_wins7");
-        let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
-        for round in 0..7 {
-            // LP0 勝 round 0/1/2；LP1 勝 round 3/4/5/6
-            let (f0, f1) = if round < 3 {
-                (10.0, 11.0)
-            } else {
-                (11.0, 10.0)
-            };
-            round_csvs
-                .entry(0)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 0, f0));
-            round_csvs
-                .entry(1)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 1, f1));
-        }
+    fn reliability_early_pass_requires_all_three_effects_above_threshold() {
+        let dir = temp_root("rel_early_consistent");
+        // round 2/3 候選明顯較快（10 vs 11 → 效應 ~5.4%）；round 4 差異過小
+        //（10 vs 10.05 → 效應 ~0.27% < 0.5% 門檻）。
+        let round_csvs = confirmation_csvs_varied(
+            &dir,
+            0,
+            1,
+            &[(10.0, 11.0), (10.0, 11.0), (10.0, 10.05)],
+        );
         let results = vec![
-            lp_res(0, 95.238, 95.238, 95.238, 0.0),
-            lp_res(1, 95.238, 95.238, 95.238, 0.0),
+            lp_res(0, 100.0, 100.0, 100.0, 0.0),
+            lp_res(1, 90.909, 90.909, 90.909, 0.0),
         ];
-        let rel = compute_reliability(&round_csvs, &results, 7);
+        let rel = compute_reliability(&round_csvs, &results, &[0, 1], 3);
         assert_eq!(rel.status, ReliabilityStatus::Inconclusive);
-        assert_eq!(rel.evaluated_rounds, 7);
-        assert_eq!(rel.required_wins, 5);
-        assert_eq!(rel.candidate_lp, Some(1));
-        assert_eq!(rel.candidate_wins, 4);
+        // 兩輪大效應把區間下界拉高到門檻之上，但一致性不足（3 輪未全數超越）→ 不得 Passed。
+        assert!(rel.ci_lower_pct.unwrap() > COMPOSITE_ADVANTAGE_MIN_PCT);
+        assert!(matches!(
+            evaluate_confirmation(&round_csvs, 0, 1, 3),
+            ConfirmationVerdict::Continue
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 5 round 全勝但複合優勢 <0.5% → Equivalent（可重現、差異過小）
+    /// 4 確認 round 全數超越門檻 → Passed；3/4 超越（一輪不足）→ Inconclusive。
     #[test]
-    fn reliability_equivalent_when_advantage_too_small() {
+    fn reliability_four_rounds_requires_all_four() {
+        let dir = temp_root("rel_4rounds");
+        let results = vec![
+            lp_res(0, 100.0, 100.0, 100.0, 0.0),
+            lp_res(1, 90.909, 90.909, 90.909, 0.0),
+        ];
+        // 4/4 全超越 → Passed
+        let all_above = confirmation_csvs(&dir, 0, 1, 4, 10.0, 11.0);
+        let rel = compute_reliability(&all_above, &results, &[0, 1], 4);
+        assert_eq!(rel.status, ReliabilityStatus::Passed);
+        assert_eq!(rel.confirmation_rounds, 4);
+        assert_eq!(rel.stopping_reason, "passed");
+        // 3/4 超越（最後一輪差異過小）→ Inconclusive
+        let three_above = confirmation_csvs_varied(
+            &dir,
+            0,
+            1,
+            &[(10.0, 11.0), (10.0, 11.0), (10.0, 11.0), (10.0, 10.05)],
+        );
+        let rel2 = compute_reliability(&three_above, &results, &[0, 1], 4);
+        assert_eq!(rel2.status, ReliabilityStatus::Inconclusive);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 5 確認 round：至少 4/5 超越門檻（允許一個離群）→ Passed；僅 3/5 超越 → Inconclusive。
+    #[test]
+    fn reliability_five_rounds_allows_at_most_one_outlier() {
+        let dir = temp_root("rel_5rounds");
+        let results = vec![
+            lp_res(0, 100.0, 100.0, 100.0, 0.0),
+            lp_res(1, 90.909, 90.909, 90.909, 0.0),
+        ];
+        // 4/5 超越（一個離群低於門檻）→ Passed
+        let four_above = confirmation_csvs_varied(
+            &dir,
+            0,
+            1,
+            &[
+                (10.0, 11.0),
+                (10.0, 11.0),
+                (10.0, 11.0),
+                (10.0, 11.0),
+                (10.0, 10.05),
+            ],
+        );
+        let rel = compute_reliability(&four_above, &results, &[0, 1], 5);
+        assert_eq!(rel.status, ReliabilityStatus::Passed);
+        assert_eq!(rel.confirmation_rounds, 5);
+        assert_eq!(rel.stopping_reason, "passed");
+        // 3/5 超越（兩個離群）→ Inconclusive
+        let three_above = confirmation_csvs_varied(
+            &dir,
+            0,
+            1,
+            &[
+                (10.0, 11.0),
+                (10.0, 11.0),
+                (10.0, 11.0),
+                (10.0, 10.05),
+                (10.0, 10.05),
+            ],
+        );
+        let rel2 = compute_reliability(&three_above, &results, &[0, 1], 5);
+        assert_eq!(rel2.status, ReliabilityStatus::Inconclusive);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 候選與亞軍實質無差異 → 3 確認 round 即 Equivalent（觀測到的實務等效）。
+    #[test]
+    fn reliability_equivalent_with_negligible_effect() {
         let dir = temp_root("rel_equiv");
-        let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
-        for round in 0..5 {
-            round_csvs
-                .entry(0)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 0, 10.0));
-            round_csvs
-                .entry(1)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 1, 10.05));
-        }
+        let round_csvs = confirmation_csvs(&dir, 0, 1, 3, 10.0, 10.05);
         let results = vec![
             lp_res(0, 100.0, 100.0, 100.0, 0.0),
             lp_res(1, 99.502, 99.502, 99.502, 0.0),
         ];
-        let rel = compute_reliability(&round_csvs, &results, 5);
+        let rel = compute_reliability(&round_csvs, &results, &[0, 1], 3);
         assert_eq!(rel.status, ReliabilityStatus::Equivalent);
-        assert_eq!(rel.candidate_lp, Some(0));
-        assert_eq!(rel.candidate_wins, 5);
-        assert!(rel.composite_advantage_pct.unwrap() < 0.5);
+        assert_eq!(rel.stopping_reason, "equivalent");
+        assert!(rel.composite_advantage_pct.unwrap() < COMPOSITE_ADVANTAGE_MIN_PCT);
+        assert!(rel.ci_upper_pct.unwrap() < COMPOSITE_ADVANTAGE_MIN_PCT);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 5 round 中 LP1 缺 1 個 round → Inconclusive
+    /// 確認效應在輪次間正負交錯 → 穩定性區間橫跨門檻 → Inconclusive（驅動確認擴充）。
     #[test]
-    fn reliability_inconclusive_when_missing_round() {
-        let dir = temp_root("rel_missing");
+    fn reliability_inconclusive_when_effect_straddles() {
+        let dir = temp_root("rel_straddle");
         let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
-        for round in 0..5 {
-            round_csvs
-                .entry(0)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 0, 10.0));
-        }
-        // LP1 只有 4 個 round（缺 round 4）
-        for round in 0..4 {
-            round_csvs
-                .entry(1)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 1, 12.0));
+        let frames = [(10.0, 11.0), (11.0, 10.0), (10.0, 11.0)];
+        for (i, &(cf, rf)) in frames.iter().enumerate() {
+            let round = SCREENING_ROUNDS + i as u32;
+            round_csvs.entry(0).or_default().insert(round, write_round_csv(&dir, round, 0, cf));
+            round_csvs.entry(1).or_default().insert(round, write_round_csv(&dir, round, 1, rf));
         }
         let results = vec![
             lp_res(0, 100.0, 100.0, 100.0, 0.0),
-            lp_res(1, 83.333, 83.333, 83.333, 0.0),
+            lp_res(1, 100.0, 100.0, 100.0, 0.0),
         ];
-        let rel = compute_reliability(&round_csvs, &results, 5);
+        let rel = compute_reliability(&round_csvs, &results, &[0, 1], 3);
         assert_eq!(rel.status, ReliabilityStatus::Inconclusive);
+        assert_eq!(rel.stopping_reason, "inconclusive");
+        assert!(rel.ci_lower_pct.unwrap() < COMPOSITE_ADVANTAGE_MIN_PCT);
+        assert!(rel.ci_upper_pct.unwrap() > COMPOSITE_ADVANTAGE_MIN_PCT);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 單一 LP（無亞軍）→ Inconclusive，改善百分比為 None
+    /// 確認擴充到 5 round 仍橫跨門檻 → 最終 Inconclusive（不因更多 round 假精確）。
     #[test]
-    fn reliability_inconclusive_with_single_lp() {
-        let dir = temp_root("rel_one_lp");
+    fn reliability_inconclusive_at_max_confirmation_rounds() {
+        let dir = temp_root("rel_max5");
         let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
-        for round in 0..5 {
-            round_csvs
-                .entry(0)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 0, 10.0));
+        for i in 0..CONFIRMATION_MAX_ROUNDS {
+            let round = SCREENING_ROUNDS + i;
+            let (cf, rf) = if i % 2 == 0 { (10.0, 11.0) } else { (11.0, 10.0) };
+            round_csvs.entry(0).or_default().insert(round, write_round_csv(&dir, round, 0, cf));
+            round_csvs.entry(1).or_default().insert(round, write_round_csv(&dir, round, 1, rf));
         }
-        let results = vec![lp_res(0, 100.0, 100.0, 100.0, 0.0)];
-        let rel = compute_reliability(&round_csvs, &results, 5);
+        let results = vec![
+            lp_res(0, 100.0, 100.0, 100.0, 0.0),
+            lp_res(1, 100.0, 100.0, 100.0, 0.0),
+        ];
+        let rel = compute_reliability(&round_csvs, &results, &[0, 1], 5);
         assert_eq!(rel.status, ReliabilityStatus::Inconclusive);
-        assert_eq!(rel.runner_up_lp, None);
-        assert!(rel.avg_fps_pct.is_none());
-        assert!(rel.p1_low_pct.is_none());
-        assert!(rel.p01_low_pct.is_none());
-        assert!(rel.composite_advantage_pct.is_none());
+        assert_eq!(rel.confirmation_rounds, 5);
+        assert_eq!(rel.stopping_reason, "inconclusive");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 每 LP 只有 3 round（<5）→ 即使全勝也不得 Passed
+    /// 篩選資料絕不混入確認推論：即使篩選 round 顯示候選較差，只要確認 round
+    /// 顯示候選較佳，仍 Passed（compute_reliability 只讀確認 round）。
     #[test]
-    fn reliability_inconclusive_when_fewer_than_5_rounds() {
-        let dir = temp_root("rel_3rounds");
+    fn reliability_ignores_screening_rounds() {
+        let dir = temp_root("rel_no_leak");
         let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
-        for round in 0..3 {
-            round_csvs
-                .entry(0)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 0, 10.0));
-            round_csvs
-                .entry(1)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 1, 11.0));
+        // 篩選 round 0,1：候選(0) 較慢（20ms），亞軍(1) 較快（10ms）——若洩漏會判候選較差。
+        for round in 0..SCREENING_ROUNDS {
+            round_csvs.entry(0).or_default().insert(round, write_round_csv(&dir, round, 0, 20.0));
+            round_csvs.entry(1).or_default().insert(round, write_round_csv(&dir, round, 1, 10.0));
+        }
+        // 確認 round 2..4：候選較快（10ms），亞軍較慢（11ms）。
+        for round in SCREENING_ROUNDS..(SCREENING_ROUNDS + 3) {
+            round_csvs.entry(0).or_default().insert(round, write_round_csv(&dir, round, 0, 10.0));
+            round_csvs.entry(1).or_default().insert(round, write_round_csv(&dir, round, 1, 11.0));
         }
         let results = vec![
             lp_res(0, 100.0, 100.0, 100.0, 0.0),
             lp_res(1, 90.909, 90.909, 90.909, 0.0),
         ];
-        let rel = compute_reliability(&round_csvs, &results, 3);
-        assert_eq!(rel.status, ReliabilityStatus::Inconclusive);
-        assert_eq!(rel.evaluated_rounds, 3);
-        assert_eq!(rel.candidate_wins, 3);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// LP1 有 5 個 round key 但缺 round 1（0/2/3/4/5）→ 不算完整 → Inconclusive
-    #[test]
-    fn reliability_inconclusive_when_missing_round_one() {
-        let dir = temp_root("rel_missing_r1");
-        let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
-        for round in 0..5 {
-            round_csvs
-                .entry(0)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 0, 10.0));
-        }
-        // LP1 有 5 個 key，但缺 round 1（round 5 是額外無關 key，不可補足）
-        for round in [0u32, 2, 3, 4, 5] {
-            round_csvs
-                .entry(1)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 1, 12.0));
-        }
-
-        let results = vec![
-            lp_res(0, 100.0, 100.0, 100.0, 0.0),
-            lp_res(1, 83.333, 83.333, 83.333, 0.0),
-        ];
-        let rel = compute_reliability(&round_csvs, &results, 5);
-        assert_eq!(rel.status, ReliabilityStatus::Inconclusive);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// LP1 的 round 3 CSV 無效（不可解析）→ 該 round 不完整 → Inconclusive
-    #[test]
-    fn reliability_inconclusive_when_invalid_csv_in_round() {
-        let dir = temp_root("rel_bad_csv");
-        let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
-        for round in 0..5 {
-            round_csvs
-                .entry(0)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 0, 10.0));
-        }
-        for round in [0u32, 1, 2, 4] {
-            round_csvs
-                .entry(1)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 1, 12.0));
-        }
-        let bad = dir.join("round-3-lp-1.csv");
-        std::fs::write(&bad, "Application,ProcessID,msBetweenPresents\nabc,xyz\n").unwrap();
-        round_csvs.entry(1).or_default().insert(3, bad);
-
-        let results = vec![
-            lp_res(0, 100.0, 100.0, 100.0, 0.0),
-            lp_res(1, 83.333, 83.333, 83.333, 0.0),
-        ];
-        let rel = compute_reliability(&round_csvs, &results, 5);
-        assert_eq!(rel.status, ReliabilityStatus::Inconclusive);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// 只測部分 round 的 LP（缺 round 4）不得成為任何 round 的勝者，
-    /// 即使其聚合指標最好、且在已測 round 全勝（8ms 最快）。
-    #[test]
-    fn reliability_partial_lp_excluded_from_round_winner_comparisons() {
-        let dir = temp_root("rel_partial");
-        let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
-        for round in 0..5 {
-            round_csvs
-                .entry(0)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 0, 12.0));
-            round_csvs
-                .entry(1)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 1, 13.0));
-        }
-        // LP2 只測 round 0..4（缺 round 4），且四 round 皆最佳（8ms），但不得成為勝者
-        for round in 0..4 {
-            round_csvs
-                .entry(2)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 2, 8.0));
-        }
-
-        let results = vec![
-            lp_res(0, 83.333, 83.333, 83.333, 0.0),
-            lp_res(1, 76.923, 76.923, 76.923, 0.0),
-            lp_res(2, 125.0, 125.0, 125.0, 0.0),
-        ];
-        let rel = compute_reliability(&round_csvs, &results, 5);
+        let rel = compute_reliability(&round_csvs, &results, &[0, 1], 3);
         assert_eq!(rel.status, ReliabilityStatus::Passed);
         assert_eq!(rel.candidate_lp, Some(0));
-        assert!(
-            !rel.per_round_winners.contains(&Some(2)),
-            "部分 LP 不得成為任何 round 勝者"
-        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 確認 round 缺 CSV → 證據不完整 → Inconclusive，效應/穩定性區間為 None。
+    #[test]
+    fn reliability_inconclusive_when_missing_confirmation_csv() {
+        let dir = temp_root("rel_missing");
+        let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+        // 候選只有 2 個確認 round（缺第 3 個）
+        for round in SCREENING_ROUNDS..(SCREENING_ROUNDS + 2) {
+            round_csvs.entry(0).or_default().insert(round, write_round_csv(&dir, round, 0, 10.0));
+        }
+        for round in SCREENING_ROUNDS..(SCREENING_ROUNDS + 3) {
+            round_csvs.entry(1).or_default().insert(round, write_round_csv(&dir, round, 1, 12.0));
+        }
+        let results = vec![
+            lp_res(0, 100.0, 100.0, 100.0, 0.0),
+            lp_res(1, 83.333, 83.333, 83.333, 0.0),
+        ];
+        let rel = compute_reliability(&round_csvs, &results, &[0, 1], 3);
+        assert_eq!(rel.status, ReliabilityStatus::Inconclusive);
+        assert_eq!(rel.composite_advantage_pct, None);
+        assert_eq!(rel.ci_lower_pct, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 確認 round 的 CSV 無效（不可解析）→ 證據不完整 → Inconclusive。
+    #[test]
+    fn reliability_inconclusive_when_invalid_confirmation_csv() {
+        let dir = temp_root("rel_bad_csv");
+        let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+        for round in SCREENING_ROUNDS..(SCREENING_ROUNDS + 3) {
+            round_csvs.entry(0).or_default().insert(round, write_round_csv(&dir, round, 0, 10.0));
+        }
+        for round in SCREENING_ROUNDS..(SCREENING_ROUNDS + 2) {
+            round_csvs.entry(1).or_default().insert(round, write_round_csv(&dir, round, 1, 12.0));
+        }
+        let bad = dir.join(format!("round-{}-lp-1.csv", SCREENING_ROUNDS + 2));
+        std::fs::write(&bad, "Application,ProcessID,msBetweenPresents\nabc,xyz\n").unwrap();
+        round_csvs.entry(1).or_default().insert(SCREENING_ROUNDS + 2, bad);
+
+        let results = vec![
+            lp_res(0, 100.0, 100.0, 100.0, 0.0),
+            lp_res(1, 83.333, 83.333, 83.333, 0.0),
+        ];
+        let rel = compute_reliability(&round_csvs, &results, &[0, 1], 3);
+        assert_eq!(rel.status, ReliabilityStatus::Inconclusive);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 少於兩個 finalists（如 N=1）或無確認 round → Inconclusive，無推薦。
+    #[test]
+    fn reliability_inconclusive_without_two_finalists() {
+        let dir = temp_root("rel_one_lp");
+        let round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+        let results = vec![lp_res(0, 100.0, 100.0, 100.0, 0.0)];
+        let rel = compute_reliability(&round_csvs, &results, &[], 0);
+        assert_eq!(rel.status, ReliabilityStatus::Inconclusive);
+        assert_eq!(rel.candidate_lp, None);
+        assert_eq!(rel.runner_up_lp, None);
+        assert!(rel.composite_advantage_pct.is_none());
+        assert!(rel.ci_lower_pct.is_none());
+        assert_eq!(rel.stopping_reason, "inconclusive");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// bootstrap 穩定性區間完全確定：相同輸入兩次呼叫逐位元組相等；常數效應 → 區間
+    /// 退化為點；有散布 → 下界 ≤ 點估計 ≤ 上界。
+    #[test]
+    fn paired_bootstrap_interval_is_deterministic() {
+        let e = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let a = paired_bootstrap_interval(&e);
+        let b = paired_bootstrap_interval(&e);
+        assert_eq!(a.0, b.0);
+        assert_eq!(a.1, b.1);
+        assert_eq!(a.2, b.2);
+        assert_eq!(a.0, 3.0);
+        assert!(a.1 <= a.0 && a.0 <= a.2);
+        assert!(a.1 < a.2);
+        let (p, lo, hi) = paired_bootstrap_interval(&[0.25, 0.25, 0.25]);
+        assert_eq!(p, 0.25);
+        assert_eq!(lo, 0.25);
+        assert_eq!(hi, 0.25);
+    }
+
+    /// 確認效應橫跨門檻時 evaluate 回 Continue（驅動確認擴充）；超越門檻回 Passed。
+    #[test]
+    fn evaluate_confirmation_continues_on_straddle_and_passes_on_effect() {
+        let dir = temp_root("eval");
+        let mut straddle: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+        let frames = [(10.0, 11.0), (11.0, 10.0), (10.0, 11.0)];
+        for (i, &(cf, rf)) in frames.iter().enumerate() {
+            let round = SCREENING_ROUNDS + i as u32;
+            straddle.entry(0).or_default().insert(round, write_round_csv(&dir, round, 0, cf));
+            straddle.entry(1).or_default().insert(round, write_round_csv(&dir, round, 1, rf));
+        }
+        assert!(matches!(
+            evaluate_confirmation(&straddle, 0, 1, 3),
+            ConfirmationVerdict::Continue
+        ));
+        let clear = confirmation_csvs(&dir, 0, 1, 3, 10.0, 11.0);
+        assert!(matches!(
+            evaluate_confirmation(&clear, 0, 1, 3),
+            ConfirmationVerdict::Passed
+        ));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2651,7 +2900,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_config_rejects_zero_sample_secs_and_non_five_repetitions() {
+    fn validate_config_rejects_zero_sample_secs_but_ignores_repetitions() {
         let t = topo();
         let mut c = base_config();
         c.sample_secs = 0;
@@ -2660,17 +2909,11 @@ mod tests {
             codes::BENCHMARK_INVALID_CONFIG
         );
         c.sample_secs = 3;
-        // 固定調適排程只接受 repetitions == 5；其餘（含舊 3..=7 範圍）皆拒絕
-        for bad in [2u32, 3, 4, 6, 7, 8] {
-            c.repetitions = bad;
-            assert_eq!(
-                validate_config(&c, &t).unwrap_err(),
-                codes::BENCHMARK_INVALID_CONFIG,
-                "repetitions={bad} 應被拒絕"
-            );
+        // 新排程固定 2 篩選 + 3..=5 確認，`repetitions` 欄位被忽略（保留供舊 session 相容）。
+        for legacy in [2u32, 3, 4, 5, 6, 7, 8] {
+            c.repetitions = legacy;
+            assert!(validate_config(&c, &t).is_ok(), "repetitions={legacy} 應被忽略");
         }
-        c.repetitions = 5;
-        assert!(validate_config(&c, &t).is_ok());
     }
 
     #[test]
@@ -3517,14 +3760,14 @@ mod tests {
         );
         // 單一 LP（N=1）無確認階段 → Inconclusive，無 best_lp；此測試重點是 retry 回收
         assert_eq!(result.best_lp, None);
-        // 每 round：初次套用 + capture recovery 各重啟一次；3 round 共 6 次，
-        // 加上終結還原 1 次 = 7 次。
+        // 每 round：初次套用 + capture recovery 各重啟一次；2 篩選 round 共 4 次，
+        // 加上終結還原 1 次 = 5 次。
         assert_eq!(
             backend.restart_count(),
-            7,
+            5,
             "missing capture retry 必須先重新啟動 GPU，再建立新 workload"
         );
-        // 每 round 兩個 workload PID（attempt 1 + retry）× 3 round = 6
+        // 每 round 兩個 workload PID（attempt 1 + retry）× 2 篩選 round = 4
         let log = processes.spawn_log();
         let wl_pids: Vec<u32> = log
             .iter()
@@ -3533,7 +3776,7 @@ mod tests {
             .collect();
         assert_eq!(
             wl_pids.len(),
-            6,
+            4,
             "每 round 第一次 + retry 各一個 workload PID"
         );
         for p in &wl_pids {
@@ -3718,7 +3961,7 @@ mod tests {
             !result.detail.results.is_empty(),
             "已有成功 capture 應保留部分結果"
         );
-        // LP 1 每 round 一次成功（3 round）+ LP 2 每 round 三次 attempt（3 round）
+        // LP 1 每 round 一次成功（2 篩選 round）+ LP 2 每 round 三次 attempt（2 篩選 round）
         let wl_spawns = processes
             .spawn_log()
             .iter()
@@ -3726,7 +3969,7 @@ mod tests {
             .count();
         assert_eq!(
             wl_spawns,
-            3 + 3 * MAX_CAPTURE_ATTEMPTS as usize,
+            2 + 2 * MAX_CAPTURE_ATTEMPTS as usize,
             "LP1 每 round 一次 + LP2 每 round 三次 attempts"
         );
         assert_eq!(backend.current_policy(GPU_A), baseline, "必須還原策略");
@@ -4561,7 +4804,7 @@ mod tests {
             vec![1, 3]
         );
         let total_samples: u32 = result.detail.results.iter().map(|r| r.sample_count).sum();
-        assert_eq!(total_samples, 300, "LP1 150 + LP3 150 = 300");
+        assert_eq!(total_samples, 200, "LP1 100 + LP3 100 = 200");
         assert_eq!(
             result.detail.summary.sample_count, total_samples,
             "summary.sample_count 必須等於已完成 LP 的 sample_count 總和"
@@ -4601,9 +4844,10 @@ mod tests {
         map
     }
 
-    /// N=3：精確執行 N*3 + 4 = 13 次 capture，且只有前 2 名 finalists 進 rounds 3/4。
+    /// N=3：同內容 → 平手 → Equivalent 於 3 確認 round 提早停；精確 2N+6 = 12 次
+    /// capture，且只有前 2 名 finalists 進確認 round（2..4）。
     #[test]
-    fn adaptive_run_exact_counts_and_only_top_two_confirmed() {
+    fn adaptive_run_exact_min_captures_and_only_top_two_confirmed() {
         let root = temp_root("adaptive_counts");
         let journal = root.join("journal.json");
         let backend = Arc::new(FakeBackend::new(vec![device(GPU_A)]));
@@ -4614,7 +4858,7 @@ mod tests {
             .unwrap()
             .push_str(&csv_for_lp(0));
         let cancel = FakeCancel::new();
-        let config = base_config(); // candidate_lps [1,2,3], repetitions 5
+        let config = base_config(); // candidate_lps [1,2,3]
 
         let mut ctx = build_ctx(
             &root,
@@ -4634,13 +4878,18 @@ mod tests {
             .iter()
             .filter(|(n, _, _)| !n.contains("PresentMon"))
             .count();
-        assert_eq!(wl_spawns, 13, "N=3 應為 3*3 + 2*2 = 13 次 capture");
+        assert_eq!(wl_spawns, 12, "N=3 應為 2*3 + 2*3 = 12 次 capture（2N+6 最小）");
 
-        // 同內容 CSV → 穩健排名平手 → finalists = [1, 2]；LP3 只測篩選 3 round
+        // 同內容 CSV → 平手 → finalists = [1, 2]；確認 3 round 即停（Equivalent）；
+        // LP3 只測篩選 2 round。
         let rl = rounds_per_lp(&processes);
         assert_eq!(rl[&1], vec![0, 1, 2, 3, 4]);
         assert_eq!(rl[&2], vec![0, 1, 2, 3, 4]);
-        assert_eq!(rl[&3], vec![0, 1, 2]);
+        assert_eq!(rl[&3], vec![0, 1]);
+        assert_eq!(
+            result.detail.summary.reliability.confirmation_rounds,
+            CONFIRMATION_MIN_ROUNDS
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -4667,65 +4916,54 @@ mod tests {
     fn select_finalists_empty_when_fewer_than_two_complete() {
         let dir = temp_root("sel_few");
         let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
-        for round in 0..3u32 {
+        // LP0 完整（2 篩選 round）
+        for round in 0..SCREENING_ROUNDS {
             round_csvs
                 .entry(0)
                 .or_default()
                 .insert(round, write_round_csv(&dir, round, 0, 10.0));
         }
-        // LP1 缺 round 2 → 非完整候選
-        for round in 0..2u32 {
-            round_csvs
-                .entry(1)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 1, 11.0));
-        }
+        // LP1 只測 1 個篩選 round → 非完整候選
+        round_csvs
+            .entry(1)
+            .or_default()
+            .insert(0, write_round_csv(&dir, 0, 1, 11.0));
         assert!(select_finalists(&round_csvs, SCREENING_ROUNDS).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// 非 finalist（僅 3 篩選 round）不得使成功 session 變 Inconclusive；
-    /// 最終 best 由兩個 5-round finalists 比較得出。
+    /// 非 finalist（僅篩選 round）不得出現在確認勝者中；best 由確認推論的 finalists 決定。
     #[test]
-    fn non_finalist_three_rounds_does_not_invalidate_success() {
+    fn non_finalist_does_not_become_confirmation_winner() {
         let dir = temp_root("rel_adaptive");
         let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
-        for round in 0..5 {
-            round_csvs
-                .entry(0)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 0, 10.0));
-            round_csvs
-                .entry(1)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 1, 11.0));
+        // finalists 0/1 各 5 確認 round（2..6）
+        for round in SCREENING_ROUNDS..(SCREENING_ROUNDS + 5) {
+            round_csvs.entry(0).or_default().insert(round, write_round_csv(&dir, round, 0, 10.0));
+            round_csvs.entry(1).or_default().insert(round, write_round_csv(&dir, round, 1, 11.0));
         }
-        // LP2 只測篩選 3 round（8ms 最快），非 finalist，不得影響最終可靠性
-        for round in 0..3 {
-            round_csvs
-                .entry(2)
-                .or_default()
-                .insert(round, write_round_csv(&dir, round, 2, 8.0));
+        // 非 finalist LP2 只有篩選 round（8ms 最快），不得影響確認推論
+        for round in 0..SCREENING_ROUNDS {
+            round_csvs.entry(2).or_default().insert(round, write_round_csv(&dir, round, 2, 8.0));
         }
         let results = vec![
             lp_res(0, 100.0, 100.0, 100.0, 0.0),
             lp_res(1, 90.909, 90.909, 90.909, 0.0),
             lp_res(2, 125.0, 125.0, 125.0, 0.0),
         ];
-        let rel = compute_reliability(&round_csvs, &results, TOTAL_ROUNDS);
+        let rel = compute_reliability(&round_csvs, &results, &[0, 1], 5);
         assert_eq!(rel.status, ReliabilityStatus::Passed);
         assert_eq!(rel.candidate_lp, Some(0));
         assert_eq!(rel.runner_up_lp, Some(1));
-        assert_eq!(rel.candidate_wins, 5);
         assert!(
             !rel.per_round_winners.contains(&Some(2)),
-            "3-round 非 finalist 不得成為勝者"
+            "非 finalist 不得成為任何確認 round 勝者"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// N=1：只測 3 篩選 round 即停（不浪費 2 確認 round），session Completed 但
-    /// 可靠性 Inconclusive（少於兩個 finalists，無法 Passed/Equivalent）。
+    /// N=1：只測 2 篩選 round 即停（無確認），session Completed 但可靠性
+    /// Inconclusive（少於兩個 finalists，無法 Passed/Equivalent）。
     #[test]
     fn single_lp_skips_confirmation_and_stays_inconclusive() {
         let root = temp_root("n1");
@@ -4763,8 +5001,8 @@ mod tests {
             .iter()
             .filter(|(n, _, _)| !n.contains("PresentMon"))
             .count();
-        assert_eq!(wl_spawns, 3, "N=1 只測 3 篩選 round，無確認");
-        assert_eq!(rounds_per_lp(&processes)[&1], vec![0, 1, 2]);
+        assert_eq!(wl_spawns, 2, "N=1 只測 2 篩選 round，無確認");
+        assert_eq!(rounds_per_lp(&processes)[&1], vec![0, 1]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

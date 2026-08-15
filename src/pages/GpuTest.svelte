@@ -87,8 +87,9 @@
       : [],
   );
   const lpList = $derived(lps);
-  // 固定調適排程：前 3 round 測所有選定 LP，後 2 round 只重測篩選前 2 名。
-  const restartCount = $derived(lpList.length * 3 + Math.min(lpList.length, 2) * 2);
+  // 新排程：2 篩選 round 測所有選定 LP + 3..5 確認 round 只重測前 2 名。
+  // restartCount 取「最多」（2N+10），不承諾較短時間（確認可能自 3 round 擴充到 5 round）。
+  const restartCount = $derived(lpList.length * 2 + Math.min(lpList.length, 2) * 5);
   const estMinutes = $derived(
     Math.max(1, Math.round((restartCount * (sampleSecs + warmUpSecs + 19)) / 60)),
   );
@@ -685,11 +686,12 @@
                     <span class="rel-round">{$t('gpuTest.round', { values: { round: i + 1 } })}：{w != null ? `LP ${w}` : '—'}</span>
                   {/each}
                 </div>
-                <div class="rel-meta">{$t('gpuTest.reliabilityWins', { values: { wins: reliability.candidateWins, evaluated: reliability.evaluatedRounds, required: reliability.requiredWins } })}</div>
-                {#if reliability.compositeAdvantagePct != null || reliability.avgFpsAdvantagePct != null || reliability.p1LowAdvantagePct != null || reliability.spikeRateDeltaPp != null}
+                <div class="rel-meta">{$t('gpuTest.reliabilityConfirmation', { values: { screening: reliability.screeningRounds, confirmation: reliability.confirmationRounds } })}</div>
+                {#if reliability.compositeAdvantagePct != null || reliability.ciLowerPct != null || reliability.avgFpsAdvantagePct != null || reliability.p1LowAdvantagePct != null || reliability.spikeRateDeltaPp != null}
                   <div class="rel-evidence">
                     <span class="hint">{$t('gpuTest.reliabilityEvidence')}</span>
                     {#if reliability.compositeAdvantagePct != null}<span>{$t('gpuTest.evidenceComposite')} {fmtPct(reliability.compositeAdvantagePct)}</span>{/if}
+                    {#if reliability.ciLowerPct != null && reliability.ciUpperPct != null}<span>{$t('gpuTest.reliabilityCi', { values: { lower: fmtPct(reliability.ciLowerPct), upper: fmtPct(reliability.ciUpperPct) } })}</span>{/if}
                     {#if reliability.avgFpsAdvantagePct != null}<span>{$t('gpuTest.colAvg')} {fmtPct(reliability.avgFpsAdvantagePct)}</span>{/if}
                     {#if reliability.p1LowAdvantagePct != null}<span>{$t('gpuTest.colP1')} {fmtPct(reliability.p1LowAdvantagePct)}</span>{/if}
                     {#if reliability.spikeRateDeltaPp != null}<span>{$t('gpuTest.evidenceSpike')} {fmtDeltaPp(reliability.spikeRateDeltaPp)}</span>{/if}

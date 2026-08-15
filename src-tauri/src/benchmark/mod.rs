@@ -64,7 +64,8 @@ pub struct BenchmarkConfig {
     pub warm_up_secs: u32,
     #[serde(default = "default_sample_secs")]
     pub sample_secs: u32,
-    /// round（repetitions）3..=7；round 順序為確定性「旋轉 + 反轉」平衡排程
+    /// 已停用：新排程固定 2 篩選 + 3..=5 確認，忽略此欄位。
+    /// 保留供舊 session JSON 向後相容；預設 5。
     #[serde(default = "default_repetitions")]
     pub repetitions: u32,
     /// 已棄用：production runner 不再繫結 workload process affinity。
@@ -240,12 +241,12 @@ pub enum ReliabilityStatus {
     /// 舊 session 或未計算（非 Completed 的 session）——尚未評估，不可套用。
     #[default]
     Unassessed,
-    /// 至少 2 個完整 LP 各有 ≥5 個完整 round、穩健候選勝 ≥ceil(60% round)、
-    /// 複合分數優勢 ≥0.5% 且無護欄倒退（Avg/1% low ≥-0.5%、spike 未明顯變差）。
+    /// 確認證據（一致性規則 + bootstrap 穩定性區間 + 護欄）支持候選超越最小實質
+    /// 效應門檻。屬小型樣本決策啟發式，非形式化顯著性。
     Passed,
-    /// 證據完整且穩定（勝場與護欄皆達標）但候選實質優勢 <0.5%——可重現、差異過小。
+    /// 確認證據落在可忽略差異帶內——僅描述「觀測到的實務等效」，非統計證明的等效。
     Equivalent,
-    /// 未達 Passed/Equivalent 門檻（round 不足、LP 數不足、勝場不足、護欄倒退、
+    /// 確認證據不足以判定（一致性不足、穩定性區間橫跨門檻、確認不足、護欄倒退、
     /// 或證據不完整/無效）。
     Inconclusive,
 }
@@ -280,24 +281,43 @@ pub struct ReliabilitySummary {
     pub p1_low_pct: Option<f64>,
     #[serde(default)]
     pub p01_low_pct: Option<f64>,
-    /// 評估的預期 round 數（= 本次 session 的 repetitions）
+    /// 評估的確認 round 數（3..=5；配對測量）。舊 session 缺欄為 0。
     #[serde(default)]
     pub evaluated_rounds: u32,
-    /// Passed 所需勝場數 = ceil(60% × evaluated_rounds)
+    /// 已停用（新排程以一致性規則 + bootstrap 穩定性區間判定，不再用勝場門檻）；
+    /// 固定 0。保留欄位供舊 session 向後相容。
     #[serde(default)]
     pub required_wins: u32,
-    /// 穩健候選複合分數相較亞軍的優勢（%，跨 round 中位數）
+    /// 確認證據：候選相對亞軍的配對複合分數優勢點估計（%，逐確認 round 平均）。
+    /// 不可得（確認不足/無效）為 None。
     #[serde(default)]
     pub composite_advantage_pct: Option<f64>,
-    /// 護欄：候選 Avg FPS 相較亞軍（跨 round 中位數，%）
+    /// 護欄：候選 Avg FPS 相較亞軍（確認 round 中位數，%）
     #[serde(default)]
     pub avg_fps_advantage_pct: Option<f64>,
-    /// 護欄：候選 1% low 相較亞軍（跨 round 中位數，%）
+    /// 護欄：候選 1% low 相較亞軍（確認 round 中位數，%）
     #[serde(default)]
     pub p1_low_advantage_pct: Option<f64>,
     /// 護欄：候選 spike rate 相較亞軍（絕對百分點，正 = 候選較差）
     #[serde(default)]
     pub spike_rate_delta_pp: Option<f64>,
+    /// 篩選 round 數（新排程固定 2，僅用於選 finalists，不參與推論）；舊 session 缺欄為 0。
+    #[serde(default)]
+    pub screening_rounds: u32,
+    /// 確認 round 數（3..=5，配對/區塊排序以控制時間漂移）；舊 session 缺欄為 0。
+    #[serde(default)]
+    pub confirmation_rounds: u32,
+    /// 確認證據：bootstrap 穩定性區間下界（%，複合分數優勢）。
+    /// 序列化欄位名保留 `ciLowerPct` 供向後相容；此非統計信賴區間。
+    #[serde(default)]
+    pub ci_lower_pct: Option<f64>,
+    /// 確認證據：bootstrap 穩定性區間上界（%，複合分數優勢）。
+    /// 序列化欄位名保留 `ciUpperPct` 供向後相容；此非統計信賴區間。
+    #[serde(default)]
+    pub ci_upper_pct: Option<f64>,
+    /// 停止原因：`"passed"` / `"equivalent"` / `"inconclusive"`；舊 session 為空字串。
+    #[serde(default)]
+    pub stopping_reason: String,
 }
 
 /// 歷史列表用的摘要
@@ -604,6 +624,12 @@ mod tests {
         assert_eq!(back.avg_fps_advantage_pct, None);
         assert_eq!(back.p1_low_advantage_pct, None);
         assert_eq!(back.spike_rate_delta_pp, None);
+        // 新排程欄位：舊 session 缺欄 → serde 預設值（0/None/空字串）
+        assert_eq!(back.screening_rounds, 0);
+        assert_eq!(back.confirmation_rounds, 0);
+        assert_eq!(back.ci_lower_pct, None);
+        assert_eq!(back.ci_upper_pct, None);
+        assert_eq!(back.stopping_reason, "");
 
         let eq = ReliabilitySummary {
             status: ReliabilityStatus::Equivalent,
@@ -613,6 +639,32 @@ mod tests {
         assert!(json.contains("\"status\":\"Equivalent\""), "json={json}");
         let back2: ReliabilitySummary = serde_json::from_str(&json).unwrap();
         assert_eq!(back2.status, ReliabilityStatus::Equivalent);
+    }
+
+    /// 新排程欄位以 camelCase 序列化，並可回讀（screening/confirmation/CI/stopping）。
+    #[test]
+    fn reliability_new_schedule_fields_roundtrip() {
+        let rel = ReliabilitySummary {
+            status: ReliabilityStatus::Passed,
+            screening_rounds: 2,
+            confirmation_rounds: 3,
+            ci_lower_pct: Some(1.5),
+            ci_upper_pct: Some(4.2),
+            stopping_reason: "passed".to_string(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&rel).unwrap();
+        assert!(json.contains("\"screeningRounds\":2"), "json={json}");
+        assert!(json.contains("\"confirmationRounds\":3"));
+        assert!(json.contains("\"ciLowerPct\":1.5"));
+        assert!(json.contains("\"ciUpperPct\":4.2"));
+        assert!(json.contains("\"stoppingReason\":\"passed\""));
+        let back: ReliabilitySummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.screening_rounds, 2);
+        assert_eq!(back.confirmation_rounds, 3);
+        assert_eq!(back.ci_lower_pct, Some(1.5));
+        assert_eq!(back.ci_upper_pct, Some(4.2));
+        assert_eq!(back.stopping_reason, "passed");
     }
 
     /// 舊 session 的 LpResult 缺 MAD/spike → 反序列化為 None

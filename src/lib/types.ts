@@ -139,9 +139,9 @@ export interface ReliabilitySummary {
   candidateLp: number | null; // 穩健候選 LP（跨 round 複合分數中位數最高）
   runnerUpLp: number | null; // 穩健亞軍；單一 LP 時為 null
   candidateWins: number; // 候選在所有預期 round 中的勝場數
-  evaluatedRounds: number; // 評估的預期 round 數（= repetitions）；舊 session 缺欄為 0
-  requiredWins: number; // Passed 所需勝場數 = ceil(60% × evaluatedRounds)
-  compositeAdvantagePct: number | null; // 複合分數優勢（%）；不可得為 null
+  evaluatedRounds: number; // 評估的確認 round 數（3..=5）；舊 session 缺欄為 0
+  requiredWins: number; // 已停用（新排程以一致性規則 + bootstrap 穩定性區間判定）；固定 0，保留供向後相容
+  compositeAdvantagePct: number | null; // 配對複合分數優勢點估計（%）；不可得為 null
   avgFpsAdvantagePct: number | null; // 護欄：Avg FPS 優勢（%）
   p1LowAdvantagePct: number | null; // 護欄：1% low 優勢（%）
   spikeRateDeltaPp: number | null; // 護欄：spike rate 差（百分點，正 = 候選較差）
@@ -149,6 +149,12 @@ export interface ReliabilitySummary {
   avgFpsPct: number | null;
   p1LowPct: number | null;
   p01LowPct: number | null;
+  // 新排程（篩選 + 確認）證據欄位：
+  screeningRounds: number; // 篩選 round 數（固定 2）；舊 session 缺欄為 0
+  confirmationRounds: number; // 確認 round 數（3..=5）；舊 session 缺欄為 0
+  ciLowerPct: number | null; // bootstrap 穩定性區間下界（%）；欄位名保留 ciLowerPct 供向後相容，非信賴區間
+  ciUpperPct: number | null; // bootstrap 穩定性區間上界（%）；欄位名保留 ciUpperPct 供向後相容，非信賴區間
+  stoppingReason: string; // 'passed' | 'equivalent' | 'inconclusive' | ''（舊 session）
 }
 
 export interface GpuDevice {
@@ -163,7 +169,7 @@ export interface BenchmarkConfig {
   workload: WorkloadKind;
   warmUpSecs: number; // 預設 5
   sampleSecs: number; // 預設 30
-  repetitions: number; // 固定調適排程：新 run 固定為 5（3 篩選 + 2 確認）；欄位保留供舊 session 反序列化
+  repetitions: number; // 已停用（新排程固定 2 篩選 + 3..=5 確認，忽略此欄位）；保留供舊 session 向後相容
   syncWorkloadAffinity: boolean; // 已棄用；固定 false。保留供舊 session 向後相容。
   fullscreen: boolean; // 預設 false
   width: number; // 1280
