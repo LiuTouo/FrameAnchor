@@ -110,8 +110,10 @@ FrameAnchor 只使用標準 Win32 API，不包含 driver、不注入目標程序
 
 ```bash
 npm ci
-npm run tauri build
+npm run build:app
 ```
+
+`npm run build:app` 是**本機完整桌面應用程式建置的正式指令**，以 `tauri build --no-sign` 執行，產出未簽署的 release 執行檔與 NSIS 安裝程式。已簽署的正式發布版本仍透過 `npm run tauri build` 或 GitHub release 工作流程（使用簽署 secret）產生。
 
 NSIS 安裝程式會輸出至：
 
@@ -167,7 +169,7 @@ FrameAnchor 內建 GPU 基準測試，目的是找出**最適合處理指定顯�
 
 - **不是圖形基準測試**：不比較畫質、場景或不同顯示卡的 FPS；畫面只是固定的黑白交替、無 vsync、不設上限的 workload。
 - **不是「哪顆核心跑遊戲最快」**：測的是「哪顆核心處理 GPU 中斷時，frame-time 最穩定／最高」。
-- 透過每次測試將 GPU 驅動中斷親和性鎖定到單一 LP，量測對該核心的影響；統計包含 Avg／Max／Min／STDEV 與 1%／0.1%／0.01%／0.005% time-weighted lows。
+- 透過每次測試將 GPU 驅動中斷親和性鎖定到單一 LP，量測對該核心的影響；統計包含 Avg／Max／Min／STDEV、1%／0.1%／0.01%／0.005% Low 與同比例的 Percentile（皆採 frame-count 最慢 N% 演算法）。
 
 ### 預期耗時
 
@@ -177,7 +179,7 @@ FrameAnchor 內建 GPU 基準測試，目的是找出**最適合處理指定顯�
 取樣秒數 + 暖機秒數 + 啟動等待（5 秒）+ 驅動重啟與穩定（約 14 秒）+ 緩衝
 ```
 
-總耗時約為 `核心數 × 輪數 × 上述每核心耗時`。例如 16 核心、取樣 30 秒、1 輪，約需 13–15 分鐘。開始前 UI 會顯示預估分鐘數。
+總耗時約為 `核心數 × 輪數 × 上述每核心耗時`。例如 16 核心、取樣 30 秒、3 輪，約需 43 分鐘。開始前 UI 會顯示預估分鐘數。
 
 ### 風險警告
 
@@ -199,6 +201,7 @@ FrameAnchor 內建 GPU 基準測試，目的是找出**最適合處理指定顯�
 ### 套用與還原語意
 
 - 測試本身**不會自動套用**任何策略——每次測試結束都會把 GPU 中斷親和性還原到測試前狀態。
+- 「套用」僅在結果通過可靠性門檻（Passed）時開放：需至少 3 輪，且候選核心在輪次間一致勝出、相對亞軍有足夠改善。輪數不足或結果不穩定的 session 會標示為「無法判定」（Inconclusive），不可套用。
 - 完成後可在結果頁或歷史中，明確按下「套用最佳核心到 GPU」，才會把中斷親和性鎖定到該最佳 LP。
 - 「還原先前設定」會回到**最近一次成功套用之前**的策略（單層還原記錄）。
 - 套用／還原都需確認，且會再次短暫重啟 GPU 驅動（可能閃屏）。
@@ -233,8 +236,13 @@ npm run check
 npm run build
 # 建置前端至 dist/
 
+npm run build:app
+# 本機完整桌面應用程式建置（未簽署的 release 執行檔與 NSIS 安裝程式），
+# 以 tauri build --no-sign 執行，不需 updater 簽署 secret
+
 npm run tauri build
-# 建置 release 執行檔與 NSIS 安裝程式
+# 完整建置（含 updater 簽署）；需 TAURI_SIGNING_PRIVATE_KEY，
+# 主要用於 GitHub release 工作流程
 
 npm run gen-icons
 # 重新產生 src-tauri/icons/*

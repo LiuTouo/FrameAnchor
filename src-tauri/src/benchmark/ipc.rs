@@ -106,7 +106,8 @@ pub fn list_importable_sessions(state: State<Arc<AppState>>) -> Vec<SessionSumma
     state.benchmark.list_importable(&state.topology)
 }
 
-/// 依 best LP + 目前拓撲計算「固定排除 core 0，並排除最佳 LP 所屬實體核心」的推薦核心集合。
+/// 依 best LP + 目前拓撲計算推薦核心集合：永遠排除最佳 LP 所屬實體核心，
+/// 並在保留核心仍足夠時額外排除 core 0（否則保留 core 0 給遊戲）。
 /// severe_lps 僅保留作為前後端 IPC 相容參數與結果標註。
 #[tauri::command]
 pub fn compute_recommended_cores(

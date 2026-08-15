@@ -43,7 +43,7 @@ pub fn list_windows(current_pid: u32, has_rule: impl Fn(&str) -> bool) -> Vec<Wi
             result.push(info);
         }
     }
-    result.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    result.sort_by_key(|a| a.title.to_lowercase());
     result
 }
 
@@ -108,7 +108,7 @@ fn inspect_window(
             .unwrap_or("unknown")
             .to_string();
 
-        let already_has_rule = exe_path.as_deref().map(|p| has_rule(p)).unwrap_or(false);
+        let already_has_rule = exe_path.as_deref().map(has_rule).unwrap_or(false);
         let icon_png = exe_path.as_deref().and_then(icon_png_base64);
 
         Some(WindowInfo {
@@ -152,14 +152,16 @@ fn hicon_to_png_base64(hicon: windows::Win32::UI::WindowsAndMessaging::HICON) ->
         let hdc_screen = GetDC(None);
         let hdc = CreateCompatibleDC(Some(hdc_screen));
 
-        let mut bmi = BITMAPINFO::default();
-        bmi.bmiHeader = BITMAPINFOHEADER {
-            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-            biWidth: W,
-            biHeight: -H, // top-down
-            biPlanes: 1,
-            biBitCount: 32,
-            biCompression: BI_RGB.0,
+        let bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: W,
+                biHeight: -H, // top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
             ..Default::default()
         };
 

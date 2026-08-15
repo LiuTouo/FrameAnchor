@@ -153,7 +153,7 @@ fn collect_applied(state: &Arc<AppState>) -> Vec<AppliedProcess> {
         .read()
         .map(|a| a.values().map(|e| e.info.clone()).collect())
         .unwrap_or_default();
-    list.sort_by(|a, b| a.exe_name.to_lowercase().cmp(&b.exe_name.to_lowercase()));
+    list.sort_by_key(|a| a.exe_name.to_lowercase());
     list
 }
 

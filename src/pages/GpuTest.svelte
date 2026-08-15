@@ -19,7 +19,7 @@
   } from '../lib/types';
   import ConfirmDialog from '../components/ConfirmDialog.svelte';
 
-  type Segment = 'test' | 'results';
+  type Segment = 'test' | 'results' | 'manual';
   type ConfirmAction = 'start' | 'applyBest' | 'restore' | 'deleteHistory' | 'manualApply';
 
   // ── 區段控制 ──
@@ -49,8 +49,7 @@
   let workload = $state<WorkloadKind>('Vulkan');
   let warmUpSecs = $state(5);
   let sampleSecs = $state(30);
-  let repetitions = $state(1);
-  let fullscreen = $state(true);
+  let fullscreen = $state(false);
   let vulkanOptionsOpen = $state(true);
   let width = $state(1280);
   let height = $state(720);
@@ -77,8 +76,19 @@
           .sort((a, b) => a - b)
       : [],
   );
+  // 基準測試候選 LP：排除實體 Core 0（含其 SMT sibling），僅供測試晶片與「全部」按鈕使用。
+  // 手動 GPU 親和性下拉選單仍使用上方完整的 supportedLps（含 Core 0）。
+  const benchmarkLps = $derived(
+    $topology
+      ? $topology.logicalProcessors
+          .filter((p) => p.index < group0Limit && p.coreId !== 0)
+          .map((p) => p.index)
+          .sort((a, b) => a - b)
+      : [],
+  );
   const lpList = $derived(lps);
-  const restartCount = $derived(lpList.length * repetitions);
+  // 固定調適排程：前 3 round 測所有選定 LP，後 2 round 只重測篩選前 2 名。
+  const restartCount = $derived(lpList.length * 3 + Math.min(lpList.length, 2) * 2);
   const estMinutes = $derived(
     Math.max(1, Math.round((restartCount * (sampleSecs + warmUpSecs + 19)) / 60)),
   );
@@ -90,6 +100,9 @@
     $gpuPolicy ? bytesToU32($gpuPolicy.devicePolicy?.bytes ?? null) : null,
   );
   const results = $derived(detail?.results ?? []);
+  const reliability = $derived(detail?.summary.reliability ?? null);
+  const relStatus = $derived(reliability?.status ?? 'Unassessed');
+  const isPassed = $derived(relStatus === 'Passed');
 
   // ── 初始化 ──
   $effect(() => {
@@ -98,21 +111,20 @@
       const limit = Math.min(topo.totalLp, 64);
       if (topo.hasHybrid) {
         lps = topo.physicalCores
-          .filter((c) => c.isPCore)
+          .filter((c) => c.isPCore && c.id !== 0)
           .flatMap((c) => c.lpIndices.slice(0, 1))
           .filter((lp) => lp < limit)
           .sort((a, b) => a - b);
       } else {
         lps = topo.physicalCores
+          .filter((c) => c.id !== 0)
           .flatMap((c) => c.lpIndices.slice(0, 1))
           .filter((lp) => lp < limit)
           .sort((a, b) => a - b);
       }
       if (lps.length === 0) {
-        lps = topo.logicalProcessors
-          .map((p) => p.index)
-          .filter((lp) => lp < limit)
-          .sort((a, b) => a - b);
+        // 回退僅使用基準測試候選 LP（仍排除 Core 0），不還原 Core 0。
+        lps = [...benchmarkLps];
       }
       manualLp = lps[0] ?? null;
       lpsInitialized = true;
@@ -179,7 +191,6 @@
     if (!selectedGpu) return void (errMsg = $t('gpuTest.errSelectGpu') as string);
     if (lpList.length === 0) return void (errMsg = $t('gpuTest.errSelectLp') as string);
     if (sampleSecs <= 0) return void (errMsg = $t('gpuTest.errSample') as string);
-    if (repetitions < 1 || repetitions > 3) return void (errMsg = $t('gpuTest.errRepetitions') as string);
     if (width <= 0 || height <= 0) return void (errMsg = $t('gpuTest.errDimensions') as string);
     confirmAction = 'start';
   }
@@ -187,7 +198,7 @@
   async function doStart() {
     confirmAction = null; busy = true; cancelSent = false;
     try {
-      await ipc.startGpuBenchmark({ candidateLps: lps, gpuInstanceId: selectedGpu, workload, warmUpSecs, sampleSecs, repetitions, syncWorkloadAffinity: false, fullscreen, width, height, fpsCap, tripleBuffer, vulkanArgs: buildVulkanArgs(), workloadExePath: null, presentmonPath: null, gamePath: null, windowTitle: null });
+      await ipc.startGpuBenchmark({ candidateLps: lps, gpuInstanceId: selectedGpu, workload, warmUpSecs, sampleSecs, repetitions: 5, syncWorkloadAffinity: false, fullscreen, width, height, fpsCap, tripleBuffer, vulkanArgs: buildVulkanArgs(), workloadExePath: null, presentmonPath: null, gamePath: null, windowTitle: null });
       errMsg = null;
     } catch (e) { errMsg = String(e); }
     finally { busy = false; }
@@ -263,6 +274,38 @@
     }
   }
 
+  function relStatusLabel(s: string): string {
+    switch (s) {
+      case 'Passed': return $t('gpuTest.reliabilityPassed') as string;
+      case 'Equivalent': return $t('gpuTest.reliabilityEquivalent') as string;
+      case 'Inconclusive': return $t('gpuTest.reliabilityInconclusive') as string;
+      default: return $t('gpuTest.reliabilityUnassessed') as string;
+    }
+  }
+
+  function relSummaryText(s: string): string {
+    switch (s) {
+      case 'Passed': return $t('gpuTest.reliabilityPassedSummary') as string;
+      case 'Equivalent': return $t('gpuTest.reliabilityEquivalentSummary') as string;
+      case 'Inconclusive': return $t('gpuTest.reliabilityInconclusiveSummary') as string;
+      default: return $t('gpuTest.reliabilityUnassessedSummary') as string;
+    }
+  }
+
+  function fmtPct(v: number | null | undefined): string {
+    if (v == null) return '—';
+    return `${v > 0 ? '+' : ''}${v.toFixed(2)}%`;
+  }
+
+  function fmtDeltaPp(v: number | null | undefined): string {
+    if (v == null) return '—';
+    return `${v > 0 ? '+' : ''}${v.toFixed(2)} pp`;
+  }
+
+  function fmtPctVal(v: number | null | undefined): string {
+    return v == null ? '—' : `${v.toFixed(2)}%`;
+  }
+
   function stageLabel(stage: string | undefined): string {
     switch (stage) {
       case 'Init': return $t('gpuTest.stageStarting') as string;
@@ -314,6 +357,12 @@
   const bestP01 = $derived(colBest((r) => r.p01Low, true));
   const bestP001 = $derived(colBest((r) => r.p001Low, true));
   const bestP0005 = $derived(colBest((r) => r.p0005Low, true));
+  const bestP1Pct = $derived(colBest((r) => r.p1Percentile, true));
+  const bestP01Pct = $derived(colBest((r) => r.p01Percentile, true));
+  const bestP001Pct = $derived(colBest((r) => r.p001Percentile, true));
+  const bestP0005Pct = $derived(colBest((r) => r.p0005Percentile, true));
+  const bestMad = $derived(colBest((r) => r.frametimeMadPct, false));
+  const bestSpike = $derived(colBest((r) => r.spikeRatePct, false));
 
   function median(values: number[]): number | null {
     if (!values.length) return null;
@@ -345,10 +394,16 @@
     { key: 'maxFps', label: 'colMax', best: bestMax },
     { key: 'minFps', label: 'colMin', best: bestMin },
     { key: 'stdevFps', label: 'colStdev', best: bestStdev },
+    { key: 'p1Percentile', label: 'colP1Pct', best: bestP1Pct },
+    { key: 'p01Percentile', label: 'colP01Pct', best: bestP01Pct },
+    { key: 'p001Percentile', label: 'colP001Pct', best: bestP001Pct },
+    { key: 'p0005Percentile', label: 'colP0005Pct', best: bestP0005Pct },
     { key: 'p1Low', label: 'colP1', best: bestP1 },
     { key: 'p01Low', label: 'colP01', best: bestP01 },
     { key: 'p001Low', label: 'colP001', best: bestP001 },
     { key: 'p0005Low', label: 'colP0005', best: bestP0005 },
+    { key: 'frametimeMadPct', label: 'colMad', best: bestMad },
+    { key: 'spikeRatePct', label: 'colSpikeRate', best: bestSpike },
   ]);
 
   function cellClass(v: number | null | undefined, best: { first: number | null; second: number | null }, unusual = false) {
@@ -389,6 +444,17 @@
     >
       <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM9 17H7v-7h2v7zm4 0h-2V7h2v10zm4 0h-2v-4h2v4z" fill="currentColor"/></svg>
       {$t('gpuTest.resultsTab')}
+    </button>
+    <button
+      class="segment-btn"
+      class:active={segment === 'manual'}
+      role="tab"
+      aria-selected={segment === 'manual'}
+      disabled={isRunning}
+      onclick={() => switchSegment('manual')}
+    >
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z" fill="currentColor"/></svg>
+      {$t('gpuTest.manualTab')}
     </button>
   </div>
 
@@ -452,8 +518,8 @@
           <div class="field full-width">
             <span class="field-label">{$t('gpuTest.lpSelect')}</span>
             <div class="lp-chips" role="group" aria-label={$t('gpuTest.lpSelect')}>
-              <button class:selected={lps.length === supportedLps.length} onclick={() => (lps = [...supportedLps])} type="button">{$t('gpuTest.allLps')}</button>
-              {#each supportedLps as i (i)}
+              <button class:selected={lps.length === benchmarkLps.length} onclick={() => (lps = [...benchmarkLps])} type="button">{$t('gpuTest.allLps')}</button>
+              {#each benchmarkLps as i (i)}
                 <button class:selected={lps.includes(i)} onclick={() => toggleLp(i)} type="button" aria-pressed={lps.includes(i)}>{i}</button>
               {/each}
             </div>
@@ -462,7 +528,7 @@
           <!-- 時間參數 -->
           <label class="field"><span class="field-label">{$t('gpuTest.warmup')}</span><input type="number" bind:value={warmUpSecs} min="0" /></label>
           <label class="field"><span class="field-label">{$t('gpuTest.sample')}</span><input type="number" bind:value={sampleSecs} min="1" /></label>
-          <label class="field"><span class="field-label">{$t('gpuTest.repetitions')}</span><input type="number" bind:value={repetitions} min="1" max="3" /></label>
+          <div class="field full-width"><span class="hint">{$t('gpuTest.adaptiveSchedule')}</span></div>
 
           <!-- Vulkan 專屬：可折疊次要選項 -->
           {#if workload === 'Vulkan'}
@@ -492,48 +558,8 @@
           <button class="primary" disabled={busy || recoveryRequired || $gpuDevices.length === 0} onclick={startClicked}>{$t('gpuTest.start')}</button>
         </div>
       </section>
-
-      <!-- 手動 GPU 中斷親和性 -->
-      <section class="panel">
-        <h2>{$t('gpuTest.manualAffinityTitle')}</h2>
-        <div class="form-grid">
-          <label class="field">
-            <span class="field-label">{$t('gpuTest.manualAffinityLpSelect')}</span>
-            <select bind:value={manualLp} disabled={supportedLps.length === 0}>
-              <option value={null} disabled selected={manualLp == null}>—</option>
-              {#each supportedLps as i (i)}
-                <option value={i}>LP {i}</option>
-              {/each}
-            </select>
-          </label>
-          {#if selectedGpu}
-            <div class="field">
-              <span class="field-label">{$t('gpuTest.policyLp')}</span>
-              {#if policyLoading}
-                <span class="hint">{$t('gpuTest.policyLoading')}</span>
-              {:else}
-                <span class="mono">{policyLp != null ? `LP ${policyLp}` : $t('gpuTest.policyNone')}</span>
-              {/if}
-            </div>
-          {/if}
-        </div>
-        <div class="action-row">
-          <span class="hint">{$t('gpuTest.gpuSelect')}: {$gpuDevices.find((d) => d.instanceId === selectedGpu)?.friendlyName ?? (selectedGpu || $t('gpuTest.noGpu'))}</span>
-          <div class="policy-actions">
-            <button
-              class="primary"
-              disabled={busy || isRunning || recoveryRequired || manualLp == null || !selectedGpu}
-              onclick={manualApplyClicked}
-            >{$t('gpuTest.manualApply')}</button>
-            <button
-              disabled={busy || isRunning || recoveryRequired}
-              onclick={restorePrevious}
-            >{$t('gpuTest.restore')}</button>
-          </div>
-        </div>
-      </section>
     {/if}
-  {:else}
+  {:else if segment === 'results'}
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- 結果與歷史區段：master-detail                                      -->
   <!-- ═══════════════════════════════════════════════════════════════════ -->
@@ -567,7 +593,7 @@
                 </div>
                 <div class="session-item-meta">
                   <span class="hint">{s.gpuName || s.gpuInstanceId}</span>
-                  {#if s.bestLp != null}<span class="hint">Best: LP{s.bestLp}</span>{/if}
+                  {#if s.bestLp != null}<span class="hint">{$t(s.reliability?.status === 'Passed' ? 'gpuTest.bestTag' : 'gpuTest.candidateTag')}: LP{s.bestLp}</span>{/if}
                 </div>
                 <div class="session-item-foot">
                   <span class="hint">{s.config.workload}</span>
@@ -613,15 +639,21 @@
                 <tbody>
                   {#each detail.results as r (r.lp)}
                     <tr>
-                      <td class="lp-cell">{r.lp}{#if r.lp === detail.summary.bestLp}<span class="badge best">{$t('gpuTest.bestTag')}</span>{/if}</td>
+                      <td class="lp-cell">{r.lp}{#if r.lp === detail.summary.bestLp}<span class="badge best">{$t(isPassed ? 'gpuTest.bestTag' : 'gpuTest.candidateTag')}</span>{/if}</td>
                       <td class={cellClass(r.avgFps, bestAvg, isUnusual(r, 'avgFps'))}>{r.avgFps?.toFixed(1) ?? '—'}</td>
                       <td class={cellClass(r.maxFps, bestMax)}>{r.maxFps?.toFixed(1) ?? '—'}</td>
                       <td class={cellClass(r.minFps, bestMin)}>{r.minFps?.toFixed(1) ?? '—'}</td>
                       <td class={cellClass(r.stdevFps, bestStdev, isUnusual(r, 'stdevFps'))}>{r.stdevFps?.toFixed(1) ?? '—'}</td>
+                      <td class={cellClass(r.p1Percentile, bestP1Pct)}>{r.p1Percentile?.toFixed(1) ?? '—'}</td>
+                      <td class={cellClass(r.p01Percentile, bestP01Pct)}>{r.p01Percentile?.toFixed(1) ?? '—'}</td>
+                      <td class={cellClass(r.p001Percentile, bestP001Pct)}>{r.p001Percentile?.toFixed(1) ?? '—'}</td>
+                      <td class={cellClass(r.p0005Percentile, bestP0005Pct)}>{r.p0005Percentile?.toFixed(1) ?? '—'}</td>
                       <td class={cellClass(r.p1Low, bestP1, isUnusual(r, 'p1Low'))}>{r.p1Low?.toFixed(1) ?? '—'}</td>
                       <td class={cellClass(r.p01Low, bestP01, isUnusual(r, 'p01Low'))}>{r.p01Low?.toFixed(1) ?? '—'}</td>
                       <td class={cellClass(r.p001Low, bestP001)}>{r.p001Low?.toFixed(1) ?? '—'}</td>
                       <td class={cellClass(r.p0005Low, bestP0005)}>{r.p0005Low?.toFixed(1) ?? '—'}</td>
+                      <td class={cellClass(r.frametimeMadPct, bestMad)}>{fmtPctVal(r.frametimeMadPct)}</td>
+                      <td class={cellClass(r.spikeRatePct, bestSpike)}>{fmtPctVal(r.spikeRatePct)}</td>
                       <td>{r.sampleCount}</td>
                     </tr>
                   {/each}
@@ -637,8 +669,44 @@
             <div class="meta-item"><span class="hint">{$t('gpuTest.metaGpu')}</span><span>{detail.summary.gpuName || detail.summary.gpuInstanceId}</span></div>
             <div class="meta-item"><span class="hint">{$t('gpuTest.metaCpuFp')}</span><span class="mono" title={detail.summary.cpuFingerprint}>{detail.summary.cpuFingerprint.slice(0, 12)}…</span></div>
             <div class="meta-item"><span class="hint">{$t('gpuTest.metaApi')}</span><span>{detail.summary.config.workload}</span></div>
-            {#if detail.summary.bestLp != null}<div class="meta-item"><span class="hint">{$t('gpuTest.colBest')}</span><span>{detail.summary.bestLp}</span></div>{/if}
+            {#if detail.summary.bestLp != null}<div class="meta-item"><span class="hint">{$t(isPassed ? 'gpuTest.colBest' : 'gpuTest.colCandidate')}</span><span>{detail.summary.bestLp}</span></div>{/if}
           </div>
+
+          <!-- 可靠性摘要 -->
+          {#if detail.summary.status === 'Completed' && reliability}
+            <div class="reliability-block" class:rel-passed={relStatus === 'Passed'} class:rel-equivalent={relStatus === 'Equivalent'} class:rel-inconclusive={relStatus === 'Inconclusive'}>
+              <div class="rel-head">
+                <span class="badge rel-badge">{relStatusLabel(relStatus)}</span>
+                <span class="hint">{relSummaryText(relStatus)}</span>
+              </div>
+              {#if relStatus !== 'Unassessed'}
+                <div class="rel-rounds">
+                  {#each reliability.perRoundWinners as w, i (i)}
+                    <span class="rel-round">{$t('gpuTest.round', { values: { round: i + 1 } })}：{w != null ? `LP ${w}` : '—'}</span>
+                  {/each}
+                </div>
+                <div class="rel-meta">{$t('gpuTest.reliabilityWins', { values: { wins: reliability.candidateWins, evaluated: reliability.evaluatedRounds, required: reliability.requiredWins } })}</div>
+                {#if reliability.compositeAdvantagePct != null || reliability.avgFpsAdvantagePct != null || reliability.p1LowAdvantagePct != null || reliability.spikeRateDeltaPp != null}
+                  <div class="rel-evidence">
+                    <span class="hint">{$t('gpuTest.reliabilityEvidence')}</span>
+                    {#if reliability.compositeAdvantagePct != null}<span>{$t('gpuTest.evidenceComposite')} {fmtPct(reliability.compositeAdvantagePct)}</span>{/if}
+                    {#if reliability.avgFpsAdvantagePct != null}<span>{$t('gpuTest.colAvg')} {fmtPct(reliability.avgFpsAdvantagePct)}</span>{/if}
+                    {#if reliability.p1LowAdvantagePct != null}<span>{$t('gpuTest.colP1')} {fmtPct(reliability.p1LowAdvantagePct)}</span>{/if}
+                    {#if reliability.spikeRateDeltaPp != null}<span>{$t('gpuTest.evidenceSpike')} {fmtDeltaPp(reliability.spikeRateDeltaPp)}</span>{/if}
+                  </div>
+                  <div class="hint rel-note">{$t('gpuTest.reliabilityEvidenceNote')}</div>
+                {/if}
+                {#if reliability.avgFpsPct != null || reliability.p1LowPct != null || reliability.p01LowPct != null}
+                  <div class="rel-pcts">
+                    <span class="hint">{$t('gpuTest.reliabilityImprovement')}</span>
+                    <span>{$t('gpuTest.colAvg')} {fmtPct(reliability.avgFpsPct)}</span>
+                    <span>{$t('gpuTest.colP1')} {fmtPct(reliability.p1LowPct)}</span>
+                    <span>{$t('gpuTest.colP01')} {fmtPct(reliability.p01LowPct)}</span>
+                  </div>
+                {/if}
+              {/if}
+            </div>
+          {/if}
 
           <!-- 套用最佳 + GPU 策略 -->
           <div class="policy-section">
@@ -661,7 +729,7 @@
             <div class="policy-actions">
               {#if detail.summary.status === 'Completed' && detail.summary.bestLp != null}
                 <button class="primary" disabled={busy || !canApply || recoveryRequired} onclick={applyBest} title={canApply ? '' : (errText(applyStatus?.reason ?? null) || '')}>
-                  {$t('gpuTest.applyBest')}
+                  {$t(isPassed ? 'gpuTest.applyBest' : 'gpuTest.applyCandidate')}
                 </button>
                 {#if !canApply && applyStatus?.reason}<span class="hint apply-reason">{errText(applyStatus.reason)}</span>{/if}
                 {#if policyLp != null && policyLp !== detail.summary.bestLp}
@@ -679,6 +747,46 @@
         {/if}
       </div>
     </div>
+  {:else}
+    <!-- 手動 GPU 中斷親和性 -->
+    <section class="panel">
+      <h2>{$t('gpuTest.manualAffinityTitle')}</h2>
+      <div class="form-grid">
+        <label class="field">
+          <span class="field-label">{$t('gpuTest.manualAffinityLpSelect')}</span>
+          <select bind:value={manualLp} disabled={supportedLps.length === 0}>
+            <option value={null} disabled selected={manualLp == null}>—</option>
+            {#each supportedLps as i (i)}
+              <option value={i}>LP {i}</option>
+            {/each}
+          </select>
+        </label>
+        {#if selectedGpu}
+          <div class="field">
+            <span class="field-label">{$t('gpuTest.policyLp')}</span>
+            {#if policyLoading}
+              <span class="hint">{$t('gpuTest.policyLoading')}</span>
+            {:else}
+              <span class="mono">{policyLp != null ? `LP ${policyLp}` : $t('gpuTest.policyNone')}</span>
+            {/if}
+          </div>
+        {/if}
+      </div>
+      <div class="action-row">
+        <span class="hint">{$t('gpuTest.gpuSelect')}: {$gpuDevices.find((d) => d.instanceId === selectedGpu)?.friendlyName ?? (selectedGpu || $t('gpuTest.noGpu'))}</span>
+        <div class="policy-actions">
+          <button
+            class="primary"
+            disabled={busy || isRunning || recoveryRequired || manualLp == null || !selectedGpu}
+            onclick={manualApplyClicked}
+          >{$t('gpuTest.manualApply')}</button>
+          <button
+            disabled={busy || isRunning || recoveryRequired}
+            onclick={restorePrevious}
+          >{$t('gpuTest.restore')}</button>
+        </div>
+      </div>
+    </section>
   {/if}
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
@@ -692,7 +800,7 @@
 </div>
 
 <style>
-  .gpu-test { display: flex; flex-direction: column; gap: var(--space-3); max-width: 960px; }
+  .gpu-test { display: flex; flex-direction: column; gap: var(--space-3); }
 
   /* ── 區段切換 ── */
   .segment-bar {
@@ -769,9 +877,9 @@
   .running-meta dd { margin: 0; font-size: 13px; }
 
   /* ── Results workspace ── */
-  .results-workspace { display: flex; gap: 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); overflow: hidden; min-height: 440px; }
+  .results-workspace { display: flex; gap: 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); overflow: hidden; }
 
-  .session-list { width: 240px; flex-shrink: 0; background: var(--surface-1); border-right: 1px solid var(--border-subtle); overflow-y: auto; display: flex; flex-direction: column; }
+  .session-list { width: 240px; flex-shrink: 0; background: var(--surface-1); border-right: 1px solid var(--border-subtle); display: flex; flex-direction: column; }
   .session-list-head { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border-subtle); }
   .session-item {
     display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left;
@@ -793,7 +901,7 @@
   .badge.best { background: var(--accent); color: var(--accent-text); }
   .badge.warn { background: var(--warning-muted); color: var(--warning); }
 
-  .session-detail { flex: 1; overflow-y: auto; background: var(--surface-0); padding: var(--space-4); }
+  .session-detail { flex: 1; min-width: 0; background: var(--surface-0); padding: var(--space-4); }
   .detail-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-3); flex-wrap: wrap; }
   .detail-head h2 { margin: 0; font-size: 14px; flex: 1; }
   .detail-head-badges { display: flex; align-items: center; gap: var(--space-2); }
@@ -827,7 +935,29 @@
   .apply-reason, .mismatch { max-width: 360px; }
   .mismatch { color: var(--warning); }
 
+  /* Reliability */
+  .reliability-block { display: flex; flex-direction: column; gap: var(--space-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: var(--space-3); margin-bottom: var(--space-4); }
+  .reliability-block.rel-passed { border-color: var(--success); }
+  .reliability-block.rel-equivalent { border-color: var(--accent); }
+  .reliability-block.rel-inconclusive { border-color: var(--warning); }
+  .rel-head { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+  .rel-badge { background: var(--surface-2); color: var(--text-primary); }
+  .rel-passed .rel-badge { background: var(--success-muted); color: var(--success); }
+  .rel-equivalent .rel-badge { background: var(--accent-muted); color: var(--accent); }
+  .rel-inconclusive .rel-badge { background: var(--warning-muted); color: var(--warning); }
+  .rel-rounds { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); font-size: 12px; }
+  .rel-round { font-variant-numeric: tabular-nums; }
+  .rel-meta { font-size: 12px; color: var(--text-secondary); }
+  .rel-evidence { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .rel-note { font-size: 11px; }
+  .rel-pcts { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); font-size: 12px; font-variant-numeric: tabular-nums; }
+
   /* Progress */
   .progress-track { height: 6px; background: var(--surface-2); border-radius: var(--radius-full); overflow: hidden; margin-bottom: var(--space-2); }
   .progress-track > div { height: 100%; background: var(--accent); transition: width 0.3s; border-radius: var(--radius-full); }
+
+  @media (max-width: 999px) {
+    .results-workspace { flex-direction: column; }
+    .session-list { width: 100%; border-right: none; border-bottom: 1px solid var(--border-subtle); }
+  }
 </style>

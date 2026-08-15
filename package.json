@@ -1,11 +1,12 @@
 {
   "name": "frameanchor",
   "private": true,
-  "version": "0.2.4",
+  "version": "0.2.5",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "build:app": "tauri build --no-sign",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "tauri": "tauri",
     "gen-icons": "node scripts/gen-icons.mjs",
@@ -27,5 +28,10 @@
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "svelte-i18n": "^4.0.0"
+  },
+  "overrides": {
+    "svelte-i18n": {
+      "esbuild": "^0.25.0"
+    }
   }
 }

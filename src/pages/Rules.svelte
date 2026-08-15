@@ -311,7 +311,6 @@
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);
     overflow: hidden;
-    min-height: 400px;
   }
 
   .master {
@@ -321,7 +320,6 @@
     flex-direction: column;
     background: var(--surface-1);
     border-right: 1px solid var(--border-subtle);
-    overflow-y: auto;
   }
 
   .master-item {
@@ -400,7 +398,7 @@
 
   .detail {
     flex: 1;
-    overflow-y: auto;
+    min-width: 0;
     background: var(--surface-0);
   }
 
@@ -414,5 +412,10 @@
 
   .disclaimer {
     margin-top: var(--space-4);
+  }
+
+  @media (max-width: 999px) {
+    .workspace { flex-direction: column; }
+    .master { width: 100%; border-right: none; border-bottom: 1px solid var(--border-subtle); }
   }
 </style>

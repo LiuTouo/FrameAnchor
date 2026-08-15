@@ -64,14 +64,14 @@ pub struct BenchmarkConfig {
     pub warm_up_secs: u32,
     #[serde(default = "default_sample_secs")]
     pub sample_secs: u32,
-    /// round（repetitions）1..3；round 順序 asc/desc/asc
+    /// round（repetitions）3..=7；round 順序為確定性「旋轉 + 反轉」平衡排程
     #[serde(default = "default_repetitions")]
     pub repetitions: u32,
     /// 已棄用：production runner 不再繫結 workload process affinity。
     /// 保留欄位供舊 session JSON 向後相容；預設 false。
     #[serde(default)]
     pub sync_workload_affinity: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub fullscreen: bool,
     #[serde(default = "default_width")]
     pub width: u32,
@@ -105,10 +105,7 @@ fn default_sample_secs() -> u32 {
     30
 }
 fn default_repetitions() -> u32 {
-    1
-}
-fn default_true() -> bool {
-    true
+    5
 }
 fn default_width() -> u32 {
     1280
@@ -127,7 +124,7 @@ impl Default for BenchmarkConfig {
             sample_secs: default_sample_secs(),
             repetitions: default_repetitions(),
             sync_workload_affinity: false,
-            fullscreen: true,
+            fullscreen: false,
             width: default_width(),
             height: default_height(),
             fps_cap: 0,
@@ -145,7 +142,7 @@ impl Default for BenchmarkConfig {
 /// `--fullscreen=<0|1> --width=<n> --height=<n> --fps_cap=<n> --triple_buffering=<0|1>`）
 fn default_vulkan_args() -> Vec<String> {
     vec![
-        "--fullscreen=1".to_string(),
+        "--fullscreen=0".to_string(),
         "--width=1280".to_string(),
         "--height=720".to_string(),
         "--fps_cap=0".to_string(),
@@ -161,18 +158,30 @@ pub struct LpResult {
     pub lp: u32,
     #[serde(default)]
     pub avg_fps: Option<f64>,
-    /// 1% low（time-weighted）
+    /// 1% low：最慢 1% 個 instantaneous FPS 的平均（frame-count）
     #[serde(default)]
     pub p1_low: Option<f64>,
-    /// 0.1% low（time-weighted）
+    /// 0.1% low：最慢 0.1% 個 instantaneous FPS 的平均（frame-count）
     #[serde(default)]
     pub p01_low: Option<f64>,
-    /// 0.01% low（time-weighted）
+    /// 0.01% low：最慢 0.01% 個 instantaneous FPS 的平均（frame-count）
     #[serde(default)]
     pub p001_low: Option<f64>,
-    /// 0.005% low（time-weighted）
+    /// 0.005% low：最慢 0.005% 個 instantaneous FPS 的平均（frame-count）
     #[serde(default)]
     pub p0005_low: Option<f64>,
+    /// 1% percentile：最慢 1% 分位數的 instantaneous FPS（非平均）
+    #[serde(default)]
+    pub p1_percentile: Option<f64>,
+    /// 0.1% percentile：最慢 0.1% 分位數的 instantaneous FPS（非平均）
+    #[serde(default)]
+    pub p01_percentile: Option<f64>,
+    /// 0.01% percentile：最慢 0.01% 分位數的 instantaneous FPS（非平均）
+    #[serde(default)]
+    pub p001_percentile: Option<f64>,
+    /// 0.005% percentile：最慢 0.005% 分位數的 instantaneous FPS（非平均）
+    #[serde(default)]
+    pub p0005_percentile: Option<f64>,
     #[serde(default)]
     pub max_fps: Option<f64>,
     #[serde(default)]
@@ -180,6 +189,12 @@ pub struct LpResult {
     /// Bessel（n-1）校正的即時 FPS 標準差
     #[serde(default)]
     pub stdev_fps: Option<f64>,
+    /// frametime MAD（中位數絕對差）正規化為 frametime 中位數的百分比（越低越穩）
+    #[serde(default)]
+    pub frametime_mad_pct: Option<f64>,
+    /// 慢幀 spike rate：frametime 超過 2×中位數的幀佔比（百分比，越低越好）
+    #[serde(default)]
+    pub spike_rate_pct: Option<f64>,
     #[serde(default)]
     pub sample_count: u32,
     #[serde(default)]
@@ -218,6 +233,73 @@ pub struct CoreSample {
     pub frame_time_ms: f64,
 }
 
+/// 可靠性（confidence）判定結果。僅成功的 session 由 runner 計算；
+/// 舊 session.json 缺此欄位時經 `#[serde(default)]` 解讀為 `Unassessed`。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ReliabilityStatus {
+    /// 舊 session 或未計算（非 Completed 的 session）——尚未評估，不可套用。
+    #[default]
+    Unassessed,
+    /// 至少 2 個完整 LP 各有 ≥5 個完整 round、穩健候選勝 ≥ceil(60% round)、
+    /// 複合分數優勢 ≥0.5% 且無護欄倒退（Avg/1% low ≥-0.5%、spike 未明顯變差）。
+    Passed,
+    /// 證據完整且穩定（勝場與護欄皆達標）但候選實質優勢 <0.5%——可重現、差異過小。
+    Equivalent,
+    /// 未達 Passed/Equivalent 門檻（round 不足、LP 數不足、勝場不足、護欄倒退、
+    /// 或證據不完整/無效）。
+    Inconclusive,
+}
+
+/// 可靠性/信心摘要，隨 `SessionSummary` 持久化（camelCase；向後相容）。
+/// 供前端顯示狀態、逐 round 勝者、候選/亞軍 LP、勝場數、複合分數優勢與
+/// 護欄（Avg/1% low/spike）比較結果。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ReliabilitySummary {
+    #[serde(default)]
+    pub status: ReliabilityStatus,
+    /// 各預期 round（0..evaluated_rounds）的勝者 LP。動態長度對應 round 數，
+    /// 無勝者（round 缺漏或無合格 LP）為 `None`，保留位置以區分「缺 round N」
+    /// 與「僅有其餘 round 勝者」。
+    #[serde(default)]
+    pub per_round_winners: Vec<Option<u32>>,
+    /// 穩健候選 LP（跨 round 複合分數中位數最高）
+    #[serde(default)]
+    pub candidate_lp: Option<u32>,
+    /// 穩健亞軍 LP（同規則次高；單一 LP 時為 None）
+    #[serde(default)]
+    pub runner_up_lp: Option<u32>,
+    /// 候選在所有預期 round 中的勝場數
+    #[serde(default)]
+    pub candidate_wins: u32,
+    /// 舊版改善欄位（聚合結果，供既有前端沿用）：
+    /// (candidate - runner_up) / runner_up * 100；不可得（缺亞軍/非有限/≤0）為 None
+    #[serde(default)]
+    pub avg_fps_pct: Option<f64>,
+    #[serde(default)]
+    pub p1_low_pct: Option<f64>,
+    #[serde(default)]
+    pub p01_low_pct: Option<f64>,
+    /// 評估的預期 round 數（= 本次 session 的 repetitions）
+    #[serde(default)]
+    pub evaluated_rounds: u32,
+    /// Passed 所需勝場數 = ceil(60% × evaluated_rounds)
+    #[serde(default)]
+    pub required_wins: u32,
+    /// 穩健候選複合分數相較亞軍的優勢（%，跨 round 中位數）
+    #[serde(default)]
+    pub composite_advantage_pct: Option<f64>,
+    /// 護欄：候選 Avg FPS 相較亞軍（跨 round 中位數，%）
+    #[serde(default)]
+    pub avg_fps_advantage_pct: Option<f64>,
+    /// 護欄：候選 1% low 相較亞軍（跨 round 中位數，%）
+    #[serde(default)]
+    pub p1_low_advantage_pct: Option<f64>,
+    /// 護欄：候選 spike rate 相較亞軍（絕對百分點，正 = 候選較差）
+    #[serde(default)]
+    pub spike_rate_delta_pp: Option<f64>,
+}
+
 /// 歷史列表用的摘要
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(rename_all = "camelCase")]
@@ -238,6 +320,10 @@ pub struct SessionSummary {
     pub cpu_fingerprint: String,
     #[serde(default)]
     pub best_lp: Option<u32>,
+    /// 可靠性/信心摘要。`#[serde(default)]` 讓沒有此欄位的舊 session.json 仍可載入，
+    /// 解讀為 `ReliabilityStatus::Unassessed`（不可套用）。
+    #[serde(default)]
+    pub reliability: ReliabilitySummary,
     /// 嚴重 LP（avg/1%/0.1% 低於中位數 85%，或 STDEV 高於 150%）
     #[serde(default)]
     pub severe_lps: Vec<u32>,
@@ -459,14 +545,95 @@ mod tests {
         assert!(json.contains("\"Collecting\""));
     }
 
+    /// 新 percentile 欄位以 camelCase 序列化；舊 session 缺欄反序列化為 None（向後相容）。
+    #[test]
+    fn lp_result_percentile_serializes_and_deserializes_backward_compat() {
+        let r = LpResult {
+            lp: 0,
+            p1_percentile: Some(100.0),
+            p01_percentile: Some(90.0),
+            p001_percentile: Some(80.0),
+            p0005_percentile: Some(70.0),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains("\"p1Percentile\":100.0"), "json={json}");
+        assert!(json.contains("\"p0005Percentile\":70.0"));
+        // 舊 session 只帶 low 欄位、缺 percentile → 反序列化後 percentile 為 None
+        let back: LpResult =
+            serde_json::from_str(r#"{"lp":3,"avgFps":240.0,"p1Low":90.0}"#).unwrap();
+        assert_eq!(back.p1_percentile, None);
+        assert_eq!(back.p1_low, Some(90.0));
+    }
+
+    /// per_round_winners 以三欄固定位置（含 None）序列化，round 1 缺漏不會
+    /// 被壓縮掉，能與 round 0/2 的勝者區分。
+    #[test]
+    fn reliability_per_round_winners_preserves_missing_positions() {
+        let rel = ReliabilitySummary {
+            status: ReliabilityStatus::Passed,
+            per_round_winners: vec![Some(0), None, Some(2)],
+            candidate_lp: Some(0),
+            runner_up_lp: Some(2),
+            candidate_wins: 2,
+            avg_fps_pct: Some(1.0),
+            p1_low_pct: Some(1.0),
+            p01_low_pct: Some(1.0),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&rel).unwrap();
+        // None 序列化為 null（不是省略），固定三欄位置保留
+        assert!(
+            json.contains("\"perRoundWinners\":[0,null,2]"),
+            "per_round_winners 應保留缺漏位置: {json}"
+        );
+        let back: ReliabilitySummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.per_round_winners, vec![Some(0), None, Some(2)]);
+    }
+
+    /// 舊 session 缺新欄位（evaluated_rounds/composite/護欄）→ 反序列化為預設值
+    /// （0/None）不報錯；`Equivalent` 可正確序列化回讀。
+    #[test]
+    fn reliability_old_json_and_equivalent_roundtrip() {
+        let old = r#"{"status":"Passed","perRoundWinners":[0,null,2],"candidateLp":0,"runnerUpLp":2,"candidateWins":2,"avgFpsPct":1.0,"p1LowPct":1.0,"p01LowPct":1.0}"#;
+        let back: ReliabilitySummary = serde_json::from_str(old).unwrap();
+        assert_eq!(back.status, ReliabilityStatus::Passed);
+        assert_eq!(back.evaluated_rounds, 0);
+        assert_eq!(back.required_wins, 0);
+        assert_eq!(back.composite_advantage_pct, None);
+        assert_eq!(back.avg_fps_advantage_pct, None);
+        assert_eq!(back.p1_low_advantage_pct, None);
+        assert_eq!(back.spike_rate_delta_pp, None);
+
+        let eq = ReliabilitySummary {
+            status: ReliabilityStatus::Equivalent,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&eq).unwrap();
+        assert!(json.contains("\"status\":\"Equivalent\""), "json={json}");
+        let back2: ReliabilitySummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back2.status, ReliabilityStatus::Equivalent);
+    }
+
+    /// 舊 session 的 LpResult 缺 MAD/spike → 反序列化為 None
+    #[test]
+    fn lp_result_frametime_robustness_backward_compat() {
+        let back: LpResult =
+            serde_json::from_str(r#"{"lp":3,"avgFps":240.0,"p1Low":90.0}"#).unwrap();
+        assert_eq!(back.frametime_mad_pct, None);
+        assert_eq!(back.spike_rate_pct, None);
+    }
+
     #[test]
     fn default_config_uses_product_defaults() {
         let c = BenchmarkConfig::default();
-        assert!(c.fullscreen, "產品預設應為全螢幕");
+        assert!(!c.fullscreen, "產品預設應為視窗模式");
         assert_eq!(c.width, 1280);
         assert_eq!(c.height, 720);
         assert_eq!(c.width, default_width());
         assert_eq!(c.height, default_height());
+        assert_eq!(c.sample_secs, 30, "產品預設取樣應為 30 秒");
+        assert_eq!(c.repetitions, 5, "產品預設應為 5 round");
     }
 
     #[test]
@@ -474,7 +641,7 @@ mod tests {
         let c = BenchmarkConfig::default();
         assert_eq!(c.vulkan_args, default_vulkan_args());
         let args = default_vulkan_args();
-        assert!(args.iter().any(|a| a == "--fullscreen=1"));
+        assert!(args.iter().any(|a| a == "--fullscreen=0"));
         assert!(args.iter().any(|a| a == "--width=1280"));
         assert!(args.iter().any(|a| a == "--height=720"));
     }
@@ -482,7 +649,7 @@ mod tests {
     #[test]
     fn missing_fields_get_product_defaults() {
         let c: BenchmarkConfig = serde_json::from_str("{}").unwrap();
-        assert!(c.fullscreen);
+        assert!(!c.fullscreen);
         assert_eq!(c.width, 1280);
         assert_eq!(c.height, 720);
     }
@@ -490,8 +657,8 @@ mod tests {
     #[test]
     fn explicit_fields_not_overwritten() {
         let c: BenchmarkConfig =
-            serde_json::from_str(r#"{"fullscreen":false,"width":800,"height":600}"#).unwrap();
-        assert!(!c.fullscreen);
+            serde_json::from_str(r#"{"fullscreen":true,"width":800,"height":600}"#).unwrap();
+        assert!(c.fullscreen, "顯式 fullscreen=true 不得被覆寫");
         assert_eq!(c.width, 800);
         assert_eq!(c.height, 600);
     }

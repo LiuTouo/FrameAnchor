@@ -10,6 +10,7 @@ use windows::Win32::System::Threading::{
 use crate::error::PriorityError;
 use crate::model::{IoPriority, MemPriority};
 
+#[allow(clippy::upper_case_acronyms)]
 type NTSTATUS = i32;
 const PROCESS_INFORMATION_CLASS_IO_PRIORITY: i32 = 33; // ProcessIoPriority
 

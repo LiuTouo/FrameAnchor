@@ -371,4 +371,8 @@
     gap: var(--space-2);
     flex-shrink: 0;
   }
+
+  @media (max-width: 999px) {
+    .page { padding: var(--space-4); }
+  }
 </style>

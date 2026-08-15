@@ -1,7 +1,7 @@
 <script lang="ts">
   import { t } from 'svelte-i18n';
   import CoreCell from './CoreCell.svelte';
-  import { recommendationAnnotations, resolveCores, detectMode } from '../lib/affinity';
+  import { resolveCores, detectMode } from '../lib/affinity';
   import type { AffinitySpec, AffinityMode, Recommendation, Topology } from '../lib/types';
 
   let {
@@ -17,7 +17,6 @@
   } = $props();
 
   let resolved = $derived(resolveCores(spec, topology));
-  let ann = $derived(recommendationAnnotations(topology, recommendation));
 
   function preset(mode: AffinityMode) {
     // Prefer 沒有核心時預設 LP 0，避免空清單
@@ -47,7 +46,7 @@
   const lpByIndex = (idx: number) => topology.logicalProcessors.find((lp) => lp.index === idx)!;
 </script>
 
-{#if ann.has}
+{#if recommendation != null}
   <div class="rec-caption">
     <span class="hint">{$t('ruleImport.annotatedFrom')}</span>
     {#if recommendation?.adjusted}
@@ -95,9 +94,6 @@
             interactive
             checked={resolved.has(idx)}
             showHt={topology.hasSmt}
-            recBest={ann.has && ann.best.has(idx)}
-            recSevere={ann.has && ann.severe.has(idx)}
-            recExcluded={ann.has && ann.excluded.has(idx)}
             ontoggle={toggle}
           />
         {/each}
@@ -119,6 +115,7 @@
   }
   .presets {
     display: flex;
+    flex-wrap: wrap;
     gap: 6px;
     margin-bottom: 8px;
   }

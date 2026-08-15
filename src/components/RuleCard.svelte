@@ -271,6 +271,7 @@
           {#if importNoCores}
             <div class="hint no-cores">{$t('ruleImport.noCores')}</div>
           {/if}
+          <div class="hint">{$t('ruleImport.affinityNote')}</div>
           <div class="toolbar">
             <button
               class="primary"

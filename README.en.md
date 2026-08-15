@@ -109,8 +109,10 @@ Every release asset includes a SHA256 checksum file (`.sha256`).
 
 ```bash
 npm ci
-npm run tauri build
+npm run build:app
 ```
+
+`npm run build:app` is the canonical local full desktop application build. It runs `tauri build --no-sign` and produces an unsigned release executable and NSIS installer. Signed releases continue through `npm run tauri build` or the GitHub release workflow (which provides the signing secrets).
 
 The NSIS installer is written to:
 
@@ -166,7 +168,7 @@ FrameAnchor includes a GPU benchmark that finds the **logical processor (LP) bes
 
 - **Not a graphics benchmark**: It does not compare image quality, scenes, or FPS between GPUs. The workload is a fixed alternating black/white, uncapped, no-vsync render.
 - **Not "which core runs the game fastest"**: It measures which core yields the most stable/highest frame-times when handling GPU interrupts.
-- Each test pins the GPU driver interrupt affinity to a single LP; statistics include Avg/Max/Min/STDEV and 1%/0.1%/0.01%/0.005% time-weighted lows.
+- Each test pins the GPU driver interrupt affinity to a single LP; statistics include Avg/Max/Min/STDEV, 1%/0.1%/0.01%/0.005% lows, and matching percentiles (all using the frame-count slowest-N% algorithm).
 
 ### Expected duration
 
@@ -176,7 +178,7 @@ Each tested core takes roughly:
 sample seconds + warm-up seconds + startup wait (5 s) + driver restart/stabilize (~14 s) + margin
 ```
 
-Total is approximately `cores × rounds × per-core time`. For example 16 cores, 30 s sample, 1 round, roughly 13–15 minutes. The UI shows an estimate before starting.
+Total is approximately `cores × rounds × per-core time`. For example 16 cores, 30 s sample, 3 rounds, roughly 43 minutes. The UI shows an estimate before starting.
 
 ### Risk warning
 
@@ -198,6 +200,7 @@ The test repeatedly **disables/enables the selected GPU driver** (disable/enable
 ### Apply and restore semantics
 
 - A test itself **never auto-applies** anything — every session restores the GPU interrupt affinity to its pre-test state.
+- Applying is only available when the result passes the reliability gate (Passed): it needs at least 3 rounds, with the candidate core consistently winning across rounds and showing enough improvement over the runner-up. Sessions with too few rounds or unstable results are marked "Inconclusive" and cannot be applied.
 - After completion you must explicitly press **"Apply best core to GPU"** (with confirmation) to pin interrupt affinity to the best LP.
 - **"Restore previous setting"** returns to the policy before the most recent successful apply (one-level restore record).
 - Both apply and restore confirm and briefly restart the GPU driver again (possible screen flicker).
@@ -232,8 +235,13 @@ npm run check
 npm run build
 # Builds the frontend into dist/
 
+npm run build:app
+# Local full desktop build (unsigned release executable and NSIS installer);
+# runs tauri build --no-sign, no updater signing secret required
+
 npm run tauri build
-# Builds the release executable and NSIS installer
+# Full build including updater signing; requires TAURI_SIGNING_PRIVATE_KEY,
+# used mainly by the GitHub release workflow
 
 npm run gen-icons
 # Regenerates src-tauri/icons/*

@@ -181,6 +181,7 @@ mod tests {
                 gpu_instance_id: r"PCI\VEN_FAKE".into(),
                 cpu_fingerprint: "fixture-fingerprint".to_string(),
                 best_lp: Some(3),
+                reliability: Default::default(),
                 severe_lps: vec![],
                 sample_count: 5,
                 total_bytes: 0,
@@ -320,6 +321,36 @@ mod tests {
         assert_eq!(
             loaded.summary.error, None,
             "舊檔案缺 error 欄位 → 預設 None"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 舊版 session.json 沒有 reliability 欄位 → serde default 照常載入（Unassessed）
+    #[test]
+    fn session_without_reliability_field_loads_unassessed() {
+        let root = temp_root("norel");
+        let id = Uuid::new_v4().to_string();
+        let mut detail = sample_detail(&id);
+        detail.summary.reliability = crate::benchmark::ReliabilitySummary {
+            status: crate::benchmark::ReliabilityStatus::Passed,
+            ..Default::default()
+        };
+        let json = serde_json::to_string_pretty(&detail).unwrap();
+        assert!(json.contains("\"reliability\""));
+        // 移除 reliability 欄位模擬舊 session.json
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        v["summary"].as_object_mut().unwrap().remove("reliability");
+        let cleaned = serde_json::to_string_pretty(&v).unwrap();
+        assert!(v["summary"].get("reliability").is_none());
+
+        let dir = root.join(&id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("session.json"), cleaned).unwrap();
+
+        let loaded = get_at(&root, &id).unwrap();
+        assert_eq!(
+            loaded.summary.reliability.status,
+            crate::benchmark::ReliabilityStatus::Unassessed
         );
         let _ = std::fs::remove_dir_all(&root);
     }

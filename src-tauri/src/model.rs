@@ -212,7 +212,7 @@ pub enum IoPriority {
 }
 
 impl IoPriority {
-    pub fn to_raw(&self) -> u32 {
+    pub fn to_raw(self) -> u32 {
         match self {
             IoPriority::VeryLow => 0,
             IoPriority::Low => 1,
@@ -241,7 +241,7 @@ pub enum MemPriority {
 }
 
 impl MemPriority {
-    pub fn to_raw(&self) -> u32 {
+    pub fn to_raw(self) -> u32 {
         match self {
             MemPriority::VeryLow => 1,
             MemPriority::Low => 2,

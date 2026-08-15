@@ -5,7 +5,7 @@
 //! 單元測試用 fake backend + 暫存目錄跑完整流程，不碰真實 HKLM/裝置。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, RwLock};
 
 use tauri::{AppHandle, Emitter, Manager};
@@ -26,7 +26,7 @@ use super::storage;
 use super::window_win::RealWorkloadWindow;
 use super::{
     cpu_fingerprint_with, detect_cpu_identity, ApplyStatus, BenchmarkConfig, BenchmarkStage,
-    BenchmarkState, CpuIdentity, SessionStatus, SessionSummary, WorkloadKind,
+    BenchmarkState, CpuIdentity, ReliabilityStatus, SessionStatus, SessionSummary, WorkloadKind,
 };
 
 /// 一層還原記錄檔：`%APPDATA%\FrameAnchor\gpu-restore.json`。
@@ -35,11 +35,46 @@ pub fn restore_record_path() -> PathBuf {
     config::config_dir().join("gpu-restore.json")
 }
 
+/// apply mutation 的失敗結果：穩定錯誤碼 + 是否已乾淨還原。
+/// `clean=false` 表示本次 mutation 無法證明「完整 rollback + 所有 recovery
+/// artifact 清理成功」，呼叫端（manager）必須設 recoveryRequired 封鎖後續
+/// mutation/benchmark，不依賴 journal 是否存在（journal 可能停在過低 stage）。
+#[derive(Debug, Clone)]
+pub struct ApplyError {
+    pub code: String,
+    pub clean: bool,
+}
+
+impl ApplyError {
+    /// 尚未動到任何狀態（前置驗證）的失敗：clean。
+    fn clean(code: &str) -> Self {
+        ApplyError {
+            code: code.to_string(),
+            clean: true,
+        }
+    }
+}
+
+/// 前置失敗（尚未 mutation）以 String 錯誤碼解讀為 clean。
+impl From<String> for ApplyError {
+    fn from(code: String) -> Self {
+        ApplyError { code, clean: true }
+    }
+}
+
+/// 與穩定錯誤碼字串比較（只比 `code`），供測試 `assert_eq!(err, codes::X)` 使用。
+impl PartialEq<&str> for ApplyError {
+    fn eq(&self, other: &&str) -> bool {
+        self.code == *other
+    }
+}
+
 // ── 協調流程（free function，可注入路徑測試）────────────────────────────
 
 /// 把已完成 session 的最佳 LP 套用到對應 GPU。
 /// 步驟：相容性驗證 → BasicDisplay 防呆 → 委派到 [`apply_affinity_to_gpu`]。
 /// `sleeper` 與 `cpu_identity` 注入，讓測試不真睡、不依賴真實 CPU 身分。
+#[allow(clippy::too_many_arguments)]
 pub fn apply_best_affinity(
     backend: &dyn GpuBackend,
     sleeper: &dyn Sleep,
@@ -49,42 +84,46 @@ pub fn apply_best_affinity(
     journal_path: &Path,
     restore_path: &Path,
     session_id: &str,
-) -> Result<(), String> {
+) -> Result<(), ApplyError> {
     // 1) session 存在且已完成、有最佳 LP
     let detail = storage::get_at(storage_root, session_id)?;
     if detail.summary.status != SessionStatus::Completed {
-        return Err(codes::BENCHMARK_SESSION_NOT_COMPLETED.to_string());
+        return Err(ApplyError::clean(codes::BENCHMARK_SESSION_NOT_COMPLETED));
     }
     let best_lp = detail
         .summary
         .best_lp
-        .ok_or_else(|| codes::BENCHMARK_SESSION_NOT_COMPLETED.to_string())?;
+        .ok_or_else(|| ApplyError::clean(codes::BENCHMARK_SESSION_NOT_COMPLETED))?;
+    // 可靠性必須 Passed（舊 session 無欄位 → Unassessed → 拒絕）
+    if detail.summary.reliability.status != ReliabilityStatus::Passed {
+        return Err(ApplyError::clean(codes::BENCHMARK_RELIABILITY_NOT_PASSED));
+    }
     // AssignmentSetOverride 是 64-bit 單 LP mask（REG_BINARY）；但 LP 必須落在
     // 拓撲實際存在、且 group 0 上限（64）以內
     if best_lp >= topo.total_lp.min(64) {
-        return Err(codes::BENCHMARK_SESSION_INCOMPATIBLE.to_string());
+        return Err(ApplyError::clean(codes::BENCHMARK_SESSION_INCOMPATIBLE));
     }
 
     // 2) 相容性：CPU 指紋與 GPU instance 必須與本次環境一致
     if detail.summary.cpu_fingerprint != cpu_fingerprint_with(topo, cpu_identity) {
-        return Err(codes::BENCHMARK_SESSION_INCOMPATIBLE.to_string());
+        return Err(ApplyError::clean(codes::BENCHMARK_SESSION_INCOMPATIBLE));
     }
     let instance_id = &detail.summary.gpu_instance_id;
     let present = backend
         .enumerate_present_adapters()
-        .map_err(|e| e.code().to_string())?
+        .map_err(|e| ApplyError::clean(e.code()))?
         .iter()
         .any(|d| d.instance_id.eq_ignore_ascii_case(instance_id));
     if !present {
-        return Err(codes::GPU_NOT_FOUND.to_string());
+        return Err(ApplyError::clean(codes::GPU_NOT_FOUND));
     }
 
     // 3) BasicDisplay 未停用（避免重啟後無顯示 fallback）
     if !backend
         .basic_display_enabled()
-        .map_err(|e| e.code().to_string())?
+        .map_err(|e| ApplyError::clean(e.code()))?
     {
-        return Err(codes::GPU_BASIC_DISPLAY_DISABLED.to_string());
+        return Err(ApplyError::clean(codes::GPU_BASIC_DISPLAY_DISABLED));
     }
 
     // 4) 委派到共享 mutation 路徑
@@ -93,7 +132,8 @@ pub fn apply_best_affinity(
 
 /// 將 GPU 中斷親和性套用到指定 LP。
 /// 步驟：快照 + 還原日誌 → 寫策略 → 重啟裝置 → 驗證 → 持久化還原記錄 → 清除日誌。
-/// 任何失敗都嘗試還原「本次快照」；還原成功才清日誌，失敗保留日誌等啟動重試。
+/// 任何在「策略可能已被修改」之後的失敗都走 [`rollback`]：還原快照並清日誌/記錄；
+/// 還原失敗則寫入 stage=PolicyApplied 的日誌等啟動重試（見 [`rollback`]）。
 /// 呼叫端負責所有前置驗證（LP 範圍、GPU 存在、BasicDisplay、recovery_required）。
 pub fn apply_affinity_to_gpu(
     backend: &dyn GpuBackend,
@@ -102,11 +142,11 @@ pub fn apply_affinity_to_gpu(
     lp: u32,
     journal_path: &Path,
     restore_path: &Path,
-) -> Result<(), String> {
+) -> Result<(), ApplyError> {
     // 1) 快照目前策略 + 寫還原日誌（第一次變更之前）
     let snapshot = backend
         .read_affinity_policy(instance_id)
-        .map_err(|e| e.code().to_string())?;
+        .map_err(|e| ApplyError::clean(e.code()))?;
     recovery::begin_at(journal_path, &snapshot)?;
 
     // 2) 寫入新策略：DevicePolicy=4（DWORD）+ AssignmentSetOverride=單 LP mask（REG_BINARY）
@@ -117,44 +157,161 @@ pub fn apply_affinity_to_gpu(
         assignment_set_override: RegistryValueSnapshot::binary(override_bytes.clone()),
     };
     if let Err(_e) = backend.write_affinity_policy(&new_policy) {
-        let restored = restore_snapshot(backend, sleeper, &snapshot).is_ok();
-        if restored {
-            let _ = recovery::clear_at(journal_path);
-        }
-        return Err(codes::GPU_APPLY_FAILED.to_string());
+        return Err(rollback(
+            backend,
+            sleeper,
+            &snapshot,
+            journal_path,
+            restore_path,
+            codes::GPU_APPLY_FAILED,
+        ));
     }
-    let journal = require_journal(journal_path)?;
-    recovery::advance_to_at(journal_path, &journal, RecoveryStage::PolicyApplied)?;
+    if let Err(e) = advance_stage(journal_path, RecoveryStage::PolicyApplied) {
+        return Err(rollback(
+            backend,
+            sleeper,
+            &snapshot,
+            journal_path,
+            restore_path,
+            &e,
+        ));
+    }
 
     // 3) 重啟裝置（disable→停頓→enable→停頓）
     if let Err(_e) = backend.restart_device(instance_id, sleeper) {
-        let restored = restore_snapshot(backend, sleeper, &snapshot).is_ok();
-        if restored {
-            let _ = recovery::clear_at(journal_path);
-        }
-        return Err(codes::GPU_RESTART_FAILED.to_string());
+        return Err(rollback(
+            backend,
+            sleeper,
+            &snapshot,
+            journal_path,
+            restore_path,
+            codes::GPU_RESTART_FAILED,
+        ));
     }
-    let journal = require_journal(journal_path)?;
-    recovery::advance_to_at(journal_path, &journal, RecoveryStage::DeviceRestarted)?;
+    if let Err(e) = advance_stage(journal_path, RecoveryStage::DeviceRestarted) {
+        return Err(rollback(
+            backend,
+            sleeper,
+            &snapshot,
+            journal_path,
+            restore_path,
+            &e,
+        ));
+    }
 
     // 4) 驗證新策略已生效（AssignmentSetOverride 逐位元組比對）
-    let read_back = backend
-        .read_affinity_policy(instance_id)
-        .map_err(|e| e.code().to_string())?;
+    let read_back = match backend.read_affinity_policy(instance_id) {
+        Ok(p) => p,
+        Err(e) => {
+            return Err(rollback(
+                backend,
+                sleeper,
+                &snapshot,
+                journal_path,
+                restore_path,
+                e.code(),
+            ));
+        }
+    };
     if read_back.device_policy.as_dword() != Some(DEVICE_POLICY_SINGLE_PROCESSOR)
         || read_back.assignment_set_override.bytes.as_deref() != Some(override_bytes.as_slice())
     {
-        let restored = restore_snapshot(backend, sleeper, &snapshot).is_ok();
-        if restored {
-            let _ = recovery::clear_at(journal_path);
-        }
-        return Err(codes::GPU_APPLY_FAILED.to_string());
+        return Err(rollback(
+            backend,
+            sleeper,
+            &snapshot,
+            journal_path,
+            restore_path,
+            codes::GPU_APPLY_FAILED,
+        ));
     }
 
     // 5) 持久化一層還原記錄，清除日誌
-    write_restore_record(restore_path, &snapshot)?;
-    recovery::clear_at(journal_path)?;
+    if let Err(e) = write_restore_record(restore_path, &snapshot) {
+        log::error!("寫入還原記錄失敗: {e}");
+        return Err(rollback(
+            backend,
+            sleeper,
+            &snapshot,
+            journal_path,
+            restore_path,
+            codes::GPU_APPLY_FAILED,
+        ));
+    }
+    if let Err(e) = recovery::clear_at(journal_path) {
+        // 日誌清除失敗：新策略已驗證、還原記錄已寫入，但 stale 的 DeviceRestarted
+        // 日誌會在下次啟動誤還原 → 為安全起見 rollback 整個 apply。
+        log::error!("清除還原日誌失敗: {e}");
+        return Err(rollback(
+            backend,
+            sleeper,
+            &snapshot,
+            journal_path,
+            restore_path,
+            codes::GPU_APPLY_FAILED,
+        ));
+    }
     Ok(())
+}
+
+/// 統一 rollback：把本次 mutation 的 snapshot 寫回並驗證，回報是否乾淨。
+/// - 還原成功且 journal + restore record 都清除成功 → `clean=true`。
+/// - 還原成功但任一清理失敗，或還原失敗 → `clean=false`：以
+///   [`recovery::mark_restore_needed_at`] 寫入 stage=PolicyApplied 日誌作為
+///   可偵測的 dirty marker；即使該寫入也失敗，`clean=false` 仍會讓 manager
+///   直接封鎖後續 mutation/benchmark，不依賴 journal 是否存在。
+fn rollback(
+    backend: &dyn GpuBackend,
+    sleeper: &dyn Sleep,
+    snapshot: &AffinityPolicy,
+    journal_path: &Path,
+    restore_path: &Path,
+    error_code: &str,
+) -> ApplyError {
+    match restore_snapshot(backend, sleeper, snapshot) {
+        Ok(()) => {
+            let cleared_journal = recovery::clear_at(journal_path);
+            let cleared_record = clear_restore_record(restore_path);
+            if cleared_journal.is_ok() && cleared_record.is_ok() {
+                return ApplyError {
+                    code: error_code.to_string(),
+                    clean: true,
+                };
+            }
+            // 任一清理失敗 → 殘留 stale journal / restore record，本次 mutation
+            // 不得視為乾淨；寫回「要求完整 restore」日誌作為可偵測的 dirty marker。
+            log::error!(
+                "rollback 清理失敗（journal={} restore_record={}）；寫入還原日誌封鎖後續操作",
+                cleared_journal.is_ok(),
+                cleared_record.is_ok()
+            );
+            let _ = recovery::mark_restore_needed_at(journal_path, snapshot);
+            ApplyError {
+                code: error_code.to_string(),
+                clean: false,
+            }
+        }
+        Err(e) => {
+            log::error!("mutation 還原失敗: {e}；寫入可復原日誌等啟動重試");
+            if let Err(mark) = recovery::mark_restore_needed_at(journal_path, snapshot) {
+                log::error!("mark_restore_needed 也失敗: {mark}；封鎖後續操作");
+            }
+            ApplyError {
+                code: error_code.to_string(),
+                clean: false,
+            }
+        }
+    }
+}
+
+/// journal stage advance：讀回 journal 並寫入新 stage。
+/// 失敗一律回穩定代碼 [`codes::GPU_APPLY_FAILED`]（內部細節只進 log）。
+fn advance_stage(journal_path: &Path, stage: RecoveryStage) -> Result<(), String> {
+    let journal = require_journal(journal_path)?;
+    recovery::advance_to_at(journal_path, &journal, stage).map_err(|e| {
+        log::error!("還原日誌 stage advance 失敗: {e}");
+        codes::GPU_APPLY_FAILED.to_string()
+    })
 }
 
 /// 還原到「上次成功套用」之前的策略（一層還原記錄）。
@@ -212,7 +369,8 @@ fn write_restore_record(path: &Path, snapshot: &AffinityPolicy) -> Result<(), St
 fn load_restore_record(path: &Path) -> Result<Option<AffinityPolicy>, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        Err(_) => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("讀取還原記錄失敗: {e}")),
     };
     serde_json::from_str(&text)
         .map(Some)
@@ -220,6 +378,10 @@ fn load_restore_record(path: &Path) -> Result<Option<AffinityPolicy>, String> {
 }
 
 fn clear_restore_record(path: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    if inject::consume_clear_restore() {
+        return Err("injected clear restore record failure".to_string());
+    }
     match std::fs::remove_file(path) {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -227,16 +389,60 @@ fn clear_restore_record(path: &Path) -> Result<(), String> {
     }
 }
 
+/// 測試用 fault injection（僅 `#[cfg(test)]`；production 編譯不含）。
+/// 採 thread-local，避免測試平行執行時彼此干擾。
+#[cfg(test)]
+pub mod inject {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FAIL_CLEAR_RESTORE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// 讓下一次 `clear_restore_record` 失敗
+    pub fn fail_next_clear_restore_record() {
+        FAIL_CLEAR_RESTORE.with(|c| c.set(true));
+    }
+    pub(super) fn consume_clear_restore() -> bool {
+        FAIL_CLEAR_RESTORE.with(|c| c.replace(false))
+    }
+}
+
+// ── GPU 操作 reservation（單一 race-free 排他）───────────────────────────
+
+/// reservation 狀態：Idle = 無操作、Benchmark = 基準測試進行中、
+/// Mutation = apply_best / manual apply / restore_previous 進行中。
+/// 所有會動 GPU 的操作都必須先 `reserve` 取得排他權；衝突一律回
+/// [`codes::BENCHMARK_ALREADY_RUNNING`]（不暴露內部 enum）。
+const OP_IDLE: u8 = 0;
+const OP_BENCHMARK: u8 = 1;
+const OP_MUTATION: u8 = 2;
+
+/// RAII 釋放：drop 時把 reservation 歸零。背景 benchmark 的 guard 會被移入
+/// runner 的 closure，直到 runner 終結（寫完最終 status 後）才 drop，確保
+/// 執行期間其他 mutation/start 全被拒絕；panic 也會觸發 drop。
+struct GpuOperationGuard {
+    reservation: Arc<AtomicU8>,
+}
+
+impl Drop for GpuOperationGuard {
+    fn drop(&mut self) {
+        self.reservation.store(OP_IDLE, Ordering::Release);
+    }
+}
+
 // ── AppState 持有的管理者 ───────────────────────────────────────────────
 
-/// 基準測試管理者骨架。state 為執行期狀態；recovery_required 標記
-/// 啟動還原失敗（封鎖新的 test/apply）。cancel 為 Task 2 runner 用的訊號。
+/// 基準測試管理者。state 為執行期狀態；recovery_required 標記啟動還原失敗
+/// （封鎖新的 test/apply）；cancel 為 runner 用的訊號；reservation 為
+/// 單一 race-free 的 GPU 操作排他鎖（Idle/Benchmark/Mutation）。
 pub struct BenchmarkManager {
     pub state: RwLock<BenchmarkState>,
     pub backend: Arc<dyn GpuBackend>,
     /// 重啟等待策略（Task 2 亦共用）
     sleeper: Arc<dyn Sleep>,
     pub recovery_required: AtomicBool,
+    reservation: Arc<AtomicU8>,
     cancel_tx: tokio::sync::watch::Sender<bool>,
     cancel_rx: tokio::sync::watch::Receiver<bool>,
 }
@@ -249,8 +455,36 @@ impl BenchmarkManager {
             backend,
             sleeper: Arc::new(RealSleeper),
             recovery_required: AtomicBool::new(false),
+            reservation: Arc::new(AtomicU8::new(OP_IDLE)),
             cancel_tx,
             cancel_rx,
+        }
+    }
+
+    /// 以 CAS 原子取得 GPU 操作排他權（`kind` = OP_BENCHMARK / OP_MUTATION）。
+    /// 成功回傳 RAII guard（drop 即釋放）；已有任何操作 → 回穩定代碼
+    /// [`codes::BENCHMARK_ALREADY_RUNNING`]。single-flight 由這個原子 CAS 保證，
+    /// 兩個同時 `start` 只會有一個成功。
+    fn reserve(&self, kind: u8) -> Result<GpuOperationGuard, String> {
+        match self.reservation.compare_exchange(
+            OP_IDLE,
+            kind,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => Ok(GpuOperationGuard {
+                reservation: self.reservation.clone(),
+            }),
+            Err(_) => Err(codes::BENCHMARK_ALREADY_RUNNING.to_string()),
+        }
+    }
+
+    /// 開始新 session 前把取消訊號歸零（watch channel 實際值 + state.cancel_requested）。
+    /// 修復 request_cancel 只清 state 未清 channel，導致下一場 session 立即 Cancelled。
+    fn reset_cancel(&self) {
+        let _ = self.cancel_tx.send(false);
+        if let Ok(mut s) = self.state.write() {
+            s.cancel_requested = false;
         }
     }
 
@@ -265,16 +499,33 @@ impl BenchmarkManager {
             Ok(()) => log::info!("啟動還原：無 pending 或已還原"),
             Err(e) => {
                 log::error!("啟動還原失敗: {e}；封鎖基準測試與套用操作");
-                self.recovery_required.store(true, Ordering::Relaxed);
-                if let Ok(mut s) = self.state.write() {
-                    s.recovery_required = true;
-                }
+                self.set_recovery_required();
             }
         }
     }
 
     pub fn recovery_required(&self) -> bool {
         self.recovery_required.load(Ordering::Relaxed)
+    }
+
+    /// 標記 recoveryRequired（atomic flag + state 欄位），封鎖後續 mutation/benchmark。
+    fn set_recovery_required(&self) {
+        self.recovery_required.store(true, Ordering::Relaxed);
+        if let Ok(mut s) = self.state.write() {
+            s.recovery_required = true;
+        }
+    }
+
+    /// apply 回 Err 後，若結果標記 `clean=false`（rollback 無法證明完整還原 +
+    /// artifact 清理），設 recoveryRequired 封鎖後續操作等啟動重試。
+    /// 不依賴「journal 是否存在」——journal 可能因 `mark_restore_needed` 也失敗而
+    /// 停在過低 stage（SnapshotTaken），仍須封鎖。
+    fn flag_recovery_if_needed(&self, result: &Result<(), ApplyError>) {
+        if let Err(e) = result {
+            if !e.clean {
+                self.set_recovery_required();
+            }
+        }
     }
 
     /// 基準測試執行中？
@@ -302,66 +553,43 @@ impl BenchmarkManager {
         s
     }
 
-    /// 套用最佳 LP。recovery 未完成時封鎖。
+    /// 套用最佳 LP。recovery 未完成或已有任何 GPU 操作時封鎖。
     pub fn apply_best(&self, topo: &Topology, session_id: &str) -> Result<(), String> {
         if self.recovery_required() {
             return Err(codes::BENCHMARK_RECOVERY_REQUIRED.to_string());
         }
-        apply_best_affinity(
+        let _guard = self.reserve(OP_MUTATION)?;
+        let journal = recovery::recovery_path();
+        let result = apply_best_affinity(
             self.backend.as_ref(),
             self.sleeper.as_ref(),
             &detect_cpu_identity(),
             topo,
             &storage::benchmarks_root(),
-            &recovery::recovery_path(),
+            &journal,
             &restore_record_path(),
             session_id,
-        )
+        );
+        self.flag_recovery_if_needed(&result);
+        result.map_err(|e| e.code)
     }
 
     /// 只判定某個歷史 session「現在可否套用」（不做任何變更）。
     /// 相容性判定全在後端，前端不重算。
     pub fn check_apply(&self, topo: &Topology, session_id: &str) -> ApplyStatus {
-        let cannot = |reason: &str| ApplyStatus {
-            can_apply: false,
-            reason: Some(reason.to_string()),
-        };
         if self.recovery_required() {
-            return cannot(codes::BENCHMARK_RECOVERY_REQUIRED);
+            return ApplyStatus {
+                can_apply: false,
+                reason: Some(codes::BENCHMARK_RECOVERY_REQUIRED.to_string()),
+            };
         }
-        let Ok(detail) = storage::get_at(&storage::benchmarks_root(), session_id) else {
-            return cannot(codes::BENCHMARK_SESSION_NOT_FOUND);
-        };
-        if detail.summary.status != SessionStatus::Completed || detail.summary.best_lp.is_none() {
-            return cannot(codes::BENCHMARK_SESSION_NOT_COMPLETED);
-        }
-        let best_lp = detail.summary.best_lp.unwrap();
-        if best_lp >= topo.total_lp.min(64) {
-            return cannot(codes::BENCHMARK_SESSION_INCOMPATIBLE);
-        }
-        if detail.summary.cpu_fingerprint != cpu_fingerprint_with(topo, &detect_cpu_identity()) {
-            return cannot(codes::BENCHMARK_SESSION_INCOMPATIBLE);
-        }
-        let present = self
-            .backend
-            .enumerate_present_adapters()
-            .map(|a| {
-                a.iter().any(|d| {
-                    d.instance_id
-                        .eq_ignore_ascii_case(&detail.summary.gpu_instance_id)
-                })
-            })
-            .unwrap_or(false);
-        if !present {
-            return cannot(codes::GPU_NOT_FOUND);
-        }
-        if !self.backend.basic_display_enabled().unwrap_or(false) {
-            return cannot(codes::GPU_BASIC_DISPLAY_DISABLED);
-        }
-        ApplyStatus {
-            can_apply: true,
-            reason: None,
-        }
+        check_apply_at(
+            self.backend.as_ref(),
+            topo,
+            &detect_cpu_identity(),
+            &storage::benchmarks_root(),
+            session_id,
+        )
     }
 
     /// 可匯入的已完成 session（相容：CPU 指紋一致 + GPU 存在 + 有 bestLp）。
@@ -405,9 +633,9 @@ impl BenchmarkManager {
         if self.recovery_required() {
             return Err(codes::BENCHMARK_RECOVERY_REQUIRED.to_string());
         }
-        if self.is_running() {
-            return Err(codes::BENCHMARK_ALREADY_RUNNING.to_string());
-        }
+        // 原子取得 mutation 排他權：benchmark 執行中或另一 mutation 進行中 → 拒絕。
+        // 取代原先的 is_running() 讀取（TOCTOU：讀鎖釋放後仍可能被並行 start 搶入）。
+        let _guard = self.reserve(OP_MUTATION)?;
         if lp >= topo.total_lp.min(64) {
             return Err(codes::BENCHMARK_SESSION_INCOMPATIBLE.to_string());
         }
@@ -427,18 +655,22 @@ impl BenchmarkManager {
         {
             return Err(codes::GPU_BASIC_DISPLAY_DISABLED.to_string());
         }
-        apply_affinity_to_gpu(
+        let result = apply_affinity_to_gpu(
             self.backend.as_ref(),
             self.sleeper.as_ref(),
             instance_id,
             lp,
             journal_path,
             restore_path,
-        )
+        );
+        self.flag_recovery_if_needed(&result);
+        result.map_err(|e| e.code)
     }
 
-    /// 還原到先前策略。這是使用者顯式還原，不因 recovery_required 封鎖。
+    /// 還原到先前策略。這是使用者顯式還原，不因 recovery_required 封鎖，
+    /// 但仍需取得 mutation 排他權（benchmark / 另一 mutation 進行中 → 拒絕）。
     pub fn restore_previous(&self) -> Result<(), String> {
+        let _guard = self.reserve(OP_MUTATION)?;
         restore_previous_affinity(
             self.backend.as_ref(),
             self.sleeper.as_ref(),
@@ -457,6 +689,9 @@ impl BenchmarkManager {
         if self.recovery_required() {
             return Err(codes::BENCHMARK_RECOVERY_REQUIRED.to_string());
         }
+        // 原子取得 benchmark 排他權（單一場，兩個同時 start 只會一個成功）。
+        // 前置驗證若失敗，guard 隨函式回傳而 drop，reservation 不會被卡住。
+        let guard = self.reserve(OP_BENCHMARK)?;
         // 前置驗證（先於標記 Running，讓使用者即時拿到錯誤）
         runner::validate_config(&config, topo)?;
         let assets = resolve_assets(app, &config)?;
@@ -485,13 +720,10 @@ impl BenchmarkManager {
             return Err(codes::GPU_BASIC_DISPLAY_DISABLED.to_string());
         }
 
-        // 並行守衛
-        {
-            let st = self.state.read().map_err(|e| e.to_string())?;
-            if st.status == SessionStatus::Running {
-                return Err(codes::BENCHMARK_ALREADY_RUNNING.to_string());
-            }
-        }
+        // 建立 CancelSignal receiver 前，把 watch channel 實際值重設 false，
+        // 否則上一場 request_cancel 留下的 true 會讓新 session 立即 Cancelled。
+        self.reset_cancel();
+
         let sid = uuid::Uuid::new_v4().to_string();
         {
             let mut st = self.state.write().map_err(|e| e.to_string())?;
@@ -501,7 +733,6 @@ impl BenchmarkManager {
             st.progress_pct = 0;
             st.elapsed_secs = 0;
             st.current_lp = None;
-            st.cancel_requested = false;
         }
 
         let process_runner: Arc<dyn ProcessRunner> = Arc::new(RealProcessRunner::new());
@@ -541,6 +772,9 @@ impl BenchmarkManager {
         };
 
         tauri::async_runtime::spawn_blocking(move || {
+            // reservation guard 存活到 closure 結束（runner 終結、寫完最終 status 後）
+            // 才 drop；期間其他 mutation/start 一律被拒，panic 也會經 drop 釋放。
+            let _guard = guard;
             let result = runner::run_benchmark(&mut ctx);
             log::info!(
                 "基準測試 session {} 結束: status={:?}, best_lp={:?}, severe_lps={:?}, recommended={:?}",
@@ -589,6 +823,57 @@ impl BenchmarkManager {
     }
 }
 
+/// 判定某個 session「現在可否套用」的核心邏輯（free function，注入路徑/身分供測試）。
+/// 順序：session 存在 → Completed + bestLp → 可靠性 Passed → LP 範圍 →
+/// CPU 指紋 → GPU 存在 → BasicDisplay。
+fn check_apply_at(
+    backend: &dyn GpuBackend,
+    topo: &Topology,
+    cpu_identity: &CpuIdentity,
+    storage_root: &Path,
+    session_id: &str,
+) -> ApplyStatus {
+    let cannot = |reason: &str| ApplyStatus {
+        can_apply: false,
+        reason: Some(reason.to_string()),
+    };
+    let Ok(detail) = storage::get_at(storage_root, session_id) else {
+        return cannot(codes::BENCHMARK_SESSION_NOT_FOUND);
+    };
+    if detail.summary.status != SessionStatus::Completed || detail.summary.best_lp.is_none() {
+        return cannot(codes::BENCHMARK_SESSION_NOT_COMPLETED);
+    }
+    if detail.summary.reliability.status != ReliabilityStatus::Passed {
+        return cannot(codes::BENCHMARK_RELIABILITY_NOT_PASSED);
+    }
+    let best_lp = detail.summary.best_lp.unwrap();
+    if best_lp >= topo.total_lp.min(64) {
+        return cannot(codes::BENCHMARK_SESSION_INCOMPATIBLE);
+    }
+    if detail.summary.cpu_fingerprint != cpu_fingerprint_with(topo, cpu_identity) {
+        return cannot(codes::BENCHMARK_SESSION_INCOMPATIBLE);
+    }
+    let present = backend
+        .enumerate_present_adapters()
+        .map(|a| {
+            a.iter().any(|d| {
+                d.instance_id
+                    .eq_ignore_ascii_case(&detail.summary.gpu_instance_id)
+            })
+        })
+        .unwrap_or(false);
+    if !present {
+        return cannot(codes::GPU_NOT_FOUND);
+    }
+    if !backend.basic_display_enabled().unwrap_or(false) {
+        return cannot(codes::GPU_BASIC_DISPLAY_DISABLED);
+    }
+    ApplyStatus {
+        can_apply: true,
+        reason: None,
+    }
+}
+
 /// 可匯入的已完成 session（free function，注入路徑/身分供測試）。
 fn list_importable(
     backend: &dyn GpuBackend,
@@ -607,6 +892,7 @@ fn list_importable(
         .filter(|s| {
             s.status == SessionStatus::Completed
                 && s.best_lp.is_some()
+                && s.reliability.status == ReliabilityStatus::Passed
                 && s.cpu_fingerprint == current_fp
                 && present
                     .iter()
@@ -669,7 +955,9 @@ impl CancelSignal for ManagerCancel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::benchmark::{cpu_fingerprint_with, CpuIdentity, SessionDetail};
+    use crate::benchmark::{
+        cpu_fingerprint_with, CpuIdentity, ReliabilityStatus, ReliabilitySummary, SessionDetail,
+    };
     use crate::gpu::fake::FakeBackend;
     use crate::gpu::{AffinityPolicy, GpuDevice, NoopSleeper, RegistryValueSnapshot};
     use crate::topology::{build_topology, Topology};
@@ -709,6 +997,14 @@ mod tests {
         }
     }
 
+    /// 測試用「已通過可靠性」的摘要（status=Passed）
+    fn passed_reliability() -> ReliabilitySummary {
+        ReliabilitySummary {
+            status: ReliabilityStatus::Passed,
+            ..Default::default()
+        }
+    }
+
     fn completed_session(storage_root: &Path, topo: &Topology, gpu: &str, best_lp: u32) -> String {
         let id = Uuid::new_v4().to_string();
         let detail = SessionDetail {
@@ -721,6 +1017,7 @@ mod tests {
                 gpu_instance_id: gpu.to_string(),
                 cpu_fingerprint: cpu_fingerprint_with(topo, &fixed_identity()),
                 best_lp: Some(best_lp),
+                reliability: passed_reliability(),
                 severe_lps: vec![],
                 sample_count: 5,
                 total_bytes: 0,
@@ -893,6 +1190,7 @@ mod tests {
         detail.summary.status = SessionStatus::Completed;
         detail.summary.gpu_instance_id = GPU_A.into();
         detail.summary.best_lp = Some(3);
+        detail.summary.reliability = passed_reliability();
         detail.summary.cpu_fingerprint = cpu_fingerprint_with(&other_topo, &fixed_identity());
         storage::save_session_at(&storage_root, &detail).unwrap();
 
@@ -1154,7 +1452,7 @@ mod tests {
         // 套用 restart 失敗後，還原 restart 成功 → 策略還原、日誌清除
         assert_eq!(backend.current_policy(GPU_A), original);
         assert!(!journal.exists());
-        assert!(restore.exists() == false, "套用未完成，不該寫入還原記錄");
+        assert!(!restore.exists(), "套用未完成，不該寫入還原記錄");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1440,44 +1738,65 @@ mod tests {
     fn validate_config_rejects_bad_settings() {
         let t = topo();
         // sample=0
-        let mut c = BenchmarkConfig::default();
-        c.sample_secs = 0;
+        let c = BenchmarkConfig {
+            sample_secs: 0,
+            ..Default::default()
+        };
         assert!(runner::validate_config(&c, &t).is_err());
         // repetitions 越界
-        let mut c = BenchmarkConfig::default();
-        c.repetitions = 4;
+        let c = BenchmarkConfig {
+            repetitions: 8,
+            ..Default::default()
+        };
         assert!(runner::validate_config(&c, &t).is_err());
         // Vulkan 但無 args
-        let mut c = BenchmarkConfig::default();
-        c.vulkan_args = vec![];
+        let c = BenchmarkConfig {
+            vulkan_args: vec![],
+            ..Default::default()
+        };
         assert!(runner::validate_config(&c, &t).is_err());
         // 沒 GPU
-        let mut c = BenchmarkConfig::default();
-        c.gpu_instance_id = None;
+        let c = BenchmarkConfig {
+            gpu_instance_id: None,
+            ..Default::default()
+        };
         assert!(runner::validate_config(&c, &t).is_err());
         // 合法預設（gpu 補上）
-        let mut c = BenchmarkConfig::default();
-        c.gpu_instance_id = Some(GPU_A.to_string());
+        let c = BenchmarkConfig {
+            gpu_instance_id: Some(GPU_A.to_string()),
+            ..Default::default()
+        };
         assert!(runner::validate_config(&c, &t).is_ok());
     }
 
     #[test]
-    fn effective_lps_defaults_to_all_supported() {
-        let t = topo(); // 8 LP
+    fn effective_lps_excludes_core_zero() {
+        let t = topo(); // 8 LP（core c = LP c，故 core 0 = LP 0）
         let c = BenchmarkConfig::default();
-        assert_eq!(runner::effective_lps(&c, &t), vec![0, 1, 2, 3, 4, 5, 6, 7]);
-        // 候選過濾 + 去重 + 排序
-        let mut c = BenchmarkConfig::default();
-        c.candidate_lps = vec![5, 1, 5, 99];
+        // 預設全部支援 LP，但排除 physical Core 0 的 LP 0
+        assert_eq!(runner::effective_lps(&c, &t), vec![1, 2, 3, 4, 5, 6, 7]);
+        // 候選過濾 + 去重 + 排序（LP 0 已在候選外，故不變）
+        let c = BenchmarkConfig {
+            candidate_lps: vec![5, 1, 5, 99],
+            ..Default::default()
+        };
         assert_eq!(runner::effective_lps(&c, &t), vec![1, 5]);
+        // 顯式只含 core 0 的候選 → 過濾後為空（由 validate_config 拒絕）
+        let c = BenchmarkConfig {
+            candidate_lps: vec![0],
+            ..Default::default()
+        };
+        assert!(runner::effective_lps(&c, &t).is_empty());
     }
 
     #[test]
-    fn round_order_asc_desc_asc() {
+    fn round_order_balanced_rotation_and_reversal() {
         let lps = vec![0, 2, 4, 6];
+        // 每輪起點旋轉、奇數輪反轉：不重複、不遺漏 LP
         assert_eq!(runner::round_order(0, &lps), vec![0, 2, 4, 6]);
-        assert_eq!(runner::round_order(1, &lps), vec![6, 4, 2, 0]);
-        assert_eq!(runner::round_order(2, &lps), vec![0, 2, 4, 6]);
+        assert_eq!(runner::round_order(1, &lps), vec![2, 0, 6, 4]);
+        assert_eq!(runner::round_order(2, &lps), vec![4, 6, 0, 2]);
+        assert_eq!(runner::round_order(3, &lps), vec![6, 4, 2, 0]);
     }
 
     /// list_importable 只回傳「已完成 + CPU 相容 + GPU 存在 + 有 bestLp」的 session
@@ -1508,6 +1827,7 @@ mod tests {
                     gpu_instance_id: GPU_A.to_string(),
                     cpu_fingerprint: cpu_fingerprint_with(&other_topo, &fixed_identity()),
                     best_lp: Some(3),
+                    reliability: passed_reliability(),
                     severe_lps: vec![],
                     sample_count: 5,
                     total_bytes: 0,
@@ -1565,6 +1885,94 @@ mod tests {
         assert!(!ids.contains(&bad_gpu));
         assert!(!ids.contains(&running));
         assert!(!ids.contains(&no_best));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// apply 拒絕「已完成 + bestLp 但可靠性 Unassessed（舊 session）」的 session
+    #[test]
+    fn apply_rejects_unassessed_reliability() {
+        let dir = temp_dir("rel_unass");
+        let storage_root = dir.join("benchmarks");
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        let id = Uuid::new_v4().to_string();
+        let mut detail = SessionDetail::default();
+        detail.summary.id = id.clone();
+        detail.summary.status = SessionStatus::Completed;
+        detail.summary.gpu_instance_id = GPU_A.into();
+        detail.summary.best_lp = Some(3);
+        detail.summary.cpu_fingerprint = cpu_fingerprint_with(&topo(), &fixed_identity());
+        // reliability 保持預設 Unassessed（模擬舊 session 缺欄位）
+        storage::save_session_at(&storage_root, &detail).unwrap();
+
+        let err = apply_best_affinity(
+            &backend,
+            &NoopSleeper,
+            &fixed_identity(),
+            &topo(),
+            &storage_root,
+            &dir.join("journal.json"),
+            &dir.join("restore.json"),
+            &id,
+        )
+        .unwrap_err();
+        assert_eq!(err, codes::BENCHMARK_RELIABILITY_NOT_PASSED);
+        assert_eq!(backend.restart_count(), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// check_apply：Passed → 可套用；Unassessed → 拒絕（穩定代碼）
+    #[test]
+    fn check_apply_requires_reliability_passed() {
+        let dir = temp_dir("check_rel");
+        let root = dir.join("benchmarks");
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+
+        // Passed → can_apply
+        let ok = completed_session(&root, &topo(), GPU_A, 3);
+        let st = check_apply_at(&backend, &topo(), &fixed_identity(), &root, &ok);
+        assert!(st.can_apply);
+        assert_eq!(st.reason, None);
+
+        // 已完成 + bestLp + 相容，但 reliability Unassessed → 拒絕
+        let id = Uuid::new_v4().to_string();
+        let mut detail = SessionDetail::default();
+        detail.summary.id = id.clone();
+        detail.summary.status = SessionStatus::Completed;
+        detail.summary.gpu_instance_id = GPU_A.into();
+        detail.summary.best_lp = Some(3);
+        detail.summary.cpu_fingerprint = cpu_fingerprint_with(&topo(), &fixed_identity());
+        storage::save_session_at(&root, &detail).unwrap();
+        let st = check_apply_at(&backend, &topo(), &fixed_identity(), &root, &id);
+        assert!(!st.can_apply);
+        assert_eq!(
+            st.reason.as_deref(),
+            Some(codes::BENCHMARK_RELIABILITY_NOT_PASSED)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// list_importable：Completed + bestLp + 相容，但可靠性 Unassessed → 排除
+    #[test]
+    fn list_importable_excludes_unassessed_reliability() {
+        let dir = temp_dir("import_rel");
+        let root = dir.join("benchmarks");
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+
+        let ok = completed_session(&root, &topo(), GPU_A, 3); // Passed → 納入
+
+        let id = Uuid::new_v4().to_string();
+        let mut detail = SessionDetail::default();
+        detail.summary.id = id.clone();
+        detail.summary.status = SessionStatus::Completed;
+        detail.summary.gpu_instance_id = GPU_A.into();
+        detail.summary.best_lp = Some(1);
+        detail.summary.cpu_fingerprint = cpu_fingerprint_with(&topo(), &fixed_identity());
+        storage::save_session_at(&root, &detail).unwrap();
+
+        let list = list_importable(&backend, &topo(), &fixed_identity(), &root);
+        let ids: Vec<String> = list.iter().map(|s| s.id.clone()).collect();
+        assert!(ids.contains(&ok));
+        assert!(!ids.contains(&id), "Unassessed 不該可匯入");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1660,9 +2068,10 @@ mod tests {
     }
 
     #[test]
-    fn apply_gpu_affinity_blocks_when_running() {
+    fn apply_gpu_affinity_blocks_when_benchmark_reserved() {
         let (m, _fake) = manager_with_gpu(GPU_A);
-        m.state.write().unwrap().status = SessionStatus::Running;
+        // benchmark reservation 持有中 → manual apply 必須被拒絕（不碰 backend）
+        let _guard = m.reserve(OP_BENCHMARK).unwrap();
         let err = m.apply_gpu_affinity(&topo(), GPU_A, 3).unwrap_err();
         assert_eq!(err, codes::BENCHMARK_ALREADY_RUNNING);
     }
@@ -1703,6 +2112,346 @@ mod tests {
             original
         );
         assert!(!journal.exists(), "還原成功後日誌應清除");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── reservation / 取消污染（concurrency）──
+
+    /// request_cancel 留下 channel=true 後，下一場 session 開始前 reset_cancel
+    /// 必須把 channel 實際值與 state.cancel_requested 都歸零，否則新 session 立即 Cancelled。
+    #[test]
+    fn cancel_reset_clears_channel_for_next_session() {
+        let (m, _fake) = manager_with_gpu(GPU_A);
+        assert!(!m.cancel_requested());
+        m.request_cancel();
+        assert!(m.cancel_requested());
+        m.reset_cancel();
+        assert!(!m.cancel_requested());
+        assert!(!m.state_snapshot().cancel_requested);
+        // 新 clone 給 runner 的 receiver 也必須讀到 false
+        assert!(!*m.cancel_receiver().borrow());
+    }
+
+    /// 多執行緒同時 reserve：CAS 保證只會有一個成功（其餘回 BENCHMARK_ALREADY_RUNNING）。
+    #[test]
+    fn concurrent_reserve_only_one_wins() {
+        let (m, _fake) = manager_with_gpu(GPU_A);
+        let m = Arc::new(m);
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let m = m.clone();
+            let b = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                b.wait();
+                let g = m.reserve(OP_BENCHMARK);
+                // 贏家持鎖到其他執行緒也完成 attempt，避免釋放過早造成第二個成功
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                g.is_ok()
+            }));
+        }
+        let wins = handles
+            .into_iter()
+            .map(|h| h.join().unwrap())
+            .filter(|ok| *ok)
+            .count();
+        assert_eq!(wins, 1, "並行 start 只能一個成功");
+    }
+
+    /// benchmark 執行期間，apply_best / manual apply / restore_previous 三種 mutation
+    /// 都必須被後端拒絕（不碰 backend、不讀 session）。
+    #[test]
+    fn benchmark_reservation_blocks_all_mutations() {
+        let (m, fake) = manager_with_gpu(GPU_A);
+        let _guard = m.reserve(OP_BENCHMARK).unwrap();
+        let sid = "00000000-0000-0000-0000-000000000000";
+
+        assert_eq!(
+            m.apply_best(&topo(), sid).unwrap_err(),
+            codes::BENCHMARK_ALREADY_RUNNING
+        );
+        assert_eq!(
+            m.apply_gpu_affinity(&topo(), GPU_A, 3).unwrap_err(),
+            codes::BENCHMARK_ALREADY_RUNNING
+        );
+        assert_eq!(
+            m.restore_previous().unwrap_err(),
+            codes::BENCHMARK_ALREADY_RUNNING
+        );
+        assert_eq!(fake.restart_count(), 0, "被拒時不得動到 GPU");
+    }
+
+    /// mutation 執行期間，不得開始 benchmark（start 的 reserve）也不得另一 mutation。
+    #[test]
+    fn mutation_reservation_blocks_benchmark_and_other_mutation() {
+        let (m, _fake) = manager_with_gpu(GPU_A);
+        let _guard = m.reserve(OP_MUTATION).unwrap();
+        assert!(m.reserve(OP_BENCHMARK).is_err(), "start 不得搶 mutation");
+        assert!(m.reserve(OP_MUTATION).is_err(), "mutation 不得並行另一 mutation");
+        assert_eq!(
+            m.apply_gpu_affinity(&topo(), GPU_A, 3).unwrap_err(),
+            codes::BENCHMARK_ALREADY_RUNNING
+        );
+    }
+
+    /// 前置驗證失敗（LP 越界 / GPU 不存在 / BasicDisplay 停用）不得卡住 reservation。
+    #[test]
+    fn preflight_failure_releases_reservation() {
+        let (m, fake) = manager_with_gpu(GPU_A);
+
+        // 1) LP 越界
+        assert_eq!(
+            m.apply_gpu_affinity(&topo(), GPU_A, 8).unwrap_err(),
+            codes::BENCHMARK_SESSION_INCOMPATIBLE
+        );
+        drop(m.reserve(OP_BENCHMARK).unwrap());
+
+        // 2) GPU 不存在
+        assert_eq!(
+            m.apply_gpu_affinity(&topo(), GPU_B, 3).unwrap_err(),
+            codes::GPU_NOT_FOUND
+        );
+        drop(m.reserve(OP_MUTATION).unwrap());
+
+        // 3) BasicDisplay 停用
+        fake.basic_display_on.store(false, Ordering::SeqCst);
+        assert_eq!(
+            m.apply_gpu_affinity(&topo(), GPU_A, 3).unwrap_err(),
+            codes::GPU_BASIC_DISPLAY_DISABLED
+        );
+        drop(m.reserve(OP_BENCHMARK).unwrap());
+    }
+
+    // ── 錯誤安全 transaction（rollback / fault injection）──
+
+    /// journal stage advance（PolicyApplied）失敗 → 立即 rollback，策略還原、日誌清除。
+    #[test]
+    fn apply_journal_advance_failure_rolls_back() {
+        let dir = temp_dir("advfail");
+        let journal = dir.join("journal.json");
+        let restore = dir.join("restore.json");
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        let original = policy_on(GPU_A, 2, 0b1);
+        backend.set_policy(original.clone());
+        recovery::inject::fail_next_advance();
+
+        let err =
+            apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore).unwrap_err();
+        assert_eq!(err, codes::GPU_APPLY_FAILED);
+        assert_eq!(backend.current_policy(GPU_A), original);
+        assert!(!journal.exists(), "advance 失敗 rollback 後日誌應清除");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// read-back 讀取失敗（第 2 次 read）→ 立即 rollback，回穩定代碼。
+    #[test]
+    fn apply_read_back_failure_rolls_back() {
+        let dir = temp_dir("readbackfail");
+        let journal = dir.join("journal.json");
+        let restore = dir.join("restore.json");
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        let original = policy_on(GPU_A, 2, 0b1);
+        backend.set_policy(original.clone());
+        backend.fail_nth_read(2); // snapshot read=1 成功；read-back read=2 失敗
+
+        let err =
+            apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore).unwrap_err();
+        assert_eq!(err, codes::GPU_REGISTRY_FAILED);
+        assert_eq!(backend.current_policy(GPU_A), original);
+        assert!(!journal.exists(), "read-back 失敗 rollback 後日誌應清除");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// read-back 驗證不符（第 2 次 read 回錯 mask）→ 立即 rollback。
+    #[test]
+    fn apply_read_back_mismatch_rolls_back() {
+        let dir = temp_dir("readbackmismatch");
+        let journal = dir.join("journal.json");
+        let restore = dir.join("restore.json");
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        let original = policy_on(GPU_A, 2, 0b1);
+        backend.set_policy(original.clone());
+        backend.fail_nth_read_mismatch(2);
+
+        let err =
+            apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore).unwrap_err();
+        assert_eq!(err, codes::GPU_APPLY_FAILED);
+        assert_eq!(backend.current_policy(GPU_A), original);
+        assert!(!journal.exists(), "read-back 不符 rollback 後日誌應清除");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 還原記錄 atomic write 失敗 → rollback，不留下已套用策略。
+    /// 以 restore 路徑的 parent 做成檔案模擬 write 失敗（create_dir_all 失敗），
+    /// 只失敗寫入、不影響 clear_restore_record 的 NotFound→Ok，還原乾淨。
+    #[test]
+    fn apply_restore_record_write_failure_rolls_back() {
+        let dir = temp_dir("recfail");
+        let journal = dir.join("journal.json");
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"x").unwrap(); // parent 為檔案 → atomic_write 的 create_dir_all 失敗
+        let restore = blocker.join("restore.json");
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        let original = policy_on(GPU_A, 2, 0b1);
+        backend.set_policy(original.clone());
+
+        let err =
+            apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore).unwrap_err();
+        assert_eq!(err, codes::GPU_APPLY_FAILED);
+        assert_eq!(backend.current_policy(GPU_A), original);
+        assert!(!journal.exists(), "還原記錄寫入失敗 rollback 後日誌應清除");
+        assert!(!restore.exists(), "還原記錄不該被寫入");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// journal clear 失敗（成功路徑）→ rollback，避免 stale 日誌讓下次啟動誤還原。
+    #[test]
+    fn apply_journal_clear_failure_rolls_back() {
+        let dir = temp_dir("clearfail");
+        let journal = dir.join("journal.json");
+        let restore = dir.join("restore.json");
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        let original = policy_on(GPU_A, 2, 0b1);
+        backend.set_policy(original.clone());
+        recovery::inject::fail_next_clear();
+
+        let err =
+            apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore).unwrap_err();
+        assert_eq!(err, codes::GPU_APPLY_FAILED);
+        assert_eq!(backend.current_policy(GPU_A), original);
+        assert!(!journal.exists(), "clear 失敗 rollback 後日誌應清除");
+        assert!(!restore.exists(), "rollback 後未完成還原記錄應清除");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// rollback 失敗（restart 持續失敗）→ 保留 stage=PolicyApplied 日誌、
+    /// manager 設 recoveryRequired、封鎖後續 mutation。
+    #[test]
+    fn apply_rollback_failure_sets_recovery_required() {
+        let dir = temp_dir("rollbackfail");
+        let journal = dir.join("journal.json");
+        let restore = dir.join("restore.json");
+        let (m, fake) = manager_with_gpu(GPU_A);
+        let original = policy_on(GPU_A, 2, 0b1);
+        fake.set_policy(original.clone());
+        fake.disable_fails.store(true, Ordering::SeqCst); // restart 持續失敗 → rollback 也失敗
+
+        let err = m
+            .apply_gpu_affinity_at(&topo(), GPU_A, 4, &journal, &restore)
+            .unwrap_err();
+        assert_eq!(err, codes::GPU_RESTART_FAILED);
+        assert!(m.recovery_required(), "rollback 失敗應設 recoveryRequired");
+        assert!(m.state_snapshot().recovery_required);
+        assert!(journal.exists(), "rollback 失敗應保留復原日誌");
+        let j = recovery::load_from(&journal).unwrap().unwrap();
+        assert_eq!(j.stage, RecoveryStage::PolicyApplied, "應強制完整 restore");
+        assert_eq!(m.backend.read_affinity_policy(GPU_A).unwrap(), original);
+        // 封鎖後續 mutation
+        assert_eq!(
+            m.apply_gpu_affinity(&topo(), GPU_A, 3).unwrap_err(),
+            codes::BENCHMARK_RECOVERY_REQUIRED
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// rollback 還原成功但 restore record 清理失敗 → Err 且 manager recoveryRequired，
+    /// 不得留下 stale gpu-restore.json 卻 recoveryRequired=false。
+    #[test]
+    fn rollback_restore_record_cleanup_failure_sets_recovery_required() {
+        let dir = temp_dir("rollback_crec");
+        let journal = dir.join("journal.json");
+        let restore = dir.join("restore.json");
+        let (m, fake) = manager_with_gpu(GPU_A);
+        let original = policy_on(GPU_A, 2, 0b1);
+        fake.set_policy(original.clone());
+        fake.fail_next_write(); // apply 的 write 失敗 → rollback
+        inject::fail_next_clear_restore_record(); // rollback 的 restore record 清理失敗
+
+        let err = m
+            .apply_gpu_affinity_at(&topo(), GPU_A, 4, &journal, &restore)
+            .unwrap_err();
+        assert_eq!(err, codes::GPU_APPLY_FAILED);
+        assert!(m.recovery_required(), "restore record 清理失敗應設 recoveryRequired");
+        assert_eq!(m.backend.read_affinity_policy(GPU_A).unwrap(), original);
+        assert!(journal.exists(), "清理失敗應保留 dirty journal");
+        let j = recovery::load_from(&journal).unwrap().unwrap();
+        assert_eq!(j.stage, RecoveryStage::PolicyApplied);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// rollback 還原成功但 journal cleanup 失敗 → 不得視為乾淨 rollback。
+    #[test]
+    fn rollback_journal_cleanup_failure_sets_recovery_required() {
+        let dir = temp_dir("rollback_cjournal");
+        let journal = dir.join("journal.json");
+        let restore = dir.join("restore.json");
+        let (m, fake) = manager_with_gpu(GPU_A);
+        let original = policy_on(GPU_A, 2, 0b1);
+        fake.set_policy(original.clone());
+        fake.fail_next_write(); // apply 的 write 失敗 → rollback
+        recovery::inject::fail_next_clear(); // rollback 的 journal clear 失敗
+
+        let err = m
+            .apply_gpu_affinity_at(&topo(), GPU_A, 4, &journal, &restore)
+            .unwrap_err();
+        assert_eq!(err, codes::GPU_APPLY_FAILED);
+        assert!(m.recovery_required(), "journal cleanup 失敗不得視為乾淨 rollback");
+        assert!(journal.exists(), "清理失敗應保留 dirty journal");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// journal stage advance（PolicyApplied）失敗後，rollback 的完整復原也失敗 →
+    /// 必須 fail-closed：journal 升級為 PolicyApplied（非只驗證的 SnapshotTaken），
+    /// manager 設 recoveryRequired 封鎖後續 mutation。
+    #[test]
+    fn apply_journal_advance_and_restore_failure_fail_closed() {
+        let dir = temp_dir("advance_restore_fail");
+        let journal = dir.join("journal.json");
+        let restore = dir.join("restore.json");
+        let (m, fake) = manager_with_gpu(GPU_A);
+        let original = policy_on(GPU_A, 2, 0b1);
+        fake.set_policy(original.clone());
+        fake.disable_fails.store(true, Ordering::SeqCst); // rollback 的 restore restart 持續失敗
+        recovery::inject::fail_next_advance(); // PolicyApplied advance 失敗
+
+        let err = m
+            .apply_gpu_affinity_at(&topo(), GPU_A, 4, &journal, &restore)
+            .unwrap_err();
+        assert_eq!(err, codes::GPU_APPLY_FAILED);
+        assert!(m.recovery_required(), "advance + restore 失敗必須 fail-closed");
+        assert!(journal.exists());
+        let j = recovery::load_from(&journal).unwrap().unwrap();
+        assert_eq!(
+            j.stage,
+            RecoveryStage::PolicyApplied,
+            "journal 不得停留在 SnapshotTaken"
+        );
+        assert_eq!(
+            m.apply_gpu_affinity(&topo(), GPU_A, 3).unwrap_err(),
+            codes::BENCHMARK_RECOVERY_REQUIRED
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// load_restore_record：NotFound → None；有效 → Some；壞 JSON → Err；其他 I/O error → Err。
+    #[test]
+    fn load_restore_record_distinguishes_notfound_and_errors() {
+        let dir = temp_dir("loadrec");
+        // NotFound → None
+        assert_eq!(load_restore_record(&dir.join("missing.json")).unwrap(), None);
+        // 有效 JSON → Some
+        let good = dir.join("good.json");
+        let snap = policy_on(GPU_A, 2, 0b1);
+        std::fs::write(&good, serde_json::to_string(&snap).unwrap()).unwrap();
+        assert_eq!(load_restore_record(&good).unwrap(), Some(snap.clone()));
+        // 壞 JSON → Err
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, "{ not json").unwrap();
+        assert!(load_restore_record(&bad).is_err());
+        // 其他 I/O error（目錄）→ Err，不是 None
+        let as_dir = dir.join("asdir.json");
+        std::fs::create_dir_all(&as_dir).unwrap();
+        assert!(load_restore_record(&as_dir).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

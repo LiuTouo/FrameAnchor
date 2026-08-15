@@ -267,7 +267,6 @@ fn fetch_and_parse_checksum(asset: &GhAsset) -> Result<String, String> {
 
     // 取第一段空白分隔前的 hex 字串
     let hex = body
-        .trim()
         .split_whitespace()
         .next()
         .unwrap_or("")
@@ -819,7 +818,6 @@ mod tests {
         // 標準格式 "<hex>  <filename>"
         let body = "d14f5bcf9f29f5a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6  FrameAnchor_0.2.0_x64-portable.zip\n";
         let hex = body
-            .trim()
             .split_whitespace()
             .next()
             .unwrap_or("")
@@ -832,7 +830,6 @@ mod tests {
     fn parse_checksum_accepts_hex_only() {
         let body = "d14f5bcf9f29f5a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6\n";
         let hex = body
-            .trim()
             .split_whitespace()
             .next()
             .unwrap_or("")
@@ -1256,12 +1253,12 @@ mod tests {
             w.start_file(".frameanchor-portable", opts).unwrap();
             w.write_all(b"").unwrap();
             for r in resources {
-                w.start_file(&format!("{RESOURCE_PREFIX}{r}"), opts)
+                w.start_file(format!("{RESOURCE_PREFIX}{r}"), opts)
                     .unwrap();
                 w.write_all(format!("fake {r}").as_bytes()).unwrap();
             }
             if let Some(dup) = duplicate {
-                w.start_file(&format!("{RESOURCE_PREFIX}{dup}"), opts)
+                w.start_file(format!("{RESOURCE_PREFIX}{dup}"), opts)
                     .unwrap();
                 w.write_all(b"fake duplicate").unwrap();
             }
@@ -1366,7 +1363,7 @@ mod tests {
                 .iter()
                 .filter(|f| **f != "SHA256SUMS")
             {
-                w.start_file(&format!("{RESOURCE_PREFIX}{f}"), opts)
+                w.start_file(format!("{RESOURCE_PREFIX}{f}"), opts)
                     .unwrap();
                 w.write_all(b"x").unwrap();
             }
@@ -1392,7 +1389,7 @@ mod tests {
             w.add_directory("resources/", opts).unwrap();
             w.add_directory("resources/benchmark/", opts).unwrap();
             for f in REQUIRED_RESOURCE_FILES {
-                w.start_file(&format!("{RESOURCE_PREFIX}{f}"), opts)
+                w.start_file(format!("{RESOURCE_PREFIX}{f}"), opts)
                     .unwrap();
                 w.write_all(b"x").unwrap();
             }
@@ -1450,6 +1447,7 @@ mod tests {
     // ── 大小檢查 ──
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn max_zip_size_is_reasonable() {
         // 100 MiB 對單一 exe 而言很寬裕
         assert!(MAX_ZIP_SIZE > 10_000_000);

@@ -128,6 +128,26 @@ export interface UpdateInfo {
 export type SessionStatus = 'Pending' | 'Running' | 'Completed' | 'Failed' | 'Cancelled';
 export type BenchmarkStage = 'Init' | 'Warmup' | 'Collecting' | 'Finalizing';
 export type WorkloadKind = 'Vulkan' | 'D3D9';
+export type ReliabilityStatus = 'Unassessed' | 'Passed' | 'Equivalent' | 'Inconclusive';
+
+/** 可靠性/信心摘要（camelCase，與後端 ReliabilitySummary 一致） */
+export interface ReliabilitySummary {
+  status: ReliabilityStatus;
+  perRoundWinners: Array<number | null>; // 動態長度對應 evaluatedRounds；缺漏 round 為 null（保留位置）
+  candidateLp: number | null; // 穩健候選 LP（跨 round 複合分數中位數最高）
+  runnerUpLp: number | null; // 穩健亞軍；單一 LP 時為 null
+  candidateWins: number; // 候選在所有預期 round 中的勝場數
+  evaluatedRounds: number; // 評估的預期 round 數（= repetitions）；舊 session 缺欄為 0
+  requiredWins: number; // Passed 所需勝場數 = ceil(60% × evaluatedRounds)
+  compositeAdvantagePct: number | null; // 複合分數優勢（%）；不可得為 null
+  avgFpsAdvantagePct: number | null; // 護欄：Avg FPS 優勢（%）
+  p1LowAdvantagePct: number | null; // 護欄：1% low 優勢（%）
+  spikeRateDeltaPp: number | null; // 護欄：spike rate 差（百分點，正 = 候選較差）
+  // 舊版聚合改善欄位（保留供向後相容，非穩健證據）：
+  avgFpsPct: number | null;
+  p1LowPct: number | null;
+  p01LowPct: number | null;
+}
 
 export interface GpuDevice {
   instanceId: string; // 穩定 PnP 身分
@@ -141,11 +161,11 @@ export interface BenchmarkConfig {
   workload: WorkloadKind;
   warmUpSecs: number; // 預設 5
   sampleSecs: number; // 預設 30
-  repetitions: number; // 1..3，預設 1；round 順序 asc/desc/asc
+  repetitions: number; // 固定調適排程：新 run 固定為 5（3 篩選 + 2 確認）；欄位保留供舊 session 反序列化
   syncWorkloadAffinity: boolean; // 已棄用；固定 false。保留供舊 session 向後相容。
-  fullscreen: boolean; // 預設 true
-  width: number; // 640
-  height: number; // 480
+  fullscreen: boolean; // 預設 false
+  width: number; // 1280
+  height: number; // 720
   fpsCap: number; // 0 = 不限
   tripleBuffer: boolean;
   vulkanArgs: string[]; // workload=Vulkan 時必須非空
@@ -162,10 +182,16 @@ export interface LpResult {
   maxFps: number | null;
   minFps: number | null;
   stdevFps: number | null; // Bessel（n-1）
-  p1Low: number | null; // 1% low（time-weighted）
+  frametimeMadPct: number | null; // frametime MAD 正規化為中位數百分比（越低越穩）
+  spikeRatePct: number | null; // 慢幀 spike rate：frametime 超 2×中位數幀佔比（%，越低越好）
+  p1Low: number | null; // 1% low（最慢 1% 個 instantaneous FPS 平均）
   p01Low: number | null; // 0.1% low
   p001Low: number | null; // 0.01% low
   p0005Low: number | null; // 0.005% low
+  p1Percentile: number | null; // 1% percentile（最慢 1% 分位數）
+  p01Percentile: number | null; // 0.1% percentile
+  p001Percentile: number | null; // 0.01% percentile
+  p0005Percentile: number | null; // 0.005% percentile
   sampleCount: number;
   avgFrameTimeMs: number | null;
   completed: boolean;
@@ -199,6 +225,7 @@ export interface SessionSummary {
   gpuInstanceId: string;
   cpuFingerprint: string;
   bestLp: number | null;
+  reliability: ReliabilitySummary; // 可靠性判定；舊 session 缺欄位時後端解讀為 Unassessed
   severeLps: number[]; // 嚴重 LP（後端判定）
   sampleCount: number;
   totalBytes: number; // 整個 session 資料夾位元組數（即時計算）

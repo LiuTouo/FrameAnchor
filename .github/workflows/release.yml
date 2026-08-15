@@ -21,6 +21,8 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: 驗證版本一致性
         shell: pwsh
@@ -108,8 +110,14 @@ jobs:
       - name: 前端型別檢查
         run: npm run check
 
+      - name: npm 相依安全性稽核
+        run: npm audit
+
       - name: Rust 測試
         run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Rust Clippy（warnings 視為錯誤）
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 
       - name: 建置 NSIS 安裝程式與 updater artifacts
         uses: tauri-apps/tauri-action@v1

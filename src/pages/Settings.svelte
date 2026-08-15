@@ -235,7 +235,6 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
-    max-width: 560px;
   }
 
   .opt {

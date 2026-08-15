@@ -424,7 +424,7 @@ fn enumerate_cpu_sets() -> Option<CpuSetMap> {
 /// 需要 `PROCESS_SET_LIMITED_INFORMATION`，與 `PROCESS_SET_INFORMATION` 不同。
 /// 反作弊 kernel driver 較少攔截此權限，成功率比硬綁定高。
 pub fn set_cpu_sets(pid: u32, cores: &[u32]) -> Result<(), ProcessError> {
-    let map = enumerate_cpu_sets().ok_or_else(|| ProcessError::OpenFailed(0))?;
+    let map = enumerate_cpu_sets().ok_or(ProcessError::OpenFailed(0))?;
     let set_ids: Vec<u32> = cores
         .iter()
         .filter_map(|&lp| map.lp_to_set_id.get(lp as usize).copied().flatten())

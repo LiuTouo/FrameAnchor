@@ -1,6 +1,9 @@
 //! 基準測試分析（Task 2）：PresentMon CSV 解析、frametime→FPS、
 //! AutoGpuAffinity 相容的統計（Max/Avg/Min/STDEV + 1/0.1/0.01/0.005
-//! time-weighted lows）、dense rank、最佳 LP、嚴重 LP。
+//! frame-count percentile 與 Low）、dense rank、最佳 LP、嚴重 LP。
+//!
+//! Low/percentile 採 frame-count 演算法（最慢 N% 個 instantaneous FPS），
+//! 不用 time-weighted，避免少量超長 frame 把 Low 壓成 Min。
 //!
 //! 全為純函式，fixture 測試不需真實 GPU/驅動。
 
@@ -100,29 +103,33 @@ fn stdev_bessel(values: &[f64]) -> f64 {
     var.sqrt()
 }
 
-/// time-weighted low：把 frametimes 排序後以「時間比例」取分位，
-/// 回傳對應的 FPS。`low_quantile` 例：1% low → 0.01。
-/// 定義：找最小的 frametime，使累積時間佔總時間 ≥ 1 - low_quantile，
-/// FPS = 1000 / 該 frametime（該時間比例內至少有此 FPS）。
-pub fn time_weighted_low_fps(frames: &[f64], low_quantile: f64) -> f64 {
-    if frames.is_empty() {
-        return 0.0;
+/// percentile FPS：instantaneous FPS 升冪排序後取 index = floor((n-1)*q)。
+/// `q` ∈ (0,1]（例：1% percentile → 0.01）。這是「最慢 N% 的分位數」，不是平均。
+/// 空序列 → None。
+pub fn percentile_fps(fps: &[f64], q: f64) -> Option<f64> {
+    if fps.is_empty() {
+        return None;
     }
-    let mut sorted = frames.to_vec();
+    let mut sorted = fps.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let total: f64 = sorted.iter().sum();
-    if total <= 0.0 {
-        return 0.0;
+    let idx = (((sorted.len() - 1) as f64) * q).floor() as usize;
+    Some(sorted[idx.min(sorted.len() - 1)])
+}
+
+/// N% Low：最慢 max(1, ceil(n*q)) 個 instantaneous FPS 的算術平均。
+/// `q` ∈ (0,1]（例：1% low → 0.01）。慢 = FPS 低，故取升冪排序的前 count 個。
+/// 空序列 → None。frame-count 演算法不會被少量超長 frame 壓成 Min。
+pub fn n_pct_low_fps(fps: &[f64], q: f64) -> Option<f64> {
+    if fps.is_empty() {
+        return None;
     }
-    let target = 1.0 - low_quantile;
-    let mut cum = 0.0;
-    for &ft in &sorted {
-        cum += ft;
-        if cum / total >= target {
-            return 1000.0 / ft;
-        }
-    }
-    1000.0 / sorted[sorted.len() - 1]
+    let mut sorted = fps.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let count = (((sorted.len() as f64) * q).ceil() as usize)
+        .max(1)
+        .min(sorted.len());
+    let sum: f64 = sorted[..count].iter().sum();
+    Some(sum / count as f64)
 }
 
 /// 從合併後的 frametime 序列計算單一 LP 的完整指標。
@@ -146,11 +153,17 @@ pub fn compute_lp_result(lp: u32, frames: &[f64]) -> Result<LpResult, String> {
         max_fps: Some(max),
         min_fps: Some(min),
         stdev_fps: Some(stdev_bessel(&fps)),
-        p1_low: Some(time_weighted_low_fps(frames, 0.01)),
-        p01_low: Some(time_weighted_low_fps(frames, 0.001)),
-        p001_low: Some(time_weighted_low_fps(frames, 0.0001)),
-        p0005_low: Some(time_weighted_low_fps(frames, 0.00005)),
+        p1_low: n_pct_low_fps(&fps, 0.01),
+        p01_low: n_pct_low_fps(&fps, 0.001),
+        p001_low: n_pct_low_fps(&fps, 0.0001),
+        p0005_low: n_pct_low_fps(&fps, 0.00005),
+        p1_percentile: percentile_fps(&fps, 0.01),
+        p01_percentile: percentile_fps(&fps, 0.001),
+        p001_percentile: percentile_fps(&fps, 0.0001),
+        p0005_percentile: percentile_fps(&fps, 0.00005),
         avg_frame_time_ms: Some(avg_ft),
+        frametime_mad_pct: frametime_mad_pct(frames),
+        spike_rate_pct: spike_rate_pct(frames),
         sample_count: n,
         completed: true,
         error: None,
@@ -162,11 +175,208 @@ pub fn merge_rounds(per_round: &[Vec<f64>]) -> Vec<f64> {
     per_round.iter().flatten().copied().collect()
 }
 
+// ── frametime 穩健性指標（與 workload 無關） ─────────────────────────────
+
+/// frametime MAD（中位數絕對差），正規化為 frametime 中位數的百分比。
+/// 空序列、中位數非有限或 ≤0 → None（守門，避免除零）。
+pub fn frametime_mad_pct(frames: &[f64]) -> Option<f64> {
+    if frames.is_empty() {
+        return None;
+    }
+    let med = median(frames);
+    if !med.is_finite() || med <= 0.0 {
+        return None;
+    }
+    let devs: Vec<f64> = frames.iter().map(|f| (f - med).abs()).collect();
+    let mad = median(&devs);
+    if !mad.is_finite() {
+        return None;
+    }
+    Some(mad / med * 100.0)
+}
+
+/// 慢幀 spike rate：frametime 超過 2×中位數的幀佔比（百分比）。
+/// 空序列、中位數非有限或 ≤0 → None。
+pub fn spike_rate_pct(frames: &[f64]) -> Option<f64> {
+    if frames.is_empty() {
+        return None;
+    }
+    let med = median(frames);
+    if !med.is_finite() || med <= 0.0 {
+        return None;
+    }
+    let threshold = 2.0 * med;
+    let n = frames.len();
+    let spikes = frames.iter().filter(|&&f| f > threshold).count();
+    Some(spikes as f64 / n as f64 * 100.0)
+}
+
+// ── 穩健推薦分數（逐 round 競爭分數 + 跨 round 候選） ────────────────────
+
+/// 穩健推薦分數權重（總和 1.0）：tail latency / stability 主導，
+/// 平均吞吐量只佔 10%。
+pub const W_P1_LOW: f64 = 0.30;
+pub const W_P01_LOW: f64 = 0.15;
+pub const W_MAD_INV: f64 = 0.25;
+pub const W_SPIKE_INV: f64 = 0.20;
+pub const W_AVG_FPS: f64 = 0.10;
+
+/// 正規化比值：`value` 相對同 round 合格 LP 的中位數。
+/// - `higher_is_better=true`（1% low / 0.1% low / Avg FPS）→ `value / median`。
+/// - `false`（frametime MAD / spike rate）→ 對稱比值 `2*median/(median+value)`，
+///   值域 (0,2]：value=0（完美）→ 2、value=median → 1、value→∞ → 0。
+///
+/// 守門：median 或 value 非有限 → 中性 1.0；higher-is-better 且 median≤0 或
+/// value≤0 → 中性 1.0；lower-is-better 且 median<0 或 value<0 → 中性 1.0。
+/// lower-is-better 且 median==0：value==0 → 1.0（中性）、value>0 → 0.0（懲罰），
+/// 使跨 LP 中位數為 0 時仍能區分零值與正值。
+pub fn normalized_ratio(value: f64, median: f64, higher_is_better: bool) -> f64 {
+    if !value.is_finite() || !median.is_finite() {
+        return 1.0;
+    }
+    if higher_is_better {
+        if median <= 0.0 || value <= 0.0 {
+            return 1.0;
+        }
+        return value / median;
+    }
+    if median < 0.0 || value < 0.0 {
+        return 1.0;
+    }
+    if median == 0.0 {
+        return if value == 0.0 { 1.0 } else { 0.0 };
+    }
+    let r = 2.0 * median / (median + value);
+    if !r.is_finite() {
+        1.0
+    } else {
+        r
+    }
+}
+
+/// 是否可參與競爭分數：completed 且 Avg/1% low/0.1% low/MAD/spike 五項皆有限。
+pub fn is_competitive_eligible(r: &LpResult) -> bool {
+    let finite = |o: Option<f64>| o.is_some_and(|v| v.is_finite());
+    r.completed
+        && finite(r.avg_fps)
+        && finite(r.p1_low)
+        && finite(r.p01_low)
+        && finite(r.frametime_mad_pct)
+        && finite(r.spike_rate_pct)
+}
+
+/// 單一 round 內合格 LP 的五項指標中位數。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RoundMedians {
+    pub p1_low: f64,
+    pub p01_low: f64,
+    pub mad: f64,
+    pub spike: f64,
+    pub avg: f64,
+}
+
+/// 由一組同 round 的 LpResult 計算五項中位數（僅含 competitive-eligible 者；
+/// 空集合 → 全 0）。
+pub fn round_medians(round_results: &[LpResult]) -> RoundMedians {
+    let eligible: Vec<&LpResult> = round_results
+        .iter()
+        .filter(|r| is_competitive_eligible(r))
+        .collect();
+    RoundMedians {
+        p1_low: median(&eligible.iter().filter_map(|r| r.p1_low).collect::<Vec<_>>()),
+        p01_low: median(
+            &eligible
+                .iter()
+                .filter_map(|r| r.p01_low)
+                .collect::<Vec<_>>(),
+        ),
+        mad: median(
+            &eligible
+                .iter()
+                .filter_map(|r| r.frametime_mad_pct)
+                .collect::<Vec<_>>(),
+        ),
+        spike: median(
+            &eligible
+                .iter()
+                .filter_map(|r| r.spike_rate_pct)
+                .collect::<Vec<_>>(),
+        ),
+        avg: median(
+            &eligible
+                .iter()
+                .filter_map(|r| r.avg_fps)
+                .collect::<Vec<_>>(),
+        ),
+    }
+}
+
+/// 單一 LP 在某 round 的競爭分數（相對於該 round 合格 LP 的中位數）。
+/// 五項加權：30% 1% low、15% 0.1% low、25% 反比 MAD、20% 反比 spike、10% Avg FPS。
+/// 任一必要指標缺失 → None。
+pub fn competitive_score(r: &LpResult, med: &RoundMedians) -> Option<f64> {
+    if !is_competitive_eligible(r) {
+        return None;
+    }
+    let r_p1 = normalized_ratio(r.p1_low?, med.p1_low, true);
+    let r_p01 = normalized_ratio(r.p01_low?, med.p01_low, true);
+    let r_mad = normalized_ratio(r.frametime_mad_pct?, med.mad, false);
+    let r_spike = normalized_ratio(r.spike_rate_pct?, med.spike, false);
+    let r_avg = normalized_ratio(r.avg_fps?, med.avg, true);
+    Some(
+        W_P1_LOW * r_p1
+            + W_P01_LOW * r_p01
+            + W_MAD_INV * r_mad
+            + W_SPIKE_INV * r_spike
+            + W_AVG_FPS * r_avg,
+    )
+}
+
+/// 跨 round 穩健候選：`scores_by_lp` 為每 LP 的逐 round 競爭分數。
+/// 依跨 round 分數中位數降序；平手取 worst-round 分數較高；再取較小 LP。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RobustCandidate {
+    pub lp: u32,
+    pub median_score: f64,
+    pub worst_round_score: f64,
+}
+
+pub fn robust_candidates(scores_by_lp: &[(u32, Vec<f64>)]) -> Vec<RobustCandidate> {
+    let mut out: Vec<RobustCandidate> = scores_by_lp
+        .iter()
+        .filter_map(|(lp, scores)| {
+            if scores.is_empty() {
+                return None;
+            }
+            let med = median(scores);
+            let worst = scores.iter().cloned().fold(f64::INFINITY, f64::min);
+            Some(RobustCandidate {
+                lp: *lp,
+                median_score: med,
+                worst_round_score: worst,
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        b.median_score
+            .partial_cmp(&a.median_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                b.worst_round_score
+                    .partial_cmp(&a.worst_round_score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.lp.cmp(&b.lp))
+    });
+    out
+}
+
 // ── 排序與選擇 ──────────────────────────────────────────────────────────
 
 /// 單一欄位的 dense rank（1 起跳、同值同 rank、無空位）。
 /// `descending=true`：值越大 rank 越小（越好）。
 /// 同時保留第 1、2 個不同值（顯示表用，避免外觀上的 tie）。
+#[allow(dead_code)]
 pub struct ColumnRank {
     pub ranks: Vec<usize>,
     // Task 3 顯示表用：保留第 1、2 個不同值，避免外觀 tie
@@ -176,6 +386,7 @@ pub struct ColumnRank {
     pub second: Option<f64>,
 }
 
+#[allow(dead_code)]
 pub fn rank_column(values: &[f64], descending: bool) -> ColumnRank {
     let mut order: Vec<usize> = (0..values.len()).collect();
     order.sort_by(|&a, &b| {
@@ -205,7 +416,7 @@ pub fn rank_column(values: &[f64], descending: bool) -> ColumnRank {
     }
 }
 
-fn median(values: &[f64]) -> f64 {
+pub fn median(values: &[f64]) -> f64 {
     let mut v = values.to_vec();
     v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let n = v.len();
@@ -220,7 +431,7 @@ fn median(values: &[f64]) -> f64 {
 }
 
 /// 完成且四項排序指標皆有的結果（缺任一 → 無法參與排名）
-fn complete_rows<'a>(results: &'a [LpResult]) -> Vec<&'a LpResult> {
+fn complete_rows(results: &[LpResult]) -> Vec<&LpResult> {
     results
         .iter()
         .filter(|r| {
@@ -233,12 +444,15 @@ fn complete_rows<'a>(results: &'a [LpResult]) -> Vec<&'a LpResult> {
         .collect()
 }
 
-/// 最佳 LP：四欄 dense-rank 總和（Avg desc、1% Low desc、0.1% Low desc、
-/// STDEV asc），平手依 0.1% Low、1% Low、Avg（皆越高越好）、LP 越小越好。
-pub fn best_lp(results: &[LpResult]) -> Option<u32> {
+/// 依四欄 dense-rank 總和排序，回傳 LP 清單（最好在前）。
+/// 排序鍵：總和（Avg desc、1% Low desc、0.1% Low desc、STDEV asc）越小越好；
+/// 平手依 0.1% Low、1% Low、Avg（皆越高越好）、LP 越小越好。
+/// 供 [`best_lp`]（候選）與可靠性亞軍共用同一套聚合排名。
+#[allow(dead_code)]
+pub fn ranked_lps(results: &[LpResult]) -> Vec<u32> {
     let rows = complete_rows(results);
     if rows.is_empty() {
-        return None;
+        return Vec::new();
     }
     let avg_r = rank_column(
         &rows.iter().map(|r| r.avg_fps.unwrap()).collect::<Vec<_>>(),
@@ -260,40 +474,43 @@ pub fn best_lp(results: &[LpResult]) -> Option<u32> {
         false,
     );
 
-    let mut best: usize = 0;
-    let mut best_key: (usize, f64, f64, f64, u32) =
-        (usize::MAX, f64::MIN, f64::MIN, f64::MIN, u32::MAX);
-    for (i, row) in rows.iter().enumerate() {
-        let sum = avg_r.ranks[i] + p1_r.ranks[i] + p01_r.ranks[i] + stdev_r.ranks[i];
-        let key = (
-            sum,
-            row.p01_low.unwrap(),
-            row.p1_low.unwrap(),
-            row.avg_fps.unwrap(),
-            row.lp,
-        );
-        if better_key(&key, &best_key) {
-            best_key = key;
-            best = i;
+    let mut scored: Vec<(usize, f64, f64, f64, u32)> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let sum = avg_r.ranks[i] + p1_r.ranks[i] + p01_r.ranks[i] + stdev_r.ranks[i];
+            (
+                sum,
+                row.p01_low.unwrap(),
+                row.p1_low.unwrap(),
+                row.avg_fps.unwrap(),
+                row.lp,
+            )
+        })
+        .collect();
+    scored.sort_by(|a, b| {
+        if a.0 != b.0 {
+            return a.0.cmp(&b.0);
         }
-    }
-    Some(rows[best].lp)
+        if a.1 != b.1 {
+            return b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal);
+        }
+        if a.2 != b.2 {
+            return b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal);
+        }
+        if a.3 != b.3 {
+            return b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal);
+        }
+        a.4.cmp(&b.4)
+    });
+    scored.into_iter().map(|t| t.4).collect()
 }
 
-fn better_key(a: &(usize, f64, f64, f64, u32), b: &(usize, f64, f64, f64, u32)) -> bool {
-    if a.0 != b.0 {
-        return a.0 < b.0;
-    }
-    if a.1 != b.1 {
-        return a.1 > b.1;
-    }
-    if a.2 != b.2 {
-        return a.2 > b.2;
-    }
-    if a.3 != b.3 {
-        return a.3 > b.3;
-    }
-    a.4 < b.4
+/// 最佳 LP：四欄 dense-rank 總和（Avg desc、1% Low desc、0.1% Low desc、
+/// STDEV asc），平手依 0.1% Low、1% Low、Avg（皆越高越好）、LP 越小越好。
+#[allow(dead_code)]
+pub fn best_lp(results: &[LpResult]) -> Option<u32> {
+    ranked_lps(results).into_iter().next()
 }
 
 /// 嚴重 LP：Avg、1% Low、0.1% Low 任一低於該指標中位數的 85%，
@@ -443,16 +660,46 @@ Application,ProcessID,msBetweenPresents
     }
 
     #[test]
-    fn time_weighted_low_uses_frametime_fraction() {
-        // 9 個 5ms + 1 個 100ms：總時間 145ms。
-        // 1% low：target=0.99，累積到 100ms(140/145=0.965) 還不到，需全部 → 1000/100=10
-        let mut frames = vec![100.0];
-        frames.extend(std::iter::repeat(5.0).take(9));
-        let low = time_weighted_low_fps(&frames, 0.01);
-        assert!((low - 10.0).abs() < 1e-9, "low={low}");
-        // 100% 的所有樣本都在 5ms 以下 → 1% low 為 5ms → 200 FPS
-        let low_all = time_weighted_low_fps(&[5.0; 10], 0.01);
-        assert!((low_all - 200.0).abs() < 1e-9);
+    fn percentile_fps_uses_sorted_index() {
+        // FPS = [10, 20, 30, 40, 50]（升冪排序後）
+        let fps = vec![30.0, 10.0, 50.0, 20.0, 40.0];
+        // n=5：q=0.5 → idx = floor(4*0.5)=2 → 30
+        assert_eq!(percentile_fps(&fps, 0.5), Some(30.0));
+        // q=1.0 → idx = floor(4)=4 → 50（最大值）
+        assert_eq!(percentile_fps(&fps, 1.0), Some(50.0));
+        // q 極小 → idx=0 → 最小值
+        assert_eq!(percentile_fps(&fps, 0.01), Some(10.0));
+        assert_eq!(percentile_fps(&[], 0.01), None);
+    }
+
+    #[test]
+    fn n_pct_low_averages_slowest_count() {
+        // FPS = [10, 20, 30, 40, 50]，n=5
+        let fps = vec![50.0, 30.0, 10.0, 40.0, 20.0];
+        // q=0.4 → count = ceil(2)=2 → avg(10,20) = 15
+        assert!((n_pct_low_fps(&fps, 0.4).unwrap() - 15.0).abs() < 1e-9);
+        // q=0.01 → count = max(1,ceil(0.05))=1 → 10（單一最慢）
+        assert_eq!(n_pct_low_fps(&fps, 0.01), Some(10.0));
+        assert_eq!(n_pct_low_fps(&[], 0.01), None);
+    }
+
+    #[test]
+    fn tiny_q_takes_at_least_one_frame() {
+        let fps = vec![100.0, 200.0, 50.0];
+        // q 極小（0.00001）：count = ceil(0.00003)=1 → 仍取最慢 1 個
+        assert_eq!(n_pct_low_fps(&fps, 0.00001), Some(50.0));
+        assert_eq!(percentile_fps(&fps, 0.00001), Some(50.0));
+    }
+
+    #[test]
+    fn few_outliers_do_not_drag_p1_low_to_min() {
+        // 999 個 100 FPS + 1 個 1 FPS（極端 outlier）。
+        // 1% Low = ceil(1000*0.01)=10 個最慢的平均 = (1 + 9*100)/10 = 90.1，遠高於 Min(1)。
+        let mut fps = vec![100.0; 999];
+        fps.push(1.0);
+        let low = n_pct_low_fps(&fps, 0.01).unwrap();
+        assert!((low - 90.1).abs() < 1e-9, "low={low}");
+        assert!(low > 1.0, "1% Low 不應等於 Min");
     }
 
     #[test]
@@ -531,8 +778,10 @@ Application,ProcessID,msBetweenPresents
     fn best_lp_skips_incomplete_rows() {
         let mut a = lp(100.0, 90.0, 80.0, 5.0);
         a.lp = 1;
-        let mut b = LpResult::default();
-        b.lp = 2; // completed=false
+        let b = LpResult {
+            lp: 2, // completed=false
+            ..Default::default()
+        };
         let r = best_lp(&[a, b]);
         assert_eq!(r, Some(1));
     }
@@ -561,5 +810,158 @@ Application,ProcessID,msBetweenPresents
         c.lp = 3;
         let sev = severe_lps(&[a, b, c]);
         assert_eq!(sev, vec![3]);
+    }
+
+    #[test]
+    fn frametime_mad_pct_normalizes_by_median() {
+        // frames [10, 12, 14]：median=12，MAD=2 → 2/12*100 ≈ 16.667%
+        let m = frametime_mad_pct(&[10.0, 12.0, 14.0]).unwrap();
+        assert!((m - 16.6667).abs() < 1e-3, "mad_pct={m}");
+        // 完全一致 → MAD=0
+        assert_eq!(frametime_mad_pct(&[10.0, 10.0, 10.0]).unwrap(), 0.0);
+        assert_eq!(frametime_mad_pct(&[]), None);
+    }
+
+    #[test]
+    fn spike_rate_counts_frames_over_2x_median() {
+        // frames [10,10,10,30]：median=10，threshold=20 → 1/4 = 25%
+        assert_eq!(spike_rate_pct(&[10.0, 10.0, 10.0, 30.0]).unwrap(), 25.0);
+        // 零 spike
+        assert_eq!(spike_rate_pct(&[10.0, 10.0, 10.0]).unwrap(), 0.0);
+        assert_eq!(spike_rate_pct(&[]), None);
+    }
+
+    #[test]
+    fn compute_lp_result_includes_robustness_metrics() {
+        // 有 spike 的序列，mad/spike 皆應被填入
+        let m = compute_lp_result(7, &[10.0, 10.0, 10.0, 30.0]).unwrap();
+        assert!(m.frametime_mad_pct.is_some());
+        assert_eq!(m.spike_rate_pct, Some(25.0));
+    }
+
+    #[test]
+    fn normalized_ratio_guards_zero_and_non_finite() {
+        // median ≤0 且 higher-is-better → 中性 1.0
+        assert_eq!(normalized_ratio(100.0, 0.0, true), 1.0);
+        // value 非有限 → 中性 1.0
+        assert_eq!(normalized_ratio(f64::NAN, 50.0, true), 1.0);
+        // 反比 value=0（完美）→ 對稱比值上限 2.0（不再 3x 獎勵）
+        assert_eq!(normalized_ratio(0.0, 10.0, false), 2.0);
+        // 反比正常：2*median/(median+value) = 60/50 = 1.2
+        assert!((normalized_ratio(20.0, 30.0, false) - 1.2).abs() < 1e-12);
+        // 高者愈好正常：value/median
+        assert!((normalized_ratio(90.0, 80.0, true) - 1.125).abs() < 1e-12);
+    }
+
+    #[test]
+    fn normalized_ratio_zero_median_distinguishes_zero_from_positive() {
+        // median==0：value==0 → 中性 1.0，value>0 → 懲罰 0.0
+        assert_eq!(normalized_ratio(0.0, 0.0, false), 1.0);
+        assert_eq!(normalized_ratio(5.0, 0.0, false), 0.0);
+        assert_eq!(normalized_ratio(100.0, 0.0, false), 0.0);
+    }
+
+    #[test]
+    fn normalized_ratio_lower_is_better_monotonic() {
+        // median=10，value 越大 ratio 越小（懲罰越重）
+        let ratios: Vec<f64> = [0.0, 5.0, 10.0, 20.0, 100.0]
+            .iter()
+            .map(|&v| normalized_ratio(v, 10.0, false))
+            .collect();
+        for w in ratios.windows(2) {
+            assert!(w[0] > w[1], "lower-is-better 應隨 value 單調遞減: {ratios:?}");
+        }
+        // 端點：value=0 → 2、value=median → 1、value→∞ 趨近 0
+        assert!((ratios[0] - 2.0).abs() < 1e-12);
+        assert!((ratios[2] - 1.0).abs() < 1e-12);
+        assert!(ratios[4] < 0.2);
+    }
+
+    #[test]
+    fn normalized_ratio_non_finite_safe() {
+        assert_eq!(normalized_ratio(f64::NAN, 10.0, false), 1.0);
+        assert_eq!(normalized_ratio(10.0, f64::NAN, false), 1.0);
+        assert_eq!(normalized_ratio(f64::INFINITY, 10.0, false), 1.0);
+        assert_eq!(normalized_ratio(10.0, f64::INFINITY, true), 1.0);
+        assert_eq!(normalized_ratio(f64::NEG_INFINITY, 10.0, true), 1.0);
+    }
+
+    fn lp_comp(lp: u32, avg: f64, p1: f64, p01: f64, mad: f64, spike: f64) -> LpResult {
+        LpResult {
+            lp,
+            avg_fps: Some(avg),
+            p1_low: Some(p1),
+            p01_low: Some(p01),
+            frametime_mad_pct: Some(mad),
+            spike_rate_pct: Some(spike),
+            completed: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn competitive_score_favors_better_lp_across_all_axes() {
+        let a = lp_comp(0, 100.0, 90.0, 80.0, 10.0, 10.0);
+        let b = lp_comp(1, 80.0, 70.0, 60.0, 20.0, 20.0);
+        let med = round_medians(&[a.clone(), b.clone()]);
+        assert_eq!(med.avg, 90.0);
+        assert_eq!(med.p1_low, 80.0);
+        assert_eq!(med.p01_low, 70.0);
+        assert_eq!(med.mad, 15.0);
+        assert_eq!(med.spike, 15.0);
+        let sa = competitive_score(&a, &med).unwrap();
+        let sb = competitive_score(&b, &med).unwrap();
+        assert!(sa > sb, "LP0 應在所有軸上都較佳");
+        assert!((sa - 1.16004).abs() < 1e-3, "sa={sa}");
+        assert!((sb - 0.86567).abs() < 1e-3, "sb={sb}");
+    }
+
+    #[test]
+    fn zero_valued_lower_metric_cannot_dominate() {
+        // LP0：MAD/spike 完美（0），但 FPS 極差；LP1：MAD/spike 略高於中位數，FPS 極佳。
+        // 對稱比值上限 2.0 使完美 lower metric 無法蓋過 55% 的 FPS 權重 → LP1 勝。
+        let a = lp_comp(0, 10.0, 10.0, 9.0, 0.0, 0.0);
+        let b = lp_comp(1, 100.0, 100.0, 90.0, 5.0, 5.0);
+        let med = round_medians(&[a.clone(), b.clone()]);
+        let sa = competitive_score(&a, &med).unwrap();
+        let sb = competitive_score(&b, &med).unwrap();
+        assert!(
+            sb > sa,
+            "零 MAD/spike 不應主導分數：sa={sa}, sb={sb}"
+        );
+    }
+
+    #[test]
+    fn competitive_score_ineligible_returns_none() {
+        let a = lp_comp(0, 100.0, 90.0, 80.0, 10.0, 10.0);
+        // 缺 spike → 不合格
+        let mut bad = a.clone();
+        bad.spike_rate_pct = None;
+        let med = round_medians(&[a.clone(), bad.clone()]);
+        assert_eq!(competitive_score(&bad, &med), None);
+        assert!(competitive_score(&a, &med).is_some());
+    }
+
+    #[test]
+    fn robust_candidates_median_then_worst_round_then_lower_lp() {
+        // 中位數相同（1.0），LP5 worst=1.0 > LP2 worst=0.9 → LP5 勝
+        let cands = robust_candidates(&[(5, vec![1.0, 1.0, 1.0]), (2, vec![1.1, 0.9, 1.0])]);
+        assert_eq!(cands[0].lp, 5);
+        assert_eq!(cands[1].lp, 2);
+        assert!((cands[0].median_score - 1.0).abs() < 1e-12);
+        // 完全平手 → 較小 LP 勝
+        let tie = robust_candidates(&[(9, vec![1.0]), (3, vec![1.0])]);
+        assert_eq!(tie[0].lp, 3);
+        assert_eq!(tie[1].lp, 9);
+        // 中位數較高者優先
+        let hi = robust_candidates(&[(0, vec![1.0]), (1, vec![1.5, 1.5])]);
+        assert_eq!(hi[0].lp, 1);
+    }
+
+    #[test]
+    fn robust_candidates_skips_empty_scores() {
+        let cands = robust_candidates(&[(0, vec![]), (1, vec![1.0])]);
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].lp, 1);
     }
 }

@@ -615,6 +615,12 @@ pub mod fake {
         pub enable_fails: AtomicBool,
         /// 下一次 write 失敗（一次性）
         fail_next_write: AtomicBool,
+        /// 讓第 N 次 read（1-based）失敗；0 = 永不。供 read-back 失敗注入。
+        fail_read_at: AtomicU32,
+        /// 讓第 N 次 read（1-based）回傳不符的 mask（read-back mismatch）；0 = 永不。
+        mismatch_read_at: AtomicU32,
+        /// 已發生的 read 次數（配合 fail_read_at / mismatch_read_at）
+        read_count: AtomicU32,
         policies: Mutex<HashMap<String, AffinityPolicy>>,
         restart_count: AtomicU32,
         disable_attempts: AtomicU32,
@@ -630,6 +636,9 @@ pub mod fake {
                 disable_fails: AtomicBool::new(false),
                 enable_fails: AtomicBool::new(false),
                 fail_next_write: AtomicBool::new(false),
+                fail_read_at: AtomicU32::new(0),
+                mismatch_read_at: AtomicU32::new(0),
+                read_count: AtomicU32::new(0),
                 policies: Mutex::new(HashMap::new()),
                 restart_count: AtomicU32::new(0),
                 disable_attempts: AtomicU32::new(0),
@@ -647,6 +656,16 @@ pub mod fake {
 
         pub fn fail_next_write(&self) {
             self.fail_next_write.store(true, Ordering::SeqCst);
+        }
+
+        /// 讓第 N 次 read（1-based）失敗（模擬 read-back 失敗）。
+        pub fn fail_nth_read(&self, n: u32) {
+            self.fail_read_at.store(n, Ordering::SeqCst);
+        }
+
+        /// 讓第 N 次 read（1-based）回傳不符的 mask（模擬 read-back mismatch）。
+        pub fn fail_nth_read_mismatch(&self, n: u32) {
+            self.mismatch_read_at.store(n, Ordering::SeqCst);
         }
 
         pub fn restart_count(&self) -> u32 {
@@ -677,6 +696,17 @@ pub mod fake {
         }
 
         fn read_affinity_policy(&self, instance_id: &str) -> Result<AffinityPolicy, GpuError> {
+            let n = self.read_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.fail_read_at.load(Ordering::SeqCst) == n {
+                return Err(GpuError::Registry("fake: read fail".into()));
+            }
+            if self.mismatch_read_at.load(Ordering::SeqCst) == n {
+                return Ok(AffinityPolicy {
+                    instance_id: instance_id.to_string(),
+                    device_policy: RegistryValueSnapshot::dword(DEVICE_POLICY_SINGLE_PROCESSOR),
+                    assignment_set_override: RegistryValueSnapshot::binary(vec![0xFF]),
+                });
+            }
             Ok(self.current_policy(instance_id))
         }
 

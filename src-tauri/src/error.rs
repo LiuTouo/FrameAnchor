@@ -29,6 +29,8 @@ pub mod codes {
     // ── 基準測試 ──
     pub const BENCHMARK_SESSION_NOT_FOUND: &str = "BENCHMARK_SESSION_NOT_FOUND";
     pub const BENCHMARK_SESSION_NOT_COMPLETED: &str = "BENCHMARK_SESSION_NOT_COMPLETED";
+    /// session 可靠性未達 Passed（舊 session 無欄位 → Unassessed，或 Inconclusive）
+    pub const BENCHMARK_RELIABILITY_NOT_PASSED: &str = "BENCHMARK_RELIABILITY_NOT_PASSED";
     pub const BENCHMARK_SESSION_INCOMPATIBLE: &str = "BENCHMARK_SESSION_INCOMPATIBLE";
     pub const BENCHMARK_RECOVERY_REQUIRED: &str = "BENCHMARK_RECOVERY_REQUIRED";
     pub const BENCHMARK_NOT_IMPLEMENTED: &str = "BENCHMARK_NOT_IMPLEMENTED";
@@ -49,6 +51,9 @@ pub mod codes {
     pub const BENCHMARK_CAPTURE_MISSING: &str = "BENCHMARK_CAPTURE_MISSING";
     /// 輸出檔案存在但沒有有效 frametime 資料（空 / 只剩 header）
     pub const BENCHMARK_CAPTURE_EMPTY: &str = "BENCHMARK_CAPTURE_EMPTY";
+    /// PresentMon 回報 ETW events lost 且無有效 CSV（擷取負載過高，如 overlay/監控/錄影）。
+    /// 不可重試、不可繼續後續 LP/round，直接進入 cleanup/restore。
+    pub const BENCHMARK_CAPTURE_ETW_LOST: &str = "BENCHMARK_CAPTURE_ETW_LOST";
 }
 
 #[derive(Error, Debug)]

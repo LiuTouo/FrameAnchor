@@ -57,6 +57,10 @@ pub fn advance_to_at(
     journal: &RecoveryJournal,
     stage: RecoveryStage,
 ) -> Result<(), String> {
+    #[cfg(test)]
+    if inject::consume_advance() {
+        return Err("injected advance failure".to_string());
+    }
     let mut next = journal.clone();
     next.stage = stage;
     next.updated_at = chrono::Local::now().to_rfc3339();
@@ -65,6 +69,10 @@ pub fn advance_to_at(
 
 /// 清除日誌：只在還原驗證成功後呼叫。不存在視為成功（已清除）。
 pub fn clear_at(path: &Path) -> Result<(), String> {
+    #[cfg(test)]
+    if inject::consume_clear() {
+        return Err("injected clear failure".to_string());
+    }
     match std::fs::remove_file(path) {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -75,16 +83,58 @@ pub fn clear_at(path: &Path) -> Result<(), String> {
 pub fn load_from(path: &Path) -> Result<Option<RecoveryJournal>, String> {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
-        Err(_) => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("讀取還原日誌失敗: {e}")),
     };
     serde_json::from_str(&text)
         .map(Some)
         .map_err(|e| format!("還原日誌解析失敗: {e}"))
 }
 
+/// 寫入一份「要求完整 restore」的日誌（stage=PolicyApplied），供 rollback 失敗時
+/// 確保 startup recovery 走 restore_snapshot（寫回 + 重啟 + 驗證）而非只驗證。
+pub fn mark_restore_needed_at(path: &Path, snapshot: &AffinityPolicy) -> Result<(), String> {
+    let now = chrono::Local::now().to_rfc3339();
+    let journal = RecoveryJournal {
+        instance_id: snapshot.instance_id.clone(),
+        stage: RecoveryStage::PolicyApplied,
+        created_at: now.clone(),
+        updated_at: now,
+        snapshot: snapshot.clone(),
+    };
+    save_at(path, &journal)
+}
+
 fn save_at(path: &Path, journal: &RecoveryJournal) -> Result<(), String> {
     let text = serde_json::to_string_pretty(journal).map_err(|e| format!("序列化: {e}"))?;
     config::atomic_write(path, &text)
+}
+
+/// 測試用 fault injection（僅 `#[cfg(test)]`；production 編譯不含）。
+/// 採 thread-local，避免測試平行執行時彼此干擾。
+#[cfg(test)]
+pub mod inject {
+    use std::cell::Cell;
+
+    thread_local! {
+        static FAIL_ADVANCE: Cell<bool> = const { Cell::new(false) };
+        static FAIL_CLEAR: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// 讓下一次 `advance_to_at` 失敗
+    pub fn fail_next_advance() {
+        FAIL_ADVANCE.with(|c| c.set(true));
+    }
+    /// 讓下一次 `clear_at` 失敗
+    pub fn fail_next_clear() {
+        FAIL_CLEAR.with(|c| c.set(true));
+    }
+    pub(super) fn consume_advance() -> bool {
+        FAIL_ADVANCE.with(|c| c.replace(false))
+    }
+    pub(super) fn consume_clear() -> bool {
+        FAIL_CLEAR.with(|c| c.replace(false))
+    }
 }
 
 #[cfg(test)]
@@ -154,5 +204,14 @@ mod tests {
         std::fs::write(&path, "{ not json").unwrap();
         assert!(load_from(&path).is_err());
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// 其他 read I/O error（目錄）→ Err，不是當作「無日誌」的 None。
+    #[test]
+    fn load_from_directory_is_error_not_none() {
+        let dir = std::env::temp_dir().join(format!("frameanchor_recovery_dir_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(load_from(&dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
