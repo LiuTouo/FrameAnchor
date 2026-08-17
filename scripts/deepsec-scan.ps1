@@ -37,12 +37,20 @@ try {
             continue
         }
 
+        $src = Join-Path $repoRoot $rel
+        # A tracked path that no longer exists on disk is a working-tree
+        # deletion (still in the index, not yet committed). There is nothing to
+        # copy or scan, so skip it rather than letting Copy-Item fail.
+        if (-not (Test-Path -LiteralPath $src)) {
+            continue
+        }
+
         $dest = Join-Path $staging $rel
         $destDir = Split-Path -Parent $dest
         if ($destDir) {
             New-Item -ItemType Directory -Path $destDir -Force | Out-Null
         }
-        Copy-Item -LiteralPath (Join-Path $repoRoot $rel) -Destination $dest -Force
+        Copy-Item -LiteralPath $src -Destination $dest -Force
     }
 
     # Scan the staging tree. Default to no remote L3 (off by default anyway).
