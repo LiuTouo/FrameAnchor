@@ -9,6 +9,7 @@
     "build:app": "tauri build --no-sign",
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "tauri": "tauri",
+    "security:scan": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/deepsec-scan.ps1",
     "gen-icons": "node scripts/gen-icons.mjs",
     "build:benchmark-assets": "node scripts/build-d3d9-workload.mjs",
     "verify:benchmark-assets": "node scripts/verify-benchmark-assets.mjs",

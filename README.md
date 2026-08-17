@@ -233,6 +233,9 @@ npm run tauri dev
 npm run check
 # 執行 svelte-check 與 TypeScript 檢查
 
+npm run security:scan
+# 以 DeepSec 掃描 Git 追蹤的第一方原始碼（見下方說明）
+
 npm run build
 # 建置前端至 dist/
 
@@ -265,6 +268,10 @@ Rust 檢查與測試：
 cargo check --manifest-path src-tauri/Cargo.toml
 cargo test --manifest-path src-tauri/Cargo.toml
 ```
+
+安全性掃描（DeepSec）：
+
+`npm run security:scan` 會呼叫 `scripts/deepsec-scan.ps1`，以 `git ls-files` 建立只含 Git 追蹤第一方檔案的臨時 staging 目錄，再對該目錄執行 `deepsec shield scan`（預設 `--no-remote-l3`），最後自動清理。**請勿直接對 repository root 執行 `deepsec shield scan`**：DeepSec 不讀取 `.gitignore`，會連 `src-tauri/target`（生成文件）與 `.claude/worktrees`（工作副本）一起掃描，產生大量非第一方原始碼的誤報。
 
 完整應用程式與程序操作依賴 Windows API。涉及 live process、affinity、priority、CPU Sets、系統匣、Task Scheduler 或 WebView2 的變更，仍需在 Windows 上使用可拋棄的測試程序進行手動驗證。
 
