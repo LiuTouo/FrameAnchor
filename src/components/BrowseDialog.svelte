@@ -14,6 +14,7 @@
 
   let windows = $state<WindowInfo[]>([]);
   let loading = $state(false);
+  let loadError = $state<string | null>(null);
   let search = $state('');
   let dialogEl = $state<HTMLDivElement>();
   let searchInput = $state<HTMLInputElement>();
@@ -31,6 +32,10 @@
     loading = true;
     try {
       windows = await ipc.listWindows();
+      loadError = null;
+    } catch (e) {
+      windows = [];
+      loadError = String(e);
     } finally {
       loading = false;
     }
@@ -113,6 +118,11 @@
       <div class="list" role="list" aria-label={$t('browse.title')}>
         {#if loading}
           <div class="empty hint">…</div>
+        {:else if loadError}
+          <div class="empty hint" role="alert">
+            {$t('browse.loadFailed', { values: { error: loadError } })}
+            <button class="small" onclick={load}>{$t('browse.retry')}</button>
+          </div>
         {:else if filtered.length === 0}
           <div class="empty hint">{$t('browse.empty')}</div>
         {:else}
@@ -156,33 +166,33 @@
   }
 
   .dialog {
-    width: min(540px, 100%);
-    max-height: 480px;
+    width: min(560px, 100%);
+    max-height: 520px;
     display: flex;
     flex-direction: column;
     background: var(--surface-1);
     border: 1px solid var(--border-default);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-xl);
     box-shadow: var(--shadow-lg);
-    padding: var(--space-4);
+    padding: var(--space-5);
   }
 
   .head {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: var(--space-3);
+    margin-bottom: var(--space-4);
   }
 
   h3 {
     margin: 0;
-    font-size: 14px;
+    font-size: 15px;
   }
 
   .tools {
     display: flex;
     gap: var(--space-2);
-    margin-bottom: var(--space-3);
+    margin-bottom: var(--space-4);
   }
 
   .tools input {
@@ -194,16 +204,22 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 6px;
   }
 
   .item {
     display: flex;
     align-items: center;
     gap: var(--space-3);
-    padding: 6px var(--space-2);
-    border-radius: var(--radius-sm);
+    padding: 8px var(--space-3);
+    border-radius: var(--radius-md);
     background: var(--surface-2);
+    border: 1px solid transparent;
+    transition: border-color var(--transition-fast);
+  }
+
+  .item:hover {
+    border-color: var(--border-default);
   }
 
   .item img {

@@ -28,6 +28,7 @@
     onchange,
     onapply,
     ondelete,
+    busy = false,
   }: {
     rule: Rule;
     topology: Topology;
@@ -39,6 +40,7 @@
     onchange: (rule: Rule) => void;
     onapply: (rule: Rule) => void;
     ondelete: (id: string) => void;
+    busy?: boolean;
   } = $props();
 
   const clone = <T,>(v: T): T => JSON.parse(JSON.stringify(v));
@@ -60,6 +62,7 @@
     session: SessionSummary;
     policyLp: number | null;
   } | null>(null);
+  let previewSequence = 0;
 
   $effect(() => {
     if (importOpen && importableSessions.length && !importSel) {
@@ -70,17 +73,24 @@
   });
 
   async function loadImportPreview(s: SessionSummary) {
-    if (s.bestLp == null) return;
+    const sequence = ++previewSequence;
+    importPreview = null;
+    if (s.bestLp == null) {
+      importBusy = false;
+      return;
+    }
     importBusy = true;
     try {
       const recommended = await ipc.computeRecommendedCores(s.bestLp, s.severeLps ?? []);
       const policy = await ipc.getGpuAffinityPolicy(s.gpuInstanceId).catch(() => null);
       const policyLp = policy ? maskToLp(policy.assignmentSetOverride?.bytes ?? null) : null;
-      importPreview = { recommended, session: s, policyLp };
+      if (sequence === previewSequence && importSel === s.id) {
+        importPreview = { recommended, session: s, policyLp };
+      }
     } catch {
-      importPreview = null;
+      if (sequence === previewSequence) importPreview = null;
     } finally {
-      importBusy = false;
+      if (sequence === previewSequence) importBusy = false;
     }
   }
 
@@ -102,7 +112,7 @@
 
   function doImport() {
     const p = importPreview;
-    if (!p || p.recommended.length === 0) return;
+    if (importBusy || !p || p.session.id !== importSel || p.recommended.length === 0) return;
     update({
       affinity: { mode: 'Custom', cores: p.recommended },
       recommendation: {
@@ -134,6 +144,13 @@
     !!rule.recommendation?.cpuFingerprint &&
       !!currentCpuFingerprint &&
       rule.recommendation.cpuFingerprint !== currentCpuFingerprint,
+  );
+
+  // 自訂/偏好核心集指向超過目前拓撲的核心 → 拓撲已變動（BIOS 關 SMT/E-core 等會重編號），
+  // 超出範圍的部分會被後端靜默忽略，必須提示而非無聲換核心。
+  const staleCores = $derived(
+    (rule.affinity.mode === 'Custom' || rule.affinity.mode === 'Prefer') &&
+      rule.affinity.cores.some((c) => c >= (topology?.totalLp ?? Number.MAX_SAFE_INTEGER)),
   );
 
   function policyStatusText(p: { policyLp: number | null; session: SessionSummary }): string {
@@ -196,6 +213,12 @@
       <div class="stale-warn" role="alert">
         <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z" fill="currentColor"/></svg>
         {$t('ruleImport.staleHardware')}
+      </div>
+    {/if}
+    {#if staleCores}
+      <div class="stale-warn" role="alert">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z" fill="currentColor"/></svg>
+        {$t('rules.staleCores')}
       </div>
     {/if}
     <AffinityPicker
@@ -339,6 +362,7 @@
   <div class="action-bar">
     <button
       class="danger"
+      disabled={busy}
       onclick={() => ondelete(rule.id)}
     >
       <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z" fill="currentColor"/></svg>
@@ -346,7 +370,7 @@
     </button>
     <button
       class="primary"
-      disabled={!isNew && !dirty}
+      disabled={busy || (!isNew && !dirty)}
       onclick={() => onapply(clone(rule))}
     >
       {$t('rules.apply')}
@@ -356,14 +380,14 @@
 
 <style>
   .editor {
-    padding: var(--space-4);
+    padding: var(--space-5);
     display: flex;
     flex-direction: column;
     gap: 0;
   }
 
   .editor-section {
-    padding: var(--space-3) 0;
+    padding: var(--space-4) 0;
     border-bottom: 1px solid var(--border-subtle);
   }
 
@@ -372,12 +396,12 @@
   }
 
   .section-title {
-    margin: 0 0 var(--space-2);
-    font-size: 12px;
-    font-weight: var(--font-weight-medium);
+    margin: 0 0 var(--space-3);
+    font-size: 11px;
+    font-weight: var(--font-weight-semibold);
     color: var(--text-secondary);
     text-transform: uppercase;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.06em;
   }
 
   .section-toggle {
@@ -430,8 +454,8 @@
   }
 
   .field-label {
-    color: var(--text-muted);
-    font-size: 11px;
+    color: var(--text-secondary);
+    font-size: 12px;
     font-weight: var(--font-weight-medium);
   }
 
@@ -479,10 +503,10 @@
   /* ── 匯入面板 ── */
   .import-panel {
     margin-top: var(--space-3);
-    padding: var(--space-3);
+    padding: var(--space-4);
     background: var(--surface-1);
     border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-sm);
+    border-radius: var(--radius-md);
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
@@ -525,8 +549,10 @@
   /* ── 操作列 ── */
   .action-bar {
     display: flex;
-    justify-content: flex-end;
+    justify-content: space-between;
     gap: var(--space-2);
-    padding: var(--space-3) 0 0;
+    padding: var(--space-4) 0 0;
+    margin-top: var(--space-2);
+    border-top: 1px solid var(--border-subtle);
   }
 </style>

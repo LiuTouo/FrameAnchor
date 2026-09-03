@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 pub mod assets;
+pub mod env;
 pub mod ipc;
 pub mod manager;
 pub mod metrics;
@@ -13,6 +14,7 @@ pub mod recommend;
 pub mod recovery;
 pub mod runner;
 pub mod storage;
+pub mod window_layout;
 pub mod window_win;
 
 // ── GPU 基準測試領域型別 ────────────────────────────────────────────────
@@ -39,6 +41,16 @@ pub enum BenchmarkStage {
     Finalizing,
 }
 
+/// 進度事件的排程 phase；與低階 stage（launching/collecting 等）正交。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BenchmarkPhase {
+    Screening,
+    Refinement,
+    Confirmation,
+    ReverseConfirmation,
+    EquivalentValidation,
+}
+
 /// workload 種類
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum WorkloadKind {
@@ -47,6 +59,18 @@ pub enum WorkloadKind {
     Vulkan,
     /// 內建 Rust 編譯的 Direct3D9 workload（d3d9-workload.exe）
     D3D9,
+}
+
+/// FPS cap 策略：Adaptive = 校準選定最高安全 cap（新預設）；Fixed = 沿用 `fps_cap`
+/// （legacy / 固定輸入）。舊 session JSON 缺此欄位時由 `#[serde(default)]` 解讀為
+/// Adaptive（新產品預設），`fps_cap` 欄位仍保留供 Fixed 模式沿用。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FpsCapPolicy {
+    /// 校準選定（預設）：忽略 fps_cap，依校準 tier 選定正式 cap。
+    #[default]
+    Adaptive,
+    /// 沿用 `config.fps_cap`（0 = 不限制）。
+    Fixed,
 }
 
 /// 基準測試參數
@@ -64,7 +88,7 @@ pub struct BenchmarkConfig {
     pub warm_up_secs: u32,
     #[serde(default = "default_sample_secs")]
     pub sample_secs: u32,
-    /// 已停用：新排程固定 2 篩選 + 3..=5 確認，忽略此欄位。
+    /// 已停用：新排程固定 1 篩選 + 2 refinement + 3..=7 前向確認，忽略此欄位。
     /// 保留供舊 session JSON 向後相容；預設 5。
     #[serde(default = "default_repetitions")]
     pub repetitions: u32,
@@ -78,9 +102,13 @@ pub struct BenchmarkConfig {
     pub width: u32,
     #[serde(default = "default_height")]
     pub height: u32,
-    /// FPS cap；0 = 不限制
+    /// FPS cap；0 = 不限制。僅在 `fps_cap_policy == Fixed` 時作為正式 cap；
+    /// Adaptive 模式忽略此欄位（由校準選定）。
     #[serde(default)]
     pub fps_cap: u32,
+    /// FPS cap 策略（新欄位，serde default = Adaptive）。
+    #[serde(default)]
+    pub fps_cap_policy: FpsCapPolicy,
     #[serde(default)]
     pub triple_buffer: bool,
     /// Vulkan workload 的額外參數（workload=Vulkan 時必須非空）
@@ -129,6 +157,7 @@ impl Default for BenchmarkConfig {
             width: default_width(),
             height: default_height(),
             fps_cap: 0,
+            fps_cap_policy: FpsCapPolicy::default(),
             triple_buffer: false,
             vulkan_args: default_vulkan_args(),
             workload_exe_path: None,
@@ -215,6 +244,12 @@ pub struct BenchmarkProgress {
     pub stage: String,
     #[serde(default)]
     pub round: Option<u32>,
+    /// 已由後端解碼的排程 phase，避免前端猜測 raw round 命名空間。
+    #[serde(default)]
+    pub phase: Option<BenchmarkPhase>,
+    /// phase 內 1-based 輪次。
+    #[serde(default)]
+    pub phase_round: Option<u32>,
     #[serde(default)]
     pub lp: Option<u32>,
     #[serde(default)]
@@ -223,6 +258,17 @@ pub struct BenchmarkProgress {
     pub eta_secs: Option<u64>,
     #[serde(default)]
     pub error: Option<String>,
+    /// 視窗完整性快照（capture/warmup 期間輪詢時，狀態改變才附帶）。None = 未回報。
+    #[serde(default)]
+    pub window_integrity: Option<WindowIntegrity>,
+    /// 取消專用階段（`requested`/`stopping`/`restoring`/`finalizing`）；非取消事件為 None。
+    /// 與 `stage` 分離：`stage` 承載一般 benchmark 階段，此欄位只承載取消清理階段。
+    #[serde(default)]
+    pub cancel_stage: Option<String>,
+    /// 取消專用百分比（0..100，單調）；非取消事件為 None。
+    /// 不碰 `percentage`（benchmark 進度語意維持不變）。
+    #[serde(default)]
+    pub cancel_progress: Option<u32>,
 }
 
 /// 執行期間的原始取樣（單一 LP 單一時刻；Task 2 runner 產生）
@@ -281,7 +327,7 @@ pub struct ReliabilitySummary {
     pub p1_low_pct: Option<f64>,
     #[serde(default)]
     pub p01_low_pct: Option<f64>,
-    /// 評估的確認 round 數（3..=5；配對測量）。舊 session 缺欄為 0。
+    /// 評估的確認 round 數（3..=7；配對測量）。舊 session 缺欄為 0。
     #[serde(default)]
     pub evaluated_rounds: u32,
     /// 已停用（新排程以一致性規則 + bootstrap 穩定性區間判定，不再用勝場門檻）；
@@ -301,10 +347,10 @@ pub struct ReliabilitySummary {
     /// 護欄：候選 spike rate 相較亞軍（絕對百分點，正 = 候選較差）
     #[serde(default)]
     pub spike_rate_delta_pp: Option<f64>,
-    /// 篩選 round 數（新排程固定 2，僅用於選 finalists，不參與推論）；舊 session 缺欄為 0。
+    /// 篩選 round 數（新排程固定 1，僅用於選候選，不參與推論）；舊 session 缺欄為 0。
     #[serde(default)]
     pub screening_rounds: u32,
-    /// 確認 round 數（3..=5，配對/區塊排序以控制時間漂移）；舊 session 缺欄為 0。
+    /// 確認 round 數（3..=7，配對/區塊排序以控制時間漂移）；舊 session 缺欄為 0。
     #[serde(default)]
     pub confirmation_rounds: u32,
     /// 確認證據：bootstrap 穩定性區間下界（%，複合分數優勢）。
@@ -318,6 +364,95 @@ pub struct ReliabilitySummary {
     /// 停止原因：`"passed"` / `"equivalent"` / `"inconclusive"`；舊 session 為空字串。
     #[serde(default)]
     pub stopping_reason: String,
+    /// 前向確認 phase 的最終判定（"passed"/"reversal"/"equivalent"/"inconclusive"）。
+    /// 舊 session 為空字串。
+    #[serde(default)]
+    pub forward_verdict: String,
+    /// 是否執行過反向驗證 phase（RunnerUpReversal 觸發）。
+    #[serde(default)]
+    pub reverse_ran: bool,
+    /// 反向驗證 phase 的判定（"passed"/"inconclusive"/""）。
+    #[serde(default)]
+    pub reverse_verdict: String,
+    /// 反向驗證的 predeclared 候選（前向 phase 的亞軍）；未執行為 None。
+    #[serde(default)]
+    pub reverse_candidate_lp: Option<u32>,
+    /// 反向驗證實際完成的配對 round 數。
+    #[serde(default)]
+    pub reverse_rounds: u32,
+    /// 演算法版本：新確認演算法（有界 log-ratio 分數 + 等效判定）為 2；
+    /// 舊 session 缺欄 → 0。
+    #[serde(default)]
+    pub algorithm_version: u32,
+    /// 等效判定的 raw median evidence：候選 Avg FPS 相較亞軍（確認 round 中位數，%）。
+    /// 非 Equivalent 判定時為 None。
+    #[serde(default)]
+    pub equivalent_avg_improvement_pct: Option<f64>,
+    /// 等效判定的 raw median evidence：候選 1% low 相較亞軍（確認 round 中位數，%）。
+    #[serde(default)]
+    pub equivalent_p1_improvement_pct: Option<f64>,
+    /// 等效判定的 raw median evidence：候選 0.1% low 相較亞軍（確認 round 中位數，%）。
+    #[serde(default)]
+    pub equivalent_p01_improvement_pct: Option<f64>,
+    /// 等效判定的 raw median evidence：候選 frametime MAD 相較亞軍（絕對百分點差）。
+    #[serde(default)]
+    pub equivalent_mad_delta_pp: Option<f64>,
+    /// 等效判定的 raw median evidence：候選 spike rate 相較亞軍（絕對百分點差）。
+    #[serde(default)]
+    pub equivalent_spike_delta_pp: Option<f64>,
+}
+
+/// Session 層的 capture 完整性摘要（新欄位；舊 session 缺欄 → serde default）。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureQuality {
+    /// 所有 capture attempt 總數（含校準、overflow retry、drift rerun）。
+    #[serde(default)]
+    pub total_captures: u32,
+    /// 通過完整性閘（valid）的 capture attempt 數。
+    #[serde(default)]
+    pub valid_captures: u32,
+    /// 未通過完整性閘（invalid）的 capture attempt 數。
+    #[serde(default)]
+    pub invalid_captures: u32,
+    /// 因 workload 視窗完整性（前景/位置/遮擋）失敗而判定 invalid 的 capture 數。
+    /// additive：舊 session 缺欄 → serde default 0。
+    #[serde(default)]
+    pub window_invalid_captures: u32,
+    /// 因視窗完整性失敗而觸發的 capture 重跑次數（不含首次）。
+    /// additive：舊 session 缺欄 → serde default 0。
+    #[serde(default)]
+    pub window_retry_captures: u32,
+    /// 累計 overflowed present events（所有 capture 加總）。
+    #[serde(default)]
+    pub overflowed_present_events: u64,
+    /// 累計 ETW events lost（所有 capture 加總）。
+    #[serde(default)]
+    pub etw_events_lost: u64,
+    /// 所有正式用於結果的 capture 皆完整且 session 完成才 true。
+    #[serde(default)]
+    pub integrity_passed: bool,
+    /// 校準/正式鎖定的有效 FPS cap（Fixed 模式 = config.fps_cap）。
+    #[serde(default)]
+    pub effective_fps_cap: u32,
+    /// 校準/正式鎖定的 circular buffer size。
+    #[serde(default)]
+    pub circular_buffer_size: u32,
+}
+
+/// Session 層的環境穩定度摘要（新欄位；舊 session 缺欄 → serde default）。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvironmentStability {
+    /// 環境閘（AC/電池節能/CPU idle）是否通過。
+    #[serde(default)]
+    pub passed: bool,
+    /// 累計漂移重跑次數（screening block + confirmation pair）。
+    #[serde(default)]
+    pub drift_reruns: u32,
+    /// 不穩定時的穩定錯誤碼（= BENCHMARK_ENV_UNSTABLE）；穩定為 None。
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// 歷史列表用的摘要
@@ -358,6 +493,29 @@ pub struct SessionSummary {
     /// `#[serde(default)]` 讓沒有此欄位的舊 session.json 仍可載入。
     #[serde(default)]
     pub error: Option<String>,
+    /// 篩選（1 輪）+ refinement（2 輪）後的 Top 1 候選 LP（新欄位；舊 session 缺欄 → None）。
+    #[serde(default)]
+    pub screening_candidate_lp: Option<u32>,
+    /// 篩選（1 輪）+ refinement（2 輪）後的 Top 2 亞軍 LP（新欄位；舊 session 缺欄 → None）。
+    #[serde(default)]
+    pub screening_runner_up_lp: Option<u32>,
+    /// 前向確認 phase 的勝者 LP（Passed=候選；Reversal=亞軍；否則 None）。
+    #[serde(default)]
+    pub confirmation_winner_lp: Option<u32>,
+    /// 反向驗證確認的最終最佳 LP（只有反向 Passed 才設置）。新 session 的
+    /// `best_lp` 僅在此值存在時才設置；舊 Passed session 仍可用 `best_lp` fallback。
+    #[serde(default)]
+    pub verified_best_lp: Option<u32>,
+    /// capture 完整性摘要（新欄位；舊 session 缺欄 → default）。
+    #[serde(default)]
+    pub capture_quality: CaptureQuality,
+    /// 環境穩定度摘要（新欄位；舊 session 缺欄 → default）。
+    #[serde(default)]
+    pub environment_stability: EnvironmentStability,
+    /// Equivalent 判定時的等效 finalists（[candidate, runner]）；非 Equivalent → 空。
+    /// 新欄位；舊 session 缺欄 → 空。
+    #[serde(default)]
+    pub equivalent_finalist_lps: Vec<u32>,
 }
 
 /// 歷史 session 的「可否套用」狀態（前端顯示用；相容性判定只存在後端）
@@ -366,6 +524,69 @@ pub struct SessionSummary {
 pub struct ApplyStatus {
     pub can_apply: bool,
     /// None = 可套用；Some(穩定錯誤代碼) 查 i18n errors.*
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// 是否為 equivalent-mode session（`reliability.status == Equivalent`）。
+    #[serde(default)]
+    pub equivalent_mode: bool,
+    /// 允許套用的 LP（equivalent finalists）；非 equivalent → 空。
+    #[serde(default)]
+    pub allowed_lps: Vec<u32>,
+    /// 套用前是否需先完成 safety validation（equivalent 且尚未 Passed）。
+    #[serde(default)]
+    pub requires_safety_validation: bool,
+}
+
+/// 等效安全驗證狀態（serde PascalCase；default None）。
+/// 供後續 task 執行等效 finalists 的安全驗證；目前僅定義資料型別。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EquivalentSafetyStatus {
+    #[default]
+    None,
+    Pending,
+    Passed,
+    Failed,
+    Cancelled,
+}
+
+/// 等效安全驗證 contract（供後續 task 填值；現僅定義資料型別，
+/// serde default 全空，舊 JSON 必能載入）。
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct EquivalentSafetyValidation {
+    #[serde(default)]
+    pub status: EquivalentSafetyStatus,
+    /// 被選為最終等效 LP（validation 對象）。
+    #[serde(default)]
+    pub selected_lp: Option<u32>,
+    /// 參考 LP（與 selected_lp 比較的基準）。
+    #[serde(default)]
+    pub reference_lp: Option<u32>,
+    #[serde(default)]
+    pub rounds: u32,
+    /// 五個 delta：avg/p1/p01 改善 %（相對）、mad/spike 絕對百分點差。
+    #[serde(default)]
+    pub avg_improvement_pct: Option<f64>,
+    #[serde(default)]
+    pub p1_improvement_pct: Option<f64>,
+    #[serde(default)]
+    pub p01_improvement_pct: Option<f64>,
+    #[serde(default)]
+    pub mad_delta_pp: Option<f64>,
+    #[serde(default)]
+    pub spike_delta_pp: Option<f64>,
+    #[serde(default)]
+    pub capture_quality: CaptureQuality,
+    #[serde(default)]
+    pub environment_stability: EnvironmentStability,
+    #[serde(default)]
+    pub validated_at: Option<String>,
+    /// reference policy mask 快照（可精確驗證單 LP 策略的 snapshot bytes）。
+    #[serde(default)]
+    pub reference_policy_mask: Option<Vec<u8>>,
+    /// 失敗原因（穩定錯誤代碼或 `"passed"`）；Failed/Cancelled 才有值。
+    /// `ImmediatePass`（目前核心已在等效組、無 capture）標記 `"already_in_equivalent_pair"`
+    /// 且 `rounds=0`，供前端區分「無額外 capture」與一般 3-round 驗證通過。
     #[serde(default)]
     pub reason: Option<String>,
 }
@@ -379,6 +600,58 @@ pub struct SessionDetail {
     pub results: Vec<LpResult>,
     #[serde(default)]
     pub samples: Vec<CoreSample>,
+    /// 篩選階段（3 round 全 LP）的逐 LP 聚合結果；與 `results` 分離保存。
+    #[serde(default)]
+    pub screening_results: Vec<LpResult>,
+    /// refinement 階段（Top 3 各 2 round）的逐 LP 聚合結果。
+    #[serde(default)]
+    pub refinement_results: Vec<LpResult>,
+    /// 前向確認階段（Top 2，3..=7 round）的逐 LP 聚合結果；不混入篩選/refinement。
+    #[serde(default)]
+    pub confirmation_results: Vec<LpResult>,
+    /// 等效安全驗證 contract（後續 task 填值；目前 None）。舊 session 缺欄 → None。
+    #[serde(default)]
+    pub equivalent_safety_validation: Option<EquivalentSafetyValidation>,
+}
+
+/// 目前背景 GPU 操作種類（runtime contract）。serde PascalCase；null = 無操作。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BenchmarkOperation {
+    /// 一般基準測試（run_benchmark）。
+    Benchmark,
+    /// 等效安全驗證（run_equivalent_validation）。
+    EquivalentValidation,
+}
+
+/// FrameAnchor 主視窗的執行期版面（runtime contract）。serde PascalCase。
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum WindowLayout {
+    /// 一般 UI（完整導覽/設定）。
+    #[default]
+    Normal,
+    /// 基準測試 compact progress 視窗（480×300 logical、右下角、僅進度/取消）。
+    CompactProgress,
+}
+
+/// workload 視窗完整性快照（capture/warmup 期間輪詢回報；camelCase）。
+/// `foreground`/`position` 為「良好」布林（true = ok）；`minimized`/`occlusion`
+/// 為「不良」布林（true = 異常）。`retries` = 累計視窗完整性重跑次數；
+/// `error` = 重試上限用盡後的穩定錯誤碼（查 i18n errors.*）。
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowIntegrity {
+    #[serde(default)]
+    pub foreground: bool,
+    #[serde(default)]
+    pub minimized: bool,
+    #[serde(default)]
+    pub position: bool,
+    #[serde(default)]
+    pub occlusion: bool,
+    #[serde(default)]
+    pub retries: u32,
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// 執行期狀態（AppState 持有，get_benchmark_state 回傳給前端）
@@ -402,6 +675,21 @@ pub struct BenchmarkState {
     /// 啟動還原失敗 → true：封鎖新的 test/apply
     #[serde(default)]
     pub recovery_required: bool,
+    /// 目前背景 GPU 操作（Benchmark | EquivalentValidation | null）。
+    #[serde(default)]
+    pub operation: Option<BenchmarkOperation>,
+    /// 主視窗執行期版面（Normal | CompactProgress）。
+    #[serde(default)]
+    pub window_layout: WindowLayout,
+    /// workload 視窗完整性快照（預設全「良好」）。
+    #[serde(default)]
+    pub window_integrity: WindowIntegrity,
+    /// 取消專用階段（requested/stopping/restoring/finalizing）；無取消為 None。
+    #[serde(default)]
+    pub cancel_stage: Option<String>,
+    /// 取消專用百分比（0..100）；無取消為 None。
+    #[serde(default)]
+    pub cancel_progress: Option<u32>,
 }
 
 /// 儲存體資訊（get_benchmark_storage_info）
@@ -555,6 +843,16 @@ mod tests {
             elapsed_secs: 8,
             cancel_requested: false,
             recovery_required: false,
+            operation: Some(BenchmarkOperation::Benchmark),
+            window_layout: WindowLayout::CompactProgress,
+            window_integrity: WindowIntegrity {
+                foreground: true,
+                position: true,
+                retries: 1,
+                ..Default::default()
+            },
+            cancel_stage: Some("stopping".to_string()),
+            cancel_progress: Some(20),
         };
         let json = serde_json::to_string(&s).unwrap();
         assert!(json.contains("\"sessionId\""));
@@ -563,6 +861,23 @@ mod tests {
         assert!(json.contains("\"recoveryRequired\""));
         assert!(json.contains("\"Running\""));
         assert!(json.contains("\"Collecting\""));
+        assert!(json.contains("\"operation\":\"Benchmark\""));
+        assert!(json.contains("\"windowLayout\":\"CompactProgress\""));
+        assert!(json.contains("\"windowIntegrity\""));
+        assert!(json.contains("\"retries\":1"));
+        // 取消欄位 camelCase 序列化
+        assert!(json.contains("\"cancelStage\":\"stopping\""), "json={json}");
+        assert!(json.contains("\"cancelProgress\":20"));
+    }
+
+    /// 取消欄位為 optional（serde default）：舊 state JSON 缺欄反序列化為 None，
+    /// 不破壞向後相容；新欄位可 camelCase 回讀。
+    #[test]
+    fn benchmark_state_cancel_fields_backward_compat() {
+        let old = r#"{"status":"Running","sessionId":"x","progressPct":40}"#;
+        let back: BenchmarkState = serde_json::from_str(old).unwrap();
+        assert_eq!(back.cancel_stage, None);
+        assert_eq!(back.cancel_progress, None);
     }
 
     /// 新 percentile 欄位以 camelCase 序列化；舊 session 缺欄反序列化為 None（向後相容）。
@@ -713,5 +1028,136 @@ mod tests {
         assert!(c.fullscreen, "顯式 fullscreen=true 不得被覆寫");
         assert_eq!(c.width, 800);
         assert_eq!(c.height, 600);
+    }
+
+    /// 新演算法欄位（algorithm_version + 等效 raw median evidence）以 camelCase 序列化，
+    /// 舊 session 缺欄 → 0 / None（向後相容）。
+    #[test]
+    fn reliability_algorithm_version_and_equivalent_evidence_roundtrip() {
+        let rel = ReliabilitySummary {
+            status: ReliabilityStatus::Equivalent,
+            algorithm_version: 2,
+            equivalent_avg_improvement_pct: Some(0.1),
+            equivalent_p1_improvement_pct: Some(-1.09),
+            equivalent_p01_improvement_pct: Some(0.05),
+            equivalent_mad_delta_pp: Some(0.3),
+            equivalent_spike_delta_pp: Some(0.01),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&rel).unwrap();
+        assert!(json.contains("\"algorithmVersion\":2"), "json={json}");
+        assert!(json.contains("\"equivalentAvgImprovementPct\":0.1"));
+        assert!(json.contains("\"equivalentP1ImprovementPct\":-1.09"));
+        assert!(json.contains("\"equivalentP01ImprovementPct\":0.05"));
+        assert!(json.contains("\"equivalentMadDeltaPp\":0.3"));
+        assert!(json.contains("\"equivalentSpikeDeltaPp\":0.01"));
+        let back: ReliabilitySummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.algorithm_version, 2);
+        assert_eq!(back.equivalent_avg_improvement_pct, Some(0.1));
+        assert_eq!(back.equivalent_p1_improvement_pct, Some(-1.09));
+
+        // 舊 session 缺新欄位 → 0 / None
+        let old =
+            r#"{"status":"Passed","perRoundWinners":[0,null,2],"candidateLp":0,"runnerUpLp":2}"#;
+        let old_rel: ReliabilitySummary = serde_json::from_str(old).unwrap();
+        assert_eq!(old_rel.algorithm_version, 0);
+        assert_eq!(old_rel.equivalent_avg_improvement_pct, None);
+        assert_eq!(old_rel.equivalent_mad_delta_pp, None);
+        assert_eq!(old_rel.equivalent_spike_delta_pp, None);
+    }
+
+    /// SessionSummary 新增 equivalent_finalist_lps：非 Equivalent 空、舊 session 缺欄空。
+    #[test]
+    fn session_summary_equivalent_finalist_lps_roundtrip() {
+        let s = SessionSummary {
+            id: "x".into(),
+            status: SessionStatus::Completed,
+            started_at: "t".into(),
+            equivalent_finalist_lps: vec![3, 7],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(
+            json.contains("\"equivalentFinalistLps\":[3,7]"),
+            "json={json}"
+        );
+        let back: SessionSummary = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.equivalent_finalist_lps, vec![3, 7]);
+        // 舊 session 缺欄 → 空
+        let old: SessionSummary = serde_json::from_str(r#"{"id":"y","startedAt":"t"}"#).unwrap();
+        assert!(old.equivalent_finalist_lps.is_empty());
+    }
+
+    /// 等效安全驗證 contract：default 全空、PascalCase status、舊 JSON 必能載入。
+    #[test]
+    fn equivalent_safety_validation_defaults_and_roundtrip() {
+        let v = EquivalentSafetyValidation {
+            status: EquivalentSafetyStatus::Passed,
+            selected_lp: Some(3),
+            reference_lp: Some(7),
+            rounds: 3,
+            p1_improvement_pct: Some(-1.09),
+            reference_policy_mask: Some(vec![0x08, 0x00]),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(json.contains("\"status\":\"Passed\""), "json={json}");
+        assert!(json.contains("\"selectedLp\":3"));
+        assert!(json.contains("\"referencePolicyMask\":[8,0]"));
+        let back: EquivalentSafetyValidation = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.status, EquivalentSafetyStatus::Passed);
+        assert_eq!(back.selected_lp, Some(3));
+        assert_eq!(back.reference_policy_mask, Some(vec![8, 0]));
+        // default status = None
+        assert_eq!(
+            EquivalentSafetyValidation::default().status,
+            EquivalentSafetyStatus::None
+        );
+
+        // SessionDetail 舊 JSON 缺欄 → None
+        let detail: SessionDetail =
+            serde_json::from_str(r#"{"summary":{"id":"x","startedAt":"t","status":"Completed"}}"#)
+                .unwrap();
+        assert!(detail.equivalent_safety_validation.is_none());
+    }
+
+    /// WindowIntegrity camelCase 序列化 + 舊 session 缺欄 → default。
+    #[test]
+    fn window_integrity_serializes_camel_case_and_defaults() {
+        let wi = WindowIntegrity {
+            foreground: true,
+            minimized: false,
+            position: true,
+            occlusion: true,
+            retries: 2,
+            error: Some("BENCHMARK_WINDOW_INTEGRITY".to_string()),
+        };
+        let json = serde_json::to_string(&wi).unwrap();
+        assert!(json.contains("\"foreground\":true"));
+        assert!(json.contains("\"occlusion\":true"));
+        assert!(json.contains("\"retries\":2"));
+        assert!(json.contains("\"error\":\"BENCHMARK_WINDOW_INTEGRITY\""));
+        // default 全空（retries=0, error=None）
+        assert_eq!(WindowIntegrity::default().retries, 0);
+        assert_eq!(WindowIntegrity::default().error, None);
+    }
+
+    /// CaptureQuality 新增視窗計數器 additive：舊 session 缺欄 → serde default 0。
+    #[test]
+    fn capture_quality_window_counters_backward_compat() {
+        let old = r#"{"totalCaptures":10,"validCaptures":9,"invalidCaptures":1,"overflowedPresentEvents":0,"etwEventsLost":0,"integrityPassed":true,"effectiveFpsCap":500,"circularBufferSize":8192}"#;
+        let back: CaptureQuality = serde_json::from_str(old).unwrap();
+        assert_eq!(back.total_captures, 10);
+        assert_eq!(back.window_invalid_captures, 0);
+        assert_eq!(back.window_retry_captures, 0);
+        // 新值可序列化並回讀
+        let cq = CaptureQuality {
+            window_invalid_captures: 3,
+            window_retry_captures: 2,
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cq).unwrap();
+        assert!(json.contains("\"windowInvalidCaptures\":3"));
+        assert!(json.contains("\"windowRetryCaptures\":2"));
     }
 }

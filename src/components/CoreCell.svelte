@@ -83,25 +83,27 @@
 <style>
   .cell {
     flex: 1;
-    min-width: 64px;
+    min-width: 68px;
     background: var(--surface-2);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm);
-    padding: 4px 6px;
+    padding: 6px 8px;
   }
 
   .cell.covered {
     border-color: var(--accent);
     border-width: 2px;
+    padding: 5px 7px;
   }
 
   .cell.interactive {
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
     cursor: pointer;
     flex: 0 0 auto;
-    min-width: 84px;
+    min-width: 88px;
+    transition: border-color var(--transition-fast), background var(--transition-fast);
   }
 
   .cell.interactive:hover {
@@ -154,7 +156,7 @@
     height: 4px;
     margin-top: 4px;
     background: var(--surface-0);
-    border-radius: 2px;
+    border-radius: var(--radius-full);
     overflow: hidden;
   }
 

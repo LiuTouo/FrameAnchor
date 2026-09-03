@@ -16,11 +16,95 @@
 
 use windows::core::BOOL;
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DrawMenuBar, EnableMenuItem, EnumWindows, GetClientRect, GetSystemMenu, GetWindowRect,
-    GetWindowThreadProcessId, IsWindowVisible, SetWindowPos, HWND_TOP, MF_BYCOMMAND, MF_GRAYED,
-    SC_CLOSE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER,
+    DrawMenuBar, EnableMenuItem, EnumWindows, GetClientRect, GetForegroundWindow, GetSystemMenu,
+    GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+    IsWindowVisible, SetForegroundWindow, SetWindowPos, ShowWindow, GWL_EXSTYLE, GW_HWNDPREV,
+    HWND_TOP, HWND_TOPMOST, MF_BYCOMMAND, MF_GRAYED, SC_CLOSE, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_RESTORE, WS_EX_TOPMOST,
 };
+
+/// 實體像素矩形（virtual screen 座標，left/top 可為負）。純資料，供配置與完整性測試。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+impl Rect {
+    pub fn new(left: i32, top: i32, right: i32, bottom: i32) -> Self {
+        Self {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    pub fn width(&self) -> i32 {
+        self.right - self.left
+    }
+
+    pub fn height(&self) -> i32 {
+        self.bottom - self.top
+    }
+
+    /// 兩矩形是否相交（含邊界相鄰亦視為不重疊，僅嚴格重疊才 true）。
+    pub fn overlaps(&self, other: &Rect) -> bool {
+        self.left < other.right
+            && self.right > other.left
+            && self.top < other.bottom
+            && self.bottom > other.top
+    }
+}
+
+/// workload 視窗完整性觀測值（純資料，測試注入 fake 不必碰 Win32）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowIntegritySnapshot {
+    /// 是否為前景視窗（GetForegroundWindow == hwnd）。
+    pub foreground: bool,
+    /// 是否最小化（IsIconic）。
+    pub minimized: bool,
+    /// 外框矩形是否仍在預期位置（含容忍誤差）。
+    pub position_ok: bool,
+    /// 是否帶 WS_EX_TOPMOST。
+    pub topmost: bool,
+    /// 是否可見（IsWindowVisible）。
+    pub visible: bool,
+    /// 是否被遮擋/cloaked（DWMWA_CLOAKED != 0）。
+    pub occluded: bool,
+}
+
+/// 完整性「良好」判定：前景、非最小化、位置正確、topmost、可見、未遮擋。
+pub fn integrity_ok(snap: &WindowIntegritySnapshot) -> bool {
+    snap.foreground
+        && !snap.minimized
+        && snap.position_ok
+        && snap.topmost
+        && snap.visible
+        && !snap.occluded
+}
+
+/// 單一「z-order 上方視窗」的遮擋觀測值（純資料，測試不碰 Win32）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct OccluderSnapshot {
+    pub visible: bool,
+    pub minimized: bool,
+    pub cloaked: bool,
+    pub rect: Rect,
+}
+
+/// 是否存在真正「可見、未最小化、未 cloaked、且與 workload 外框相交」的上方視窗。
+/// 純函式（抽離判斷供單元測試）：不可見/最小化/cloaked 不構成可見遮擋；
+/// 邊界相鄰不算（`Rect::overlaps` 嚴格重疊）。
+pub fn covered_by_above(workload_rect: Rect, above: &[OccluderSnapshot]) -> bool {
+    above
+        .iter()
+        .any(|w| w.visible && !w.minimized && !w.cloaked && w.rect.overlaps(&workload_rect))
+}
 
 /// workload 視窗操作的注入介面。runner 在內建 Vulkan 時呼叫。
 pub trait WorkloadWindow: Send + Sync {
@@ -37,7 +121,28 @@ pub trait WorkloadWindow: Send + Sync {
     /// - `Ok(false)`：尚未找到（window 可能還在建立，可稍後重試）。
     /// - `Err(e)`：找到但停用失敗（重試無益）。
     fn guard_close(&self, pid: u32) -> Result<bool, String>;
+
+    /// 單次嘗試：依 pid 找 visible top-level window，`ShowWindow(SW_RESTORE)` →
+    /// `SetWindowPos(HWND_TOPMOST, x, y)`（保留尺寸）→ `SetForegroundWindow`。
+    /// 適用所有 spawned workload（內建 Vulkan/D3D9 與自訂 visible top-level），
+    /// 但「不」調整尺寸（自訂 exe 不可擅自 resize）。
+    /// - `Ok(true)`：找到並已定位。
+    /// - `Ok(false)`：尚未找到。
+    /// - `Err(e)`：找到但定位失敗（重試無益）。
+    fn position_topmost(&self, pid: u32, x: i32, y: i32) -> Result<bool, String>;
+
+    /// 依 pid 找 visible top-level window 的實際外框矩形（實體像素）。
+    /// `Ok(None)` = 尚未找到；`Err` = 量測失敗。
+    fn outer_rect(&self, pid: u32) -> Result<Option<Rect>, String>;
+
+    /// 觀測 workload 視窗完整性（前景/最小化/位置/topmost/可見/遮擋）。
+    /// 找不到 window 時回傳全「不良」快照（foreground=false、visible=false、
+    /// position_ok=false、occluded=true），由 caller 的 `integrity_ok` 判定失敗。
+    fn integrity(&self, pid: u32, expected: Rect) -> WindowIntegritySnapshot;
 }
+
+/// 完整性「位置」比對容忍誤差（實體像素）：DWM/DPI 捨入可能造成 1–2px 偏差。
+pub const INTEGRITY_POSITION_TOLERANCE: i32 = 2;
 
 /// 由目前 outer/client 尺寸算出「使 client area 變成 (width,height)」所需
 /// 的 outer window 尺寸。純函式，獨立測試。
@@ -85,6 +190,89 @@ impl WorkloadWindow for RealWorkloadWindow {
         disable_close(hwnd)?;
         Ok(true)
     }
+
+    fn position_topmost(&self, pid: u32, x: i32, y: i32) -> Result<bool, String> {
+        let Some(hwnd) = find_top_level_window(pid) else {
+            return Ok(false);
+        };
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+            SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                0,
+                0,
+                SWP_NOSIZE | SWP_SHOWWINDOW,
+            )
+            .map_err(|e| format!("SetWindowPos(topmost): {e}"))?;
+            let _ = SetForegroundWindow(hwnd);
+        }
+        Ok(true)
+    }
+
+    fn outer_rect(&self, pid: u32) -> Result<Option<Rect>, String> {
+        let Some(hwnd) = find_top_level_window(pid) else {
+            return Ok(None);
+        };
+        let mut wr = RECT::default();
+        unsafe {
+            GetWindowRect(hwnd, &mut wr).map_err(|e| format!("GetWindowRect: {e}"))?;
+        }
+        Ok(Some(Rect::new(wr.left, wr.top, wr.right, wr.bottom)))
+    }
+
+    fn integrity(&self, pid: u32, expected: Rect) -> WindowIntegritySnapshot {
+        let Some(hwnd) = find_top_level_window(pid) else {
+            return WindowIntegritySnapshot {
+                occluded: true,
+                ..Default::default()
+            };
+        };
+        let mut wr = RECT::default();
+        let (position_ok, workload_rect) = unsafe {
+            if GetWindowRect(hwnd, &mut wr).is_err() {
+                (false, None)
+            } else {
+                let rect = Rect::new(wr.left, wr.top, wr.right, wr.bottom);
+                let t = INTEGRITY_POSITION_TOLERANCE;
+                let ok = (wr.left - expected.left).abs() <= t
+                    && (wr.top - expected.top).abs() <= t
+                    && (wr.right - expected.right).abs() <= t
+                    && (wr.bottom - expected.bottom).abs() <= t;
+                (ok, Some(rect))
+            }
+        };
+        unsafe {
+            let foreground = GetForegroundWindow() == hwnd;
+            let minimized = IsIconic(hwnd).as_bool();
+            let visible = IsWindowVisible(hwnd).as_bool();
+            let topmost = (GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST.0) != 0;
+            let mut cloaked: u32 = 0;
+            // DWM cloaking（最小化/shell 隱藏）— 只反映隱藏，不反映被其他視窗蓋住。
+            let self_cloaked = DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_CLOAKED,
+                &mut cloaked as *mut u32 as *mut core::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            )
+            .map(|_| cloaked != 0)
+            .unwrap_or(false);
+            // 實際遮擋：z-order 位於 workload 之上的可見視窗與其外框相交。
+            let covered = workload_rect
+                .map(|r| covered_by_above(r, &collect_above_windows(hwnd)))
+                .unwrap_or(false);
+            WindowIntegritySnapshot {
+                foreground,
+                minimized,
+                position_ok,
+                topmost,
+                visible,
+                occluded: self_cloaked || covered,
+            }
+        }
+    }
 }
 
 struct EnumCtx {
@@ -116,6 +304,46 @@ fn find_top_level_window(pid: u32) -> Option<HWND> {
         let _ = EnumWindows(Some(enum_proc), LPARAM(&mut ctx as *mut _ as isize));
     }
     ctx.found
+}
+
+/// 遮擋掃描的 z-order 上方視窗數上限：避免病態 z-order 拖慢每 100ms 的完整性輪詢。
+const OCCLUSION_SCAN_MAX: usize = 64;
+
+/// 收集 z-order 位於 `hwnd` 之上（GW_HWNDPREV 鏈）的 top-level window 遮擋觀測值。
+/// workload 為 HWND_TOPMOST 時，其上方只會有其他 topmost（或更高）視窗；普通視窗
+/// 與 FrameAnchor compact 視窗都在下方，不會被納入。
+fn collect_above_windows(hwnd: HWND) -> Vec<OccluderSnapshot> {
+    let mut out = Vec::new();
+    unsafe {
+        let mut cur = GetWindow(hwnd, GW_HWNDPREV).unwrap_or_default();
+        while !cur.0.is_null() && out.len() < OCCLUSION_SCAN_MAX {
+            let visible = IsWindowVisible(cur).as_bool();
+            let minimized = IsIconic(cur).as_bool();
+            let mut cloaked: u32 = 0;
+            let cloaked_flag = DwmGetWindowAttribute(
+                cur,
+                DWMWA_CLOAKED,
+                &mut cloaked as *mut u32 as *mut core::ffi::c_void,
+                std::mem::size_of::<u32>() as u32,
+            )
+            .map(|_| cloaked != 0)
+            .unwrap_or(false);
+            let mut wr = RECT::default();
+            let rect = if GetWindowRect(cur, &mut wr).is_ok() {
+                Rect::new(wr.left, wr.top, wr.right, wr.bottom)
+            } else {
+                Rect::default()
+            };
+            out.push(OccluderSnapshot {
+                visible,
+                minimized,
+                cloaked: cloaked_flag,
+                rect,
+            });
+            cur = GetWindow(cur, GW_HWNDPREV).unwrap_or_default();
+        }
+    }
+    out
 }
 
 /// 停用 `SC_CLOSE`：`GetSystemMenu` + `EnableMenuItem(SC_CLOSE, MF_GRAYED)` 停用
@@ -208,6 +436,109 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rect_overlaps_detects_intersection_and_separation() {
+        let a = Rect::new(0, 0, 100, 100);
+        // 嚴格重疊
+        assert!(a.overlaps(&Rect::new(50, 50, 150, 150)));
+        // 邊界相鄰（不重疊）
+        assert!(!a.overlaps(&Rect::new(100, 0, 200, 100)));
+        assert!(!a.overlaps(&Rect::new(0, 100, 100, 200)));
+        // 完全分離
+        assert!(!a.overlaps(&Rect::new(200, 200, 300, 300)));
+    }
+
+    #[test]
+    fn integrity_ok_requires_all_good() {
+        let good = WindowIntegritySnapshot {
+            foreground: true,
+            minimized: false,
+            position_ok: true,
+            topmost: true,
+            visible: true,
+            occluded: false,
+        };
+        assert!(integrity_ok(&good));
+        // 任一異常即失敗
+        assert!(!integrity_ok(&WindowIntegritySnapshot {
+            foreground: false,
+            ..good
+        }));
+        assert!(!integrity_ok(&WindowIntegritySnapshot {
+            minimized: true,
+            ..good
+        }));
+        assert!(!integrity_ok(&WindowIntegritySnapshot {
+            position_ok: false,
+            ..good
+        }));
+        assert!(!integrity_ok(&WindowIntegritySnapshot {
+            topmost: false,
+            ..good
+        }));
+        assert!(!integrity_ok(&WindowIntegritySnapshot {
+            visible: false,
+            ..good
+        }));
+        assert!(!integrity_ok(&WindowIntegritySnapshot {
+            occluded: true,
+            ..good
+        }));
+    }
+
+    #[test]
+    fn covered_by_above_flags_only_real_occluders() {
+        let wr = Rect::new(0, 0, 1280, 720);
+        let occ = OccluderSnapshot {
+            visible: true,
+            minimized: false,
+            cloaked: false,
+            rect: Rect::new(100, 100, 200, 200),
+        };
+        // 可見、未最小化、未 cloaked、相交 → 遮擋
+        assert!(covered_by_above(wr, &[occ]));
+        // 不相交 → 不遮擋
+        assert!(!covered_by_above(
+            wr,
+            &[OccluderSnapshot {
+                rect: Rect::new(1300, 0, 1400, 100),
+                ..occ
+            }]
+        ));
+        // 邊界相鄰（不嚴格重疊）→ 不遮擋
+        assert!(!covered_by_above(
+            wr,
+            &[OccluderSnapshot {
+                rect: Rect::new(1280, 0, 1400, 100),
+                ..occ
+            }]
+        ));
+        // 不可見 / 最小化 / cloaked → 不遮擋
+        assert!(!covered_by_above(
+            wr,
+            &[OccluderSnapshot {
+                visible: false,
+                ..occ
+            }]
+        ));
+        assert!(!covered_by_above(
+            wr,
+            &[OccluderSnapshot {
+                minimized: true,
+                ..occ
+            }]
+        ));
+        assert!(!covered_by_above(
+            wr,
+            &[OccluderSnapshot {
+                cloaked: true,
+                ..occ
+            }]
+        ));
+        // 空清單 → 不遮擋
+        assert!(!covered_by_above(wr, &[]));
+    }
+
+    #[test]
     fn outer_size_preserves_frame_delta() {
         // 假設 outer 800×600、client 784×561（frame 寬 16、高 39）
         let (w, h) = outer_size_for_client(800, 600, 784, 561, 640, 480);
@@ -218,7 +549,10 @@ mod tests {
     #[test]
     fn outer_size_no_frame_returns_exact() {
         // borderless：client == outer
-        assert_eq!(outer_size_for_client(640, 480, 640, 480, 640, 480), (640, 480));
+        assert_eq!(
+            outer_size_for_client(640, 480, 640, 480, 640, 480),
+            (640, 480)
+        );
     }
 
     /// 依序餵給 `resize_verify_loop` 的 measure 值，回傳 (result, set 呼叫紀錄)。

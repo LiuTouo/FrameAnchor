@@ -13,6 +13,7 @@
   import type {
     ApplyStatus,
     BenchmarkConfig,
+    FpsCapPolicy,
     LpResult,
     SessionDetail,
     WorkloadKind,
@@ -31,6 +32,12 @@
   const cancelRequested = $derived($benchmarkState?.cancelRequested ?? false);
   let cancelSent = $state(false);
   const cancelPending = $derived(isRunning && (cancelRequested || cancelSent));
+  // 取消專用階段/百分比（後端 state 承載；取消中才有意義）
+  const cancelStage = $derived($benchmarkState?.cancelStage ?? null);
+  const cancelProgressPct = $derived($benchmarkState?.cancelProgress ?? 0);
+  // compact progress 視窗模式（後端 windowLayout=CompactProgress）
+  const compact = $derived($benchmarkState?.windowLayout === 'CompactProgress');
+  const winIntegrity = $derived($benchmarkState?.windowIntegrity ?? null);
 
   function switchSegment(s: Segment) {
     if (isRunning && s !== segment) return; // 執行中禁止切換
@@ -49,12 +56,12 @@
   let workload = $state<WorkloadKind>('Vulkan');
   let warmUpSecs = $state(5);
   let sampleSecs = $state(30);
-  let fullscreen = $state(false);
   let vulkanOptionsOpen = $state(true);
   let width = $state(1280);
   let height = $state(720);
   let manualLp = $state<number | null>(null);
   let fpsCap = $state(0);
+  let fpsCapPolicy = $state<FpsCapPolicy>('Adaptive');
   let tripleBuffer = $state(false);
 
   // ── 執行 / 結果狀態 ──
@@ -76,22 +83,38 @@
           .sort((a, b) => a - b)
       : [],
   );
-  // 基準測試候選 LP：排除實體 Core 0（含其 SMT sibling），僅供測試晶片與「全部」按鈕使用。
+  // 基準測試候選 LP：P-core primary（非 SMT sibling），排除實體 Core 0，
+  // 與後端 effective_lps 空清單預設一致；供「全部」按鈕與初始選擇使用。
   // 手動 GPU 親和性下拉選單仍使用上方完整的 supportedLps（含 Core 0）。
-  const benchmarkLps = $derived(
-    $topology
-      ? $topology.logicalProcessors
-          .filter((p) => p.index < group0Limit && p.coreId !== 0)
-          .map((p) => p.index)
-          .sort((a, b) => a - b)
-      : [],
-  );
+  const benchmarkLps = $derived.by(() => {
+    if (!$topology) return [];
+    const limit = Math.min($topology.totalLp, 64);
+    const primaries = (pOnly: boolean) =>
+      $topology.logicalProcessors
+        .filter(
+          (p) =>
+            p.index < limit &&
+            p.coreId !== 0 &&
+            !p.isSmtSibling &&
+            (pOnly ? ($topology.physicalCores[p.coreId]?.isPCore ?? false) : true),
+        )
+        .map((p) => p.index)
+        .sort((a, b) => a - b);
+    const p = primaries(true);
+    return p.length > 0 ? p : primaries(false);
+  });
   const lpList = $derived(lps);
-  // 新排程：2 篩選 round 測所有選定 LP + 3..5 確認 round 只重測前 2 名。
-  // restartCount 取「最多」（2N+10），不承諾較短時間（確認可能自 3 round 擴充到 5 round）。
-  const restartCount = $derived(lpList.length * 2 + Math.min(lpList.length, 2) * 5);
+  // 自適應排程：primary 短篩（10s）→ Top5 racing（20s）→ Top3 正式 capture
+  // → Top2 前向/反向確認。restartCount 使用最大 capture 預算。
+  const racingCount = $derived(Math.min(lpList.length, 5));
+  const refinementCount = $derived(Math.min(lpList.length, 3));
+  const restartCount = $derived(lpList.length + racingCount + refinementCount + 20);
   const estMinutes = $derived(
-    Math.max(1, Math.round((restartCount * (sampleSecs + warmUpSecs + 19)) / 60)),
+    Math.max(1, Math.round((
+      lpList.length * (Math.min(sampleSecs, 10) + Math.min(warmUpSecs, 3) + 19)
+      + racingCount * (Math.min(sampleSecs, 20) + Math.min(warmUpSecs, 3) + 19)
+      + (refinementCount + 20) * (sampleSecs + warmUpSecs + 19)
+    ) / 60)),
   );
   const policyGpu = $derived(detail?.summary.gpuInstanceId || selectedGpu);
   const policyLp = $derived(
@@ -109,24 +132,8 @@
   $effect(() => {
     const topo = $topology;
     if (topo && !lpsInitialized) {
-      const limit = Math.min(topo.totalLp, 64);
-      if (topo.hasHybrid) {
-        lps = topo.physicalCores
-          .filter((c) => c.isPCore && c.id !== 0)
-          .flatMap((c) => c.lpIndices.slice(0, 1))
-          .filter((lp) => lp < limit)
-          .sort((a, b) => a - b);
-      } else {
-        lps = topo.physicalCores
-          .filter((c) => c.id !== 0)
-          .flatMap((c) => c.lpIndices.slice(0, 1))
-          .filter((lp) => lp < limit)
-          .sort((a, b) => a - b);
-      }
-      if (lps.length === 0) {
-        // 回退僅使用基準測試候選 LP（仍排除 Core 0），不還原 Core 0。
-        lps = [...benchmarkLps];
-      }
+      // 預設候選與後端 effective_lps 一致：P-core primary（非 SMT sibling），排除實體 Core 0
+      lps = [...benchmarkLps];
       manualLp = lps[0] ?? null;
       lpsInitialized = true;
     }
@@ -148,7 +155,14 @@
     }
   });
 
-  onMount(() => { void init(); });
+  onMount(() => {
+    void init();
+    // Registry 可能被外部工具改寫；背景回讀避免面板長時間顯示舊策略。
+    const policyTimer = window.setInterval(() => {
+      if (policyGpu && !isRunning && !busy) void refreshPolicyFor(policyGpu, false);
+    }, 5000);
+    return () => window.clearInterval(policyTimer);
+  });
 
   async function init() {
     try {
@@ -174,12 +188,12 @@
     } catch (e) { errMsg = String(e); }
   }
 
-  async function refreshPolicyFor(instanceId: string) {
+  async function refreshPolicyFor(instanceId: string, showLoading = true) {
     if (!instanceId) return;
-    policyLoading = true;
+    if (showLoading) policyLoading = true;
     try { gpuPolicy.set(await ipc.getGpuAffinityPolicy(instanceId)); }
     catch { gpuPolicy.set(null); }
-    finally { policyLoading = false; }
+    finally { if (showLoading) policyLoading = false; }
   }
 
   function toggleLp(i: number) {
@@ -199,7 +213,7 @@
   async function doStart() {
     confirmAction = null; busy = true; cancelSent = false;
     try {
-      await ipc.startGpuBenchmark({ candidateLps: lps, gpuInstanceId: selectedGpu, workload, warmUpSecs, sampleSecs, repetitions: 5, syncWorkloadAffinity: false, fullscreen, width, height, fpsCap, tripleBuffer, vulkanArgs: buildVulkanArgs(), workloadExePath: null, presentmonPath: null, gamePath: null, windowTitle: null });
+      await ipc.startGpuBenchmark({ candidateLps: lps, gpuInstanceId: selectedGpu, workload, warmUpSecs, sampleSecs, repetitions: 5, syncWorkloadAffinity: false, fullscreen: false, width, height, fpsCap, fpsCapPolicy, tripleBuffer, vulkanArgs: buildVulkanArgs(), workloadExePath: null, presentmonPath: null, gamePath: null, windowTitle: null });
       errMsg = null;
     } catch (e) { errMsg = String(e); }
     finally { busy = false; }
@@ -208,21 +222,26 @@
   async function doCancel() {
     if (cancelPending) return; // 已請求取消，避免重複送出
     busy = true;
-    try { await ipc.cancelBenchmark(); cancelSent = true; }
-    catch (e) { errMsg = String(e); }
+    try {
+      await ipc.cancelBenchmark();
+      cancelSent = true;
+      // 立即讀回後端 state（requested/0%），不等 runner 下一個 capture boundary event
+      benchmarkState.set(await ipc.getBenchmarkState());
+    } catch (e) { errMsg = String(e); }
     finally { busy = false; }
   }
 
   function buildVulkanArgs(): string[] {
-    return [`--fullscreen=${fullscreen ? 1 : 0}`, `--width=${width}`, `--height=${height}`, `--fps_cap=${fpsCap}`, `--triple_buffering=${tripleBuffer ? 1 : 0}`];
+    // 強制視窗模式（fullscreen 已移除）
+    return [`--fullscreen=0`, `--width=${width}`, `--height=${height}`, `--fps_cap=${fpsCap}`, `--triple_buffering=${tripleBuffer ? 1 : 0}`];
   }
 
   // ── GPU 策略 ──
-  async function applyBest() { if (detail?.summary.bestLp != null) confirmAction = 'applyBest'; }
+  async function applyBest() { if (applyTargetLp != null) confirmAction = 'applyBest'; }
   async function confirmApplyBest() {
-    if (detail?.summary.bestLp == null) return;
+    if (applyTargetLp == null) return;
     confirmAction = null; busy = true;
-    try { await ipc.applyBestGpuAffinity(detail.summary.id); errMsg = null; await refreshPolicyFor(detail!.summary.gpuInstanceId || selectedGpu); }
+    try { await ipc.applyBestGpuAffinity(detail!.summary.id); errMsg = null; await refreshPolicyFor(detail!.summary.gpuInstanceId || selectedGpu); }
     catch (e) { errMsg = String(e); }
     finally { busy = false; }
   }
@@ -314,6 +333,16 @@
       case 'Collecting': return $t('gpuTest.stageCollecting') as string;
       case 'Finalizing': return $t('gpuTest.stageFinalizing') as string;
       default: return stage ?? '';
+    }
+  }
+
+  function cancelStageLabel(stage: string | null | undefined): string {
+    switch (stage) {
+      case 'requested': return $t('gpuTest.cancelRequested') as string;
+      case 'stopping': return $t('gpuTest.cancelStopping') as string;
+      case 'restoring': return $t('gpuTest.cancelRestoring') as string;
+      case 'finalizing': return $t('gpuTest.cancelFinalizing') as string;
+      default: return $t('gpuTest.cancelling') as string;
     }
   }
 
@@ -414,15 +443,175 @@
   }
 
   const progress = $derived($benchmarkProgress);
-  const currentRound = $derived(progress?.round ?? null);
+  const currentRound = $derived(progress?.phaseRound ?? null);
   const etaMin = $derived(progress?.etaSecs ? Math.max(1, Math.round(progress.etaSecs / 60)) : null);
   const canApply = $derived(applyStatus?.canApply ?? false);
+  // 視窗完整性顯示（compact 模式）
+  const integrityLabel = $derived.by(() => {
+    const wi = winIntegrity;
+    if (!wi) return '';
+    if (wi.error) return $t('gpuTest.windowIntegrityError') as string;
+    if (wi.retries > 0) return $t('gpuTest.windowIntegrityRetry', { values: { n: wi.retries } }) as string;
+    return $t('gpuTest.windowIntegrityOk') as string;
+  });
+
+  // 新 schema 證據欄位（舊 session 缺欄 → undefined/null）。
+  const verifiedBest = $derived(detail?.summary.verifiedBestLp ?? null);
+  const screeningCandidate = $derived(detail?.summary.screeningCandidateLp ?? null);
+  const screeningRunnerUp = $derived(detail?.summary.screeningRunnerUpLp ?? null);
+  const confirmationWinner = $derived(detail?.summary.confirmationWinnerLp ?? null);
+  const captureQuality = $derived(detail?.summary.captureQuality ?? null);
+  const envStability = $derived(detail?.summary.environmentStability ?? null);
+  // 套用目標：新 schema 用 verifiedBestLp；legacy（無 verifiedBestLp）沿用 bestLp（後端把關）。
+  const applyTargetLp = $derived(verifiedBest ?? detail?.summary.bestLp ?? null);
+  // 前端額外閘：新 schema 只在 verifiedBestLp 存在且 Passed 時啟用；legacy 交由後端。
+  const isVerifiedApplyable = $derived(
+    detail?.summary.verifiedBestLp != null
+      ? detail.summary.reliability?.status === 'Passed'
+      : true,
+  );
+  // 反向驗證結果標籤（reverseRan=false → 未執行；passed → 通過；其餘 → 未定）。
+  const reverseResultLabel = $derived.by(() => {
+    const rel = reliability;
+    if (!rel?.reverseRan) return $t('gpuTest.reverseNotRun') as string;
+    if (rel.reverseVerdict === 'passed') return $t('gpuTest.reversePassed') as string;
+    return $t('gpuTest.reverseInconclusive') as string;
+  });
+
+  // 進行中 phase 由後端明確提供；stage 僅描述單次 capture 的低階步驟。
+  const phaseLabel = $derived.by(() => {
+    const p = $benchmarkProgress;
+    if (!p) return '';
+    const stage = p.stage ?? '';
+    if (stage === 'calibrating') return $t('gpuTest.phaseCalibrating') as string;
+    switch (p.phase) {
+      case 'Screening': return $t('gpuTest.phaseScreening') as string;
+      case 'Refinement': return $t('gpuTest.phaseRefinement') as string;
+      case 'Confirmation': return $t('gpuTest.phaseConfirming') as string;
+      case 'ReverseConfirmation': return $t('gpuTest.phaseReverseConfirming') as string;
+      case 'EquivalentValidation': return $t('gpuTest.phaseEquivalentValidation') as string;
+    }
+    switch (stage) {
+      case 'starting': return $t('gpuTest.phaseStarting') as string;
+      case 'applying': return $t('gpuTest.phaseApplying') as string;
+      case 'launching': return $t('gpuTest.phaseLaunching') as string;
+      case 'collecting': return $t('gpuTest.phaseCollecting') as string;
+      case 'collected': return $t('gpuTest.phaseCollected') as string;
+      case 'finalizing': return $t('gpuTest.phaseFinalizing') as string;
+    }
+    return stage || ($t('gpuTest.phaseUnknown') as string);
+  });
+
+  // ── Equivalent-mode（algorithmVersion=2 且 Reliability=Equivalent）──
+  const isEquivalentMode = $derived(
+    !!detail &&
+      detail.summary.reliability?.status === 'Equivalent' &&
+      (detail.summary.reliability.algorithmVersion ?? 0) === 2,
+  );
+  const equivalentFinalists = $derived(detail?.summary.equivalentFinalistLps ?? []);
+  const equivalentValidation = $derived(detail?.equivalentSafetyValidation ?? null);
+  const equivalentEvidence = $derived(reliability);
+  let selectedEquivalentLp = $state<number | null>(null);
+  const equivalentCurrentInPair = $derived(
+    policyLp != null && equivalentFinalists.length === 2 && equivalentFinalists.includes(policyLp),
+  );
+  const validationStatus = $derived(equivalentValidation?.status ?? 'None');
+  // ImmediatePass（目前核心已在等效組、rounds=0）→ 顯示「無額外 capture」，非一般測試通過。
+  const equivalentAlreadyInPair = $derived(
+    validationStatus === 'Passed' && equivalentValidation?.reason === 'already_in_equivalent_pair',
+  );
+  // 可套用需：驗證 Passed + selected 一致 + 後端判定可套用（含 live reference snapshot 未變）。
+  const equivalentApplyable = $derived(
+    validationStatus === 'Passed' &&
+      equivalentValidation?.selectedLp != null &&
+      equivalentValidation.selectedLp === selectedEquivalentLp &&
+      applyStatus?.canApply === true,
+  );
+  // 套用後（或切換 session）自動選回第一個 finalist。
+  $effect(() => {
+    if (isEquivalentMode && equivalentFinalists.length === 2) {
+      if (selectedEquivalentLp == null || !equivalentFinalists.includes(selectedEquivalentLp)) {
+        selectedEquivalentLp = equivalentFinalists[0];
+      }
+    }
+  });
+  // 驗證 Pending 期間輪詢 session 直到 Passed/Failed/Cancelled。
+  $effect(() => {
+    if (validationStatus !== 'Pending' || !detail) return;
+    const id = detail.summary.id;
+    const timer = setInterval(() => {
+      void pollValidation(id);
+    }, 2000);
+    return () => clearInterval(timer);
+  });
+
+  async function pollValidation(id: string) {
+    try {
+      detail = await ipc.getBenchmarkSession(id);
+      applyStatus = await ipc.getBenchmarkApplyStatus(id);
+    } catch {
+      /* 忽略輪詢錯誤，下次再試 */
+    }
+  }
+
+  async function validateEquivalent() {
+    if (selectedEquivalentLp == null || !detail) return;
+    busy = true;
+    try {
+      await ipc.validateEquivalentCandidate(detail.summary.id, selectedEquivalentLp);
+      errMsg = null;
+      await pollValidation(detail.summary.id);
+    } catch (e) {
+      errMsg = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function applyEquivalent() {
+    if (selectedEquivalentLp == null || !detail) return;
+    busy = true;
+    try {
+      await ipc.applyEquivalentGpuAffinity(detail.summary.id, selectedEquivalentLp);
+      errMsg = null;
+      await loadDetail(detail.summary.id); // 套用後重新載入狀態
+    } catch (e) {
+      errMsg = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function cancelEquivalentValidation() {
+    if (!detail) return;
+    busy = true;
+    try {
+      await ipc.cancelBenchmark();
+      errMsg = null;
+      await pollValidation(detail.summary.id); // 取消後狀態轉 Cancelled/Failed
+    } catch (e) {
+      errMsg = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  function equivalentStatusLabel(s: string): string {
+    switch (s) {
+      case 'Passed': return $t('gpuTest.equivalentValidationPassed') as string;
+      case 'Failed': return $t('gpuTest.equivalentValidationFailed') as string;
+      case 'Pending': return $t('gpuTest.equivalentValidationRunning') as string;
+      case 'Cancelled': return $t('gpuTest.equivalentValidationCancelled') as string;
+      default: return $t('gpuTest.equivalentValidationNotRun') as string;
+    }
+  }
 </script>
 
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <!-- 區段切換控制                                                           -->
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
-<div class="gpu-test">
+<div class="gpu-test" class:compact>
+  {#if !compact}
   <div class="segment-bar" role="tablist" aria-label={$t('nav.gpuTest')}>
     <button
       class="segment-btn"
@@ -465,6 +654,7 @@
       {$t('gpuTest.recoveryBanner')}
     </div>
   {/if}
+  {/if}
 
   <!-- ═══════════════════════════════════════════════════════════════════ -->
   <!-- 測試區段                                                             -->
@@ -472,21 +662,37 @@
   {#if segment === 'test'}
     {#if isRunning}
       <!-- 執行中：精簡進度 UI -->
-      <section class="panel running-panel" aria-live="polite">
-        <h2>{$t('gpuTest.runningTitle')}</h2>
+      <section class="panel running-panel" class:compact aria-live="polite">
+        <h2>{cancelPending ? $t('gpuTest.cancelling') : $t('gpuTest.runningTitle')}</h2>
+        {#if !compact}
         <div class="active-warning" role="alert">
           <strong>{$t('gpuTest.activeWarningZh')}</strong>
           <span class="hint">{$t('gpuTest.activeWarningEn')}</span>
         </div>
-        <dl class="running-meta">
-          <div><dt>{$t('gpuTest.gpuSelect')}</dt><dd>{$gpuDevices.find((d) => d.instanceId === selectedGpu)?.friendlyName ?? selectedGpu}</dd></div>
-          {#if currentRound != null}<div><dt>{$t('gpuTest.repetitions')}</dt><dd>{$t('gpuTest.round', { values: { round: currentRound + 1 } })}</dd></div>{/if}
-          <div><dt>{$t('gpuTest.currentLp')}</dt><dd>{$benchmarkState?.currentLp ?? '—'}</dd></div>
-          <div><dt>{$t('gpuTest.progress')}</dt><dd>{$benchmarkState?.progressPct ?? 0}%</dd></div>
-          {#if etaMin != null}<div><dt>{$t('gpuTest.eta')}</dt><dd>{$t('gpuTest.riskEstimate', { values: { minutes: etaMin } })}</dd></div>{/if}
-          <div><dt>{$t('gpuTest.colStatus')}</dt><dd>{stageLabel($benchmarkState?.stage)}</dd></div>
-        </dl>
-        <div class="progress-track" aria-hidden="true"><div style="width: {($benchmarkState?.progressPct ?? 0)}%"></div></div>
+        {/if}
+        {#if cancelPending}
+          <!-- 取消中：切換為取消專用進度與階段，不顯示原 benchmark 進度冒充取消進度 -->
+          <dl class="running-meta">
+            <div><dt>{$t('gpuTest.cancelProgress')}</dt><dd>{cancelProgressPct}%</dd></div>
+            <div><dt>{$t('gpuTest.colStatus')}</dt><dd>{cancelStageLabel(cancelStage)}</dd></div>
+          </dl>
+          <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={cancelProgressPct} aria-label={$t('gpuTest.cancelling')}>
+            <div style="width: {cancelProgressPct}%"></div>
+          </div>
+        {:else}
+          <dl class="running-meta">
+            {#if !compact}<div><dt>{$t('gpuTest.gpuSelect')}</dt><dd>{$gpuDevices.find((d) => d.instanceId === selectedGpu)?.friendlyName ?? selectedGpu}</dd></div>{/if}
+            {#if currentRound != null}<div><dt>{$t('gpuTest.repetitions')}</dt><dd>{$t('gpuTest.round', { values: { round: currentRound } })}</dd></div>{/if}
+            <div><dt>{$t('gpuTest.currentLpLabel')}</dt><dd>{$benchmarkState?.currentLp ?? '—'}</dd></div>
+            <div><dt>{$t('gpuTest.progressLabel')}</dt><dd>{$benchmarkState?.progressPct ?? 0}%</dd></div>
+            {#if etaMin != null}<div><dt>{$t('gpuTest.etaLabel')}</dt><dd>{$t('gpuTest.riskEstimate', { values: { minutes: etaMin } })}</dd></div>{/if}
+            <div><dt>{$t('gpuTest.colStatus')}</dt><dd>{phaseLabel || stageLabel($benchmarkState?.stage)}</dd></div>
+            <div><dt>{$t('gpuTest.windowIntegrity')}</dt><dd>{integrityLabel || '—'}</dd></div>
+          </dl>
+          <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={$benchmarkState?.progressPct ?? 0} aria-label={$t('gpuTest.runningTitle')}>
+            <div style="width: {($benchmarkState?.progressPct ?? 0)}%"></div>
+          </div>
+        {/if}
         <div class="action-row"><button class="danger" disabled={busy || cancelPending} onclick={doCancel}>{cancelPending ? $t('gpuTest.cancelling') : $t('gpuTest.cancel')}</button></div>
       </section>
     {:else}
@@ -540,11 +746,20 @@
               </button>
               {#if vulkanOptionsOpen}
                 <div class="vulkan-opts">
-                  <label class="field check"><input type="checkbox" bind:checked={fullscreen} /><span>{$t('gpuTest.fullscreen')}</span></label>
-                  <label class="field"><span class="field-label">{$t('gpuTest.width')}</span><input type="number" bind:value={width} min="1" disabled={fullscreen} /></label>
-                  <label class="field"><span class="field-label">{$t('gpuTest.height')}</span><input type="number" bind:value={height} min="1" disabled={fullscreen} /></label>
-                  {#if fullscreen}<span class="hint full-width">{$t('gpuTest.fullscreenResolutionHint')}</span>{/if}
-                  <label class="field"><span class="field-label">{$t('gpuTest.fpsCap')}</span><input type="number" bind:value={fpsCap} min="0" /></label>
+                  <label class="field"><span class="field-label">{$t('gpuTest.width')}</span><input type="number" bind:value={width} min="1" /></label>
+                  <label class="field"><span class="field-label">{$t('gpuTest.height')}</span><input type="number" bind:value={height} min="1" /></label>
+                  <label class="field">
+                    <span class="field-label">{$t('gpuTest.fpsCapPolicyLabel')}</span>
+                    <select bind:value={fpsCapPolicy}>
+                      <option value="Adaptive">{$t('gpuTest.fpsCapAdaptive')}</option>
+                      <option value="Fixed">{$t('gpuTest.fpsCapFixed')}</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span class="field-label">{$t('gpuTest.fpsCap')}</span>
+                    <input type="number" bind:value={fpsCap} min="0" disabled={fpsCapPolicy === 'Adaptive'} />
+                  </label>
+                  {#if fpsCapPolicy === 'Adaptive'}<span class="hint full-width">{$t('gpuTest.fpsCapAdaptiveHint')}</span>{/if}
                   <label class="field check"><input type="checkbox" bind:checked={tripleBuffer} /><span>{$t('gpuTest.tripleBuffer')}</span></label>
                 </div>
               {/if}
@@ -640,7 +855,14 @@
                 <tbody>
                   {#each detail.results as r (r.lp)}
                     <tr>
-                      <td class="lp-cell">{r.lp}{#if r.lp === detail.summary.bestLp}<span class="badge best">{$t(isPassed ? 'gpuTest.bestTag' : 'gpuTest.candidateTag')}</span>{/if}</td>
+                      <td class="lp-cell">{r.lp}
+                        {#if isEquivalentMode}
+                          {#if equivalentFinalists.includes(r.lp)}<span class="badge">{$t('gpuTest.equivalentTag')}</span>{/if}
+                        {:else}
+                          {#if r.lp === applyTargetLp}<span class="badge best">{$t(verifiedBest != null ? 'gpuTest.verifiedTag' : (isPassed ? 'gpuTest.bestTag' : 'gpuTest.candidateTag'))}</span>{/if}
+                          {#if screeningCandidate != null && r.lp === screeningCandidate && r.lp !== applyTargetLp}<span class="badge">{$t('gpuTest.candidateTag')}</span>{/if}
+                        {/if}
+                      </td>
                       <td class={cellClass(r.avgFps, bestAvg, isUnusual(r, 'avgFps'))}>{r.avgFps?.toFixed(1) ?? '—'}</td>
                       <td class={cellClass(r.maxFps, bestMax)}>{r.maxFps?.toFixed(1) ?? '—'}</td>
                       <td class={cellClass(r.minFps, bestMin)}>{r.minFps?.toFixed(1) ?? '—'}</td>
@@ -670,7 +892,7 @@
             <div class="meta-item"><span class="hint">{$t('gpuTest.metaGpu')}</span><span>{detail.summary.gpuName || detail.summary.gpuInstanceId}</span></div>
             <div class="meta-item"><span class="hint">{$t('gpuTest.metaCpuFp')}</span><span class="mono" title={detail.summary.cpuFingerprint}>{detail.summary.cpuFingerprint.slice(0, 12)}…</span></div>
             <div class="meta-item"><span class="hint">{$t('gpuTest.metaApi')}</span><span>{detail.summary.config.workload}</span></div>
-            {#if detail.summary.bestLp != null}<div class="meta-item"><span class="hint">{$t(isPassed ? 'gpuTest.colBest' : 'gpuTest.colCandidate')}</span><span>{detail.summary.bestLp}</span></div>{/if}
+            {#if applyTargetLp != null}<div class="meta-item"><span class="hint">{$t(verifiedBest != null ? 'gpuTest.verifiedBest' : (isPassed ? 'gpuTest.colBest' : 'gpuTest.colCandidate'))}</span><span>{applyTargetLp}</span></div>{/if}
           </div>
 
           <!-- 可靠性摘要 -->
@@ -710,6 +932,126 @@
             </div>
           {/if}
 
+          <!-- Equivalent-mode：實質等效契約（algorithmVersion=2 且 Equivalent） -->
+          {#if isEquivalentMode}
+            <div class="equivalent-block">
+              <div class="equivalent-notice" role="status">
+                <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" fill="currentColor"/></svg>
+                <span>{$t('gpuTest.equivalentNoVerifiedBest')}</span>
+              </div>
+
+              <h3>{$t('gpuTest.equivalentFinalists')}</h3>
+              <div class="equivalent-select" role="radiogroup" aria-label={$t('gpuTest.equivalentFinalists')}>
+                {#each equivalentFinalists as lp (lp)}
+                  <button
+                    class:selected={selectedEquivalentLp === lp}
+                    class:current={policyLp === lp}
+                    role="radio"
+                    aria-checked={selectedEquivalentLp === lp}
+                    onclick={() => (selectedEquivalentLp = lp)}
+                  >
+                    LP {lp}{policyLp === lp ? ` · ${$t('gpuTest.equivalentCurrentCore')}` : ''}
+                  </button>
+                {/each}
+              </div>
+
+              <h3>{$t('gpuTest.equivalentEvidence')}</h3>
+              <dl class="equivalent-evidence">
+                <div><dt>{$t('gpuTest.colAvg')}</dt><dd>{fmtPct(equivalentEvidence?.equivalentAvgImprovementPct)}</dd></div>
+                <div><dt>{$t('gpuTest.colP1')}</dt><dd>{fmtPct(equivalentEvidence?.equivalentP1ImprovementPct)}</dd></div>
+                <div><dt>{$t('gpuTest.colP01')}</dt><dd>{fmtPct(equivalentEvidence?.equivalentP01ImprovementPct)}</dd></div>
+                <div><dt>{$t('gpuTest.evidenceMad')}</dt><dd>{fmtDeltaPp(equivalentEvidence?.equivalentMadDeltaPp)}</dd></div>
+                <div><dt>{$t('gpuTest.evidenceSpike')}</dt><dd>{fmtDeltaPp(equivalentEvidence?.equivalentSpikeDeltaPp)}</dd></div>
+              </dl>
+              <span class="hint">{$t('gpuTest.equivalentThresholds')}</span>
+
+              {#if equivalentCurrentInPair}
+                <div class="hint equivalent-hint">{$t('gpuTest.equivalentCurrentInPairHint')}</div>
+              {:else}
+                <div class="hint equivalent-hint">{$t('gpuTest.equivalentCaptureHint')}</div>
+              {/if}
+
+              {#if validationStatus !== 'None'}
+                <div class="equivalent-validation" class:passed={validationStatus === 'Passed'} class:failed={validationStatus === 'Failed' || validationStatus === 'Cancelled'}>
+                  <span class="badge">{equivalentStatusLabel(validationStatus)}</span>
+                  {#if equivalentValidation?.reason && (validationStatus === 'Failed' || validationStatus === 'Cancelled')}
+                    <span class="hint">{errText(equivalentValidation.reason)}</span>
+                  {/if}
+                  {#if equivalentAlreadyInPair}
+                    <span class="hint">{$t('gpuTest.equivalentAlreadyInPair')}</span>
+                  {:else if validationStatus === 'Passed' && equivalentValidation}
+                    <dl class="equivalent-evidence">
+                      <div><dt>{$t('gpuTest.colAvg')}</dt><dd>{fmtPct(equivalentValidation.avgImprovementPct)}</dd></div>
+                      <div><dt>{$t('gpuTest.colP1')}</dt><dd>{fmtPct(equivalentValidation.p1ImprovementPct)}</dd></div>
+                      <div><dt>{$t('gpuTest.colP01')}</dt><dd>{fmtPct(equivalentValidation.p01ImprovementPct)}</dd></div>
+                      <div><dt>{$t('gpuTest.evidenceMad')}</dt><dd>{fmtDeltaPp(equivalentValidation.madDeltaPp)}</dd></div>
+                      <div><dt>{$t('gpuTest.evidenceSpike')}</dt><dd>{fmtDeltaPp(equivalentValidation.spikeDeltaPp)}</dd></div>
+                    </dl>
+                  {/if}
+                </div>
+              {/if}
+
+              <div class="policy-actions">
+                <button
+                  class="primary"
+                  disabled={busy || recoveryRequired || validationStatus === 'Pending' || selectedEquivalentLp == null}
+                  onclick={validateEquivalent}
+                >
+                  {validationStatus === 'Pending' ? $t('gpuTest.equivalentValidationRunning') : $t('gpuTest.equivalentValidate')}
+                </button>
+                {#if validationStatus === 'Pending'}
+                  <button class="danger" disabled={busy} onclick={cancelEquivalentValidation}>{$t('gpuTest.cancel')}</button>
+                {/if}
+                {#if equivalentApplyable}
+                  <button class="primary" disabled={busy || recoveryRequired} onclick={applyEquivalent}>{$t('gpuTest.equivalentApply')}</button>
+                {/if}
+              </div>
+            </div>
+          {/if}
+
+          <!-- 新 schema 證據：篩選候選/亞軍、前向勝者、反向驗證、已驗證核心 -->
+          {#if detail.summary.status === 'Completed' && !isEquivalentMode}
+            <div class="evidence-block">
+              <h3>{$t('gpuTest.evidenceTitle')}</h3>
+              <dl class="evidence-grid">
+                <div class="evidence-item"><dt>{$t('gpuTest.screeningCandidate')}</dt><dd>{screeningCandidate != null ? `LP ${screeningCandidate}` : '—'}</dd></div>
+                <div class="evidence-item"><dt>{$t('gpuTest.screeningRunnerUp')}</dt><dd>{screeningRunnerUp != null ? `LP ${screeningRunnerUp}` : '—'}</dd></div>
+                <div class="evidence-item"><dt>{$t('gpuTest.confirmationWinner')}</dt><dd>{confirmationWinner != null ? `LP ${confirmationWinner}` : '—'}</dd></div>
+                <div class="evidence-item"><dt>{$t('gpuTest.reverseResult')}</dt><dd>{reverseResultLabel}</dd></div>
+                <div class="evidence-item verified"><dt>{$t('gpuTest.verifiedBest')}</dt><dd>{verifiedBest != null ? `LP ${verifiedBest}` : '—'}</dd></div>
+              </dl>
+            </div>
+          {/if}
+
+          {#if captureQuality}
+            <div class="evidence-block">
+              <h3>{$t('gpuTest.captureQualityTitle')}</h3>
+              <dl class="evidence-grid">
+                <div><dt>{$t('gpuTest.captureTotal')}</dt><dd>{captureQuality.totalCaptures}</dd></div>
+                <div><dt>{$t('gpuTest.captureValid')}</dt><dd>{captureQuality.validCaptures}</dd></div>
+                <div><dt>{$t('gpuTest.captureInvalid')}</dt><dd>{captureQuality.invalidCaptures}</dd></div>
+                <div><dt>{$t('gpuTest.captureWindowInvalid')}</dt><dd>{captureQuality.windowInvalidCaptures ?? 0}</dd></div>
+                <div><dt>{$t('gpuTest.captureWindowRetry')}</dt><dd>{captureQuality.windowRetryCaptures ?? 0}</dd></div>
+                <div><dt>{$t('gpuTest.captureOverflowed')}</dt><dd>{captureQuality.overflowedPresentEvents}</dd></div>
+                <div><dt>{$t('gpuTest.captureEtwLost')}</dt><dd>{captureQuality.etwEventsLost}</dd></div>
+                <div><dt>{$t('gpuTest.captureEffectiveFpsCap')}</dt><dd>{captureQuality.effectiveFpsCap > 0 ? captureQuality.effectiveFpsCap : $t('gpuTest.captureUnlimited')}</dd></div>
+                <div><dt>{$t('gpuTest.captureBufferSize')}</dt><dd>{captureQuality.circularBufferSize}</dd></div>
+                <div><dt>{$t('gpuTest.captureIntegrityPassed')}</dt><dd>{captureQuality.integrityPassed ? $t('gpuTest.boolYes') : $t('gpuTest.boolNo')}</dd></div>
+              </dl>
+            </div>
+          {/if}
+
+          {#if envStability}
+            <div class="evidence-block">
+              <h3>{$t('gpuTest.envStabilityTitle')}</h3>
+              <dl class="evidence-grid">
+                <div><dt>{$t('gpuTest.envStabilityPassed')}</dt><dd>{envStability.passed ? $t('gpuTest.envStable') : $t('gpuTest.envUnstable')}</dd></div>
+                <div><dt>{$t('gpuTest.envDriftReruns')}</dt><dd>{envStability.driftReruns}</dd></div>
+                {#if !envStability.passed && envStability.error}<div><dt>{$t('gpuTest.envError')}</dt><dd>{errText(envStability.error)}</dd></div>{/if}
+              </dl>
+            </div>
+          {/if}
+
           <!-- 套用最佳 + GPU 策略 -->
           <div class="policy-section">
             <div class="policy-header">
@@ -724,18 +1066,19 @@
                 <div><dt>{$t('gpuTest.policyOverride')}</dt><dd class="mono">{$gpuPolicy.assignmentSetOverride?.bytes?.map((b) => b.toString(16).padStart(2, '0')).join(' ') ?? '—'}</dd></div>
                 <div><dt>{$t('gpuTest.policyLp')}</dt><dd>{policyLp != null ? policyLp : $t('gpuTest.policyNone')}</dd></div>
               </dl>
+              <p class="hint">{$t('gpuTest.policyReadbackHint')}</p>
             {:else}
               <span class="hint">{$t('gpuTest.policyNone')}</span>
             {/if}
 
             <div class="policy-actions">
-              {#if detail.summary.status === 'Completed' && detail.summary.bestLp != null}
-                <button class="primary" disabled={busy || !canApply || recoveryRequired} onclick={applyBest} title={canApply ? '' : (errText(applyStatus?.reason ?? null) || '')}>
-                  {$t(isPassed ? 'gpuTest.applyBest' : 'gpuTest.applyCandidate')}
+              {#if detail.summary.status === 'Completed' && applyTargetLp != null}
+                <button class="primary" disabled={busy || !canApply || !isVerifiedApplyable || recoveryRequired} onclick={applyBest} title={!canApply ? (errText(applyStatus?.reason ?? null) || '') : ''}>
+                  {$t(verifiedBest != null ? 'gpuTest.applyVerified' : (isPassed ? 'gpuTest.applyBest' : 'gpuTest.applyCandidate'))}
                 </button>
                 {#if !canApply && applyStatus?.reason}<span class="hint apply-reason">{errText(applyStatus.reason)}</span>{/if}
-                {#if policyLp != null && policyLp !== detail.summary.bestLp}
-                  <span class="hint mismatch">{$t('gpuTest.policyMismatch', { values: { current: policyLp, best: detail.summary.bestLp } })}</span>
+                {#if policyLp != null && policyLp !== applyTargetLp}
+                  <span class="hint mismatch">{$t('gpuTest.policyMismatch', { values: { current: policyLp, best: applyTargetLp } })}</span>
                 {/if}
               {/if}
               <button disabled={busy || recoveryRequired} onclick={restorePrevious}>{$t('gpuTest.restore')}</button>
@@ -802,13 +1145,14 @@
 </div>
 
 <style>
-  .gpu-test { display: flex; flex-direction: column; gap: var(--space-3); }
+  .gpu-test { display: flex; flex-direction: column; gap: var(--space-4); }
 
   /* ── 區段切換 ── */
   .segment-bar {
     display: flex;
     gap: 2px;
     background: var(--surface-2);
+    border: 1px solid var(--border-subtle);
     border-radius: var(--radius-md);
     padding: 3px;
     width: fit-content;
@@ -820,125 +1164,127 @@
     background: transparent;
     border: none;
     border-radius: var(--radius-sm);
-    padding: var(--space-2) var(--space-4);
-    height: 32px;
+    padding: 0 var(--space-4);
+    height: 34px;
     font-size: 13px;
     font-weight: var(--font-weight-medium);
     color: var(--text-secondary);
     cursor: pointer;
-    transition: all var(--transition-fast);
+    transition: background var(--transition-fast), color var(--transition-fast);
   }
   .segment-btn:hover:not(:disabled) { color: var(--text-primary); }
-  .segment-btn.active { background: var(--surface-0); color: var(--text-primary); font-weight: var(--font-weight-medium); box-shadow: var(--shadow-xs); }
+  .segment-btn.active { background: var(--surface-1); color: var(--text-primary); font-weight: var(--font-weight-semibold); box-shadow: var(--shadow-xs); }
   .segment-btn:disabled { opacity: 0.4; cursor: default; }
 
   /* ── Recovery banner ── */
   .recovery-banner {
     display: flex; align-items: center; gap: var(--space-2);
-    padding: var(--space-3); background: var(--danger-muted);
+    padding: var(--space-3) var(--space-4); background: var(--danger-muted);
     border: 1px solid var(--danger); border-radius: var(--radius-md);
     color: var(--danger); font-weight: var(--font-weight-medium); font-size: 13px;
   }
 
   /* ── 面板 ── */
-  .panel { background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: var(--space-4); }
-  .panel h2 { margin: 0 0 var(--space-3); font-size: 14px; }
+  .panel { background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); padding: var(--space-5); }
+  .panel h2 { margin: 0 0 var(--space-4); font-size: 15px; font-weight: var(--font-weight-semibold); }
   .running-panel { border-color: var(--accent); }
 
   /* ── 表單 ── */
-  .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: var(--space-3) var(--space-4); }
-  .field { display: flex; flex-direction: column; gap: 4px; }
+  .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: var(--space-4); }
+  .field { display: flex; flex-direction: column; gap: 6px; }
   .field.check { flex-direction: row; align-items: center; gap: var(--space-2); }
   .field.full-width { grid-column: 1 / -1; }
   .field-label { color: var(--text-secondary); font-size: 12px; font-weight: var(--font-weight-medium); }
 
-  .lp-chips { display: flex; flex-wrap: wrap; gap: 5px; }
-  .lp-chips button { min-width: 32px; padding: 3px 8px; text-align: center; font-size: 12px; }
+  .lp-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .lp-chips button { min-width: 36px; height: var(--control-sm); padding: 0 10px; text-align: center; font-size: 12px; }
   .lp-chips button.selected { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
 
   .vulkan-group { margin-top: var(--space-1); }
-  .vulkan-opts { display: flex; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-2); padding: var(--space-3); background: var(--surface-2); border-radius: var(--radius-sm); }
+  .vulkan-opts { display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-4); margin-top: var(--space-2); padding: var(--space-4); background: var(--surface-2); border-radius: var(--radius-md); }
 
   .section-toggle {
     display: flex; align-items: center; gap: var(--space-2);
     background: none; border: none; color: var(--text-secondary);
-    font: inherit; font-size: 12px; cursor: pointer; padding: 0;
+    font: inherit; font-size: 12px; font-weight: var(--font-weight-medium); cursor: pointer; padding: 0;
   }
+  .section-toggle:hover { color: var(--text-primary); }
   .section-toggle svg { transition: transform var(--transition-fast); }
   .section-toggle svg.rotated { transform: rotate(90deg); }
 
-  .action-row { display: flex; align-items: center; justify-content: space-between; margin-top: var(--space-4); gap: var(--space-3); }
+  .action-row { display: flex; align-items: center; justify-content: space-between; margin-top: var(--space-4); gap: var(--space-3); flex-wrap: wrap; }
 
-  .error-msg { display: flex; align-items: center; gap: var(--space-2); color: var(--danger); font-size: 12px; margin-top: var(--space-2); }
+  .error-msg { display: flex; align-items: center; gap: var(--space-2); color: var(--danger); font-size: 12px; margin-top: var(--space-3); }
 
   /* ── 執行中 ── */
-  .active-warning { background: var(--surface-2); border: 1px solid var(--accent); border-radius: var(--radius-sm); padding: var(--space-3); display: flex; flex-direction: column; gap: 2px; margin-bottom: var(--space-3); }
+  .active-warning { background: var(--surface-2); border: 1px solid var(--accent); border-radius: var(--radius-md); padding: var(--space-4); display: flex; flex-direction: column; gap: 2px; margin-bottom: var(--space-4); }
   .active-warning strong { color: var(--accent); font-size: 15px; }
-  .running-meta { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: var(--space-2) var(--space-4); margin: 0 0 var(--space-3); }
+  .running-meta { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--space-3) var(--space-4); margin: 0 0 var(--space-4); }
   .running-meta dt { color: var(--text-secondary); font-size: 11px; }
-  .running-meta dd { margin: 0; font-size: 13px; }
+  .running-meta dd { margin: 0; font-size: 13.5px; font-weight: var(--font-weight-medium); }
 
   /* ── Results workspace ── */
-  .results-workspace { display: flex; gap: 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); overflow: hidden; }
+  .results-workspace { display: flex; gap: 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); overflow: hidden; background: var(--surface-0); }
 
-  .session-list { width: 240px; flex-shrink: 0; background: var(--surface-1); border-right: 1px solid var(--border-subtle); display: flex; flex-direction: column; }
-  .session-list-head { padding: var(--space-2) var(--space-3); border-bottom: 1px solid var(--border-subtle); }
+  .session-list { width: 252px; flex-shrink: 0; background: var(--surface-1); border-right: 1px solid var(--border-subtle); display: flex; flex-direction: column; }
+  .session-list-head { padding: var(--space-3); border-bottom: 1px solid var(--border-subtle); }
   .session-item {
-    display: flex; flex-direction: column; gap: 2px; width: 100%; text-align: left;
+    display: flex; flex-direction: column; gap: 3px; width: 100%; text-align: left;
     background: transparent; border: none; border-bottom: 1px solid var(--border-subtle);
-    border-radius: 0; padding: var(--space-2) var(--space-3); height: auto; cursor: pointer;
+    border-radius: 0; padding: var(--space-3); height: auto; cursor: pointer;
   }
   .session-item:hover { background: var(--surface-2); }
   .session-item.active { background: var(--accent-muted); border-left: 3px solid var(--accent); padding-left: calc(var(--space-3) - 3px); }
   .session-item-top { display: flex; align-items: center; justify-content: space-between; gap: var(--space-1); }
   .session-date { font-size: 12px; font-weight: var(--font-weight-medium); }
-  .session-item-meta { display: flex; gap: var(--space-2); font-size: 11px; }
+  .session-item-meta { display: flex; gap: var(--space-2); font-size: 11px; flex-wrap: wrap; }
   .session-item-foot { display: flex; justify-content: space-between; gap: var(--space-2); }
-  .empty-hint { padding: var(--space-4); text-align: center; }
+  .empty-hint { padding: var(--space-5); text-align: center; }
 
   /* Status badges */
-  .badge { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; font-weight: var(--font-weight-medium); padding: 0 5px; border-radius: var(--radius-xs); line-height: 16px; }
+  .badge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: var(--font-weight-medium); padding: 1px 8px; border-radius: var(--radius-full); line-height: 18px; }
   .badge.status-completed { background: var(--success-muted); color: var(--success); }
   .badge.status-failed, .badge.status-cancelled { background: var(--danger-muted); color: var(--danger); }
   .badge.best { background: var(--accent); color: var(--accent-text); }
   .badge.warn { background: var(--warning-muted); color: var(--warning); }
 
-  .session-detail { flex: 1; min-width: 0; background: var(--surface-0); padding: var(--space-4); }
-  .detail-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-3); flex-wrap: wrap; }
-  .detail-head h2 { margin: 0; font-size: 14px; flex: 1; }
+  .session-detail { flex: 1; min-width: 0; background: var(--surface-0); padding: var(--space-5); }
+  .detail-head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-4); flex-wrap: wrap; }
+  .detail-head h2 { margin: 0; font-size: 15px; flex: 1; }
   .detail-head-badges { display: flex; align-items: center; gap: var(--space-2); }
   .detail-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: var(--space-3); height: 100%; color: var(--text-secondary); }
 
   /* 指標表格 */
-  .table-scroll { overflow-x: auto; margin-bottom: var(--space-3); }
+  .table-scroll { overflow-x: auto; margin-bottom: var(--space-4); }
   .metric-table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-  .metric-table th, .metric-table td { padding: 5px 8px; border-bottom: 1px solid var(--border-subtle); text-align: right; white-space: nowrap; }
+  .metric-table th, .metric-table td { padding: 9px 12px; border-bottom: 1px solid var(--border-subtle); text-align: right; white-space: nowrap; }
   .metric-table th:first-child, .metric-table td:first-child { text-align: left; }
-  .metric-table th { color: var(--text-secondary); font-size: 11px; font-weight: var(--font-weight-medium); }
+  .metric-table th { color: var(--text-secondary); font-size: 11px; font-weight: var(--font-weight-semibold); letter-spacing: 0.03em; text-transform: uppercase; }
+  .metric-table tbody tr:hover { background: var(--surface-1); }
   td.best { background: var(--accent-muted); color: var(--accent); font-weight: var(--font-weight-medium); }
   td.second { background: color-mix(in srgb, var(--accent-muted) 50%, transparent); }
   td.unusual-value { color: var(--warning); }
   .lp-cell { font-weight: var(--font-weight-medium); }
 
   /* Meta */
-  .meta-strip { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-5); margin-bottom: var(--space-4); }
-  .meta-item { display: flex; flex-direction: column; gap: 1px; }
-  .mono { font-family: 'IBM Plex Sans TC', monospace; font-size: 11px; }
+  .meta-strip { display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-6); margin-bottom: var(--space-4); }
+  .meta-item { display: flex; flex-direction: column; gap: 2px; }
+  .mono { font-family: 'IBM Plex Sans TC', monospace; font-size: 11.5px; }
 
   /* Policy */
-  .policy-section { background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: var(--space-3); }
-  .policy-header { display: flex; align-items: baseline; gap: var(--space-3); margin-bottom: var(--space-2); }
+  .policy-section { background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: var(--space-4); }
+  .policy-header { display: flex; align-items: baseline; gap: var(--space-3); margin-bottom: var(--space-3); }
   .policy-header h3 { margin: 0; font-size: 13px; font-weight: var(--font-weight-semibold); }
-  .policy-list { display: flex; flex-direction: column; gap: 4px; margin: 0 0 var(--space-2); }
+  .policy-list { display: flex; flex-direction: column; gap: 6px; margin: 0 0 var(--space-3); }
   .policy-list div { display: flex; gap: var(--space-3); }
-  .policy-list dt { color: var(--text-secondary); min-width: 110px; font-size: 12px; }
+  .policy-list dt { color: var(--text-secondary); min-width: 120px; font-size: 12px; }
   .policy-list dd { margin: 0; font-size: 12px; }
   .policy-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
   .apply-reason, .mismatch { max-width: 360px; }
   .mismatch { color: var(--warning); }
 
   /* Reliability */
-  .reliability-block { display: flex; flex-direction: column; gap: var(--space-2); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: var(--space-3); margin-bottom: var(--space-4); }
+  .reliability-block { display: flex; flex-direction: column; gap: var(--space-3); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: var(--space-4); margin-bottom: var(--space-4); }
   .reliability-block.rel-passed { border-color: var(--success); }
   .reliability-block.rel-equivalent { border-color: var(--accent); }
   .reliability-block.rel-inconclusive { border-color: var(--warning); }
@@ -954,12 +1300,79 @@
   .rel-note { font-size: 11px; }
   .rel-pcts { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); font-size: 12px; font-variant-numeric: tabular-nums; }
 
+  /* Evidence */
+  .evidence-block { border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: var(--space-4); margin-bottom: var(--space-4); }
+  .evidence-block h3 { margin: 0 0 var(--space-3); font-size: 13px; font-weight: var(--font-weight-semibold); }
+  .evidence-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--space-2) var(--space-4); margin: 0; }
+  .evidence-grid div { display: flex; flex-direction: column; gap: 2px; }
+  .evidence-grid dt { color: var(--text-secondary); font-size: 11px; }
+  .evidence-grid dd { margin: 0; font-size: 13px; font-weight: var(--font-weight-medium); }
+  .evidence-item.verified dd { color: var(--success); }
+
+  /* Equivalent-mode */
+  .equivalent-block { display: flex; flex-direction: column; gap: var(--space-3); border: 1px solid var(--accent); border-radius: var(--radius-md); padding: var(--space-4); margin-bottom: var(--space-4); }
+  .equivalent-block h3 { margin: var(--space-2) 0 0; font-size: 13px; font-weight: var(--font-weight-semibold); }
+  .equivalent-notice { display: flex; align-items: center; gap: var(--space-2); color: var(--accent); font-size: 13px; font-weight: var(--font-weight-medium); }
+  .equivalent-select { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+  .equivalent-select button { min-width: 96px; }
+  .equivalent-select button.selected { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  .equivalent-select button.current { border-color: var(--accent); }
+  .equivalent-evidence { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-4); margin: 0; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .equivalent-evidence div { display: flex; gap: var(--space-2); }
+  .equivalent-evidence dt { color: var(--text-secondary); }
+  .equivalent-evidence dd { margin: 0; font-weight: var(--font-weight-medium); }
+  .equivalent-hint { font-size: 12px; }
+  .equivalent-validation { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-3); border-radius: var(--radius-md); background: var(--surface-2); }
+  .equivalent-validation.passed { border: 1px solid var(--success); }
+  .equivalent-validation.failed { border: 1px solid var(--warning); }
+
   /* Progress */
-  .progress-track { height: 6px; background: var(--surface-2); border-radius: var(--radius-full); overflow: hidden; margin-bottom: var(--space-2); }
+  .progress-track { height: 8px; background: var(--surface-2); border-radius: var(--radius-full); overflow: hidden; margin-bottom: var(--space-3); }
   .progress-track > div { height: 100%; background: var(--accent); transition: width 0.3s; border-radius: var(--radius-full); }
 
   @media (max-width: 999px) {
     .results-workspace { flex-direction: column; }
     .session-list { width: 100%; border-right: none; border-bottom: 1px solid var(--border-subtle); }
+  }
+
+  /* ── compact progress 模式：內容壓縮、無滾動、cancel 固定可見 ── */
+  .gpu-test.compact { height: 100%; }
+  .gpu-test.compact .running-panel {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    padding: var(--space-3);
+  }
+  .gpu-test.compact .running-panel h2 {
+    flex: 0 0 auto;
+    margin: 0 0 var(--space-2);
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .gpu-test.compact .running-meta {
+    flex: 0 0 auto;
+    grid-template-columns: 1fr 1fr;
+    gap: var(--space-2) var(--space-3);
+    margin: 0 0 var(--space-2);
+  }
+  .gpu-test.compact .running-meta dt { font-size: 10.5px; }
+  .gpu-test.compact .running-meta dd {
+    font-size: 12.5px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .gpu-test.compact .progress-track {
+    flex: 0 0 auto;
+    margin-bottom: var(--space-2);
+  }
+  .gpu-test.compact .action-row {
+    flex: 0 0 auto;
+    margin-top: auto;
+    padding-top: var(--space-2);
   }
 </style>

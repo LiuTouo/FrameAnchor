@@ -107,21 +107,28 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 6px;
+    margin-bottom: 10px;
   }
   .badge.adjusted {
-    background: rgba(240, 163, 60, 0.2);
-    color: #f0a33c;
+    background: var(--warning-muted);
+    color: var(--warning);
   }
   .presets {
     display: flex;
     flex-wrap: wrap;
     gap: 6px;
-    margin-bottom: 8px;
+    margin-bottom: 12px;
+  }
+  .presets button {
+    height: var(--control-sm);
+    padding: 0 var(--space-3);
+    font-size: 12px;
+    border-radius: var(--radius-full);
   }
   .presets button.active {
     border-color: var(--accent);
     color: var(--accent);
+    background: var(--accent-muted);
   }
   .presets button:disabled {
     opacity: 0.8;
@@ -129,29 +136,29 @@
   .grid {
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 4px;
     padding: 2px;
   }
   .core-row {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
   }
   .core-label {
-    width: 90px;
+    width: 92px;
     flex-shrink: 0;
     color: var(--muted);
     font-size: 12px;
     display: flex;
     align-items: center;
-    gap: 5px;
+    gap: 6px;
   }
   .badge.p {
-    background: rgba(79, 140, 255, 0.2);
+    background: var(--accent-muted);
     color: var(--accent);
   }
   .badge.e {
-    background: rgba(139, 152, 171, 0.2);
+    background: var(--surface-3);
     color: var(--muted);
   }
   .lps {

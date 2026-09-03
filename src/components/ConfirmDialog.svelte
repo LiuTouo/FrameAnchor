@@ -158,12 +158,12 @@
 
   .dialog {
     display: flex;
-    gap: 14px;
+    gap: var(--space-4);
     width: min(440px, 100%);
-    padding: var(--space-5);
+    padding: var(--space-6);
     background: var(--surface-1);
     border: 1px solid var(--border-default);
-    border-radius: var(--radius-lg);
+    border-radius: var(--radius-xl);
     box-shadow: var(--shadow-lg);
   }
 
@@ -216,8 +216,8 @@
   .actions {
     display: flex;
     justify-content: flex-end;
-    gap: var(--space-2);
-    margin-top: var(--space-5);
+    gap: var(--space-3);
+    margin-top: var(--space-6);
   }
 
   .danger-primary {

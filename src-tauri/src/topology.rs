@@ -22,6 +22,8 @@ pub struct Topology {
     pub has_smt: bool,                             // 有任何核心 >1 LP
     pub has_hybrid: bool,                          // EfficiencyClass 不全相同
     pub total_lp: u32,
+    /// 偵測到的處理器群組數。>1 = 多群組系統，拓撲僅含 group 0（PLAN §15.1）。
+    pub processor_groups: u32,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -64,6 +66,9 @@ pub fn enumerate_topology() -> Result<Topology, TopologyError> {
 
     // 3) 走訪可變長結構鏈
     let mut raw_cores: Vec<(Vec<u32>, u8, bool)> = Vec::new(); // (lp_indices, efficiency, is_smt)
+    // 偵測到的群組編號。僅 group 0 進拓撲：group 1 的「群組內 LP index」與 group 0
+    // 重疊，混入會讓 mask 靜默指向錯誤核心（PLAN §15.1：多群組 → 警告，不支援）。
+    let mut groups: std::collections::BTreeSet<u16> = std::collections::BTreeSet::new();
     let mut offset = 0usize;
     while offset < needed as usize {
         let header = unsafe {
@@ -71,16 +76,17 @@ pub fn enumerate_topology() -> Result<Topology, TopologyError> {
         };
         if header.Relationship == RelationProcessorCore {
             let proc_rel: PROCESSOR_RELATIONSHIP = unsafe { header.Anonymous.Processor };
-            // v1：只用 group 0（PLAN §15 限制，>64 邏輯核心不支援）
-            if proc_rel.GroupCount >= 1 {
-                let group_mask = proc_rel.GroupMask[0];
-                let lp_indices = mask_to_indices(group_mask.Mask as u64);
-                if !lp_indices.is_empty() {
-                    raw_cores.push((
-                        lp_indices,
-                        proc_rel.EfficiencyClass,
-                        proc_rel.Flags == LTP_PC_SMT,
-                    ));
+            for ga in proc_rel.GroupMask.iter().take(proc_rel.GroupCount as usize) {
+                groups.insert(ga.Group);
+                if ga.Group == 0 {
+                    let lp_indices = mask_to_indices(ga.Mask as u64);
+                    if !lp_indices.is_empty() {
+                        raw_cores.push((
+                            lp_indices,
+                            proc_rel.EfficiencyClass,
+                            proc_rel.Flags == LTP_PC_SMT,
+                        ));
+                    }
                 }
             }
         }
@@ -90,7 +96,9 @@ pub fn enumerate_topology() -> Result<Topology, TopologyError> {
         offset += header.Size as usize;
     }
 
-    Ok(build_topology(raw_cores))
+    let mut topo = build_topology(raw_cores);
+    topo.processor_groups = groups.len() as u32;
+    Ok(topo)
 }
 
 /// mask 的 set bits → LP indices
@@ -143,6 +151,7 @@ pub fn build_topology(mut raw_cores: Vec<(Vec<u32>, u8, bool)>) -> Topology {
         has_smt,
         has_hybrid,
         total_lp,
+        processor_groups: 1,
     }
 }
 

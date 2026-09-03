@@ -71,7 +71,11 @@ export interface Topology {
   hasSmt: boolean;
   hasHybrid: boolean;
   totalLp: number;
+  processorGroups: number; // 偵測到的處理器群組數；>1 = 多群組，僅 group 0 列入拓撲
 }
+
+/** 套用策略：Hard/CpuSets = currentCores 為已驗證實際核心；Prefer = 偏好提示；None = 未套用 */
+export type AffinityStrategy = 'None' | 'Hard' | 'CpuSets' | 'Prefer';
 
 export interface AppliedProcess {
   pid: number;
@@ -89,6 +93,7 @@ export interface AppliedProcess {
   softAffinity: boolean; // true = 軟綁定，currentCores 為偏好清單
   threadIdealAttempted: number | null; // 執行緒 ideal 嘗試數；null = 非此路徑
   threadIdealSucceeded: number | null; // 執行緒 ideal 成功數；succeeded < attempted = partial
+  strategy: AffinityStrategy; // Hard/CpuSets = 已驗證；Prefer = 未驗證偏好；None = 未套用
 }
 
 export interface WindowInfo {
@@ -131,6 +136,9 @@ export type SessionStatus = 'Pending' | 'Running' | 'Completed' | 'Failed' | 'Ca
 export type BenchmarkStage = 'Init' | 'Warmup' | 'Collecting' | 'Finalizing';
 export type WorkloadKind = 'Vulkan' | 'D3D9';
 export type ReliabilityStatus = 'Unassessed' | 'Passed' | 'Equivalent' | 'Inconclusive';
+export type FpsCapPolicy = 'Adaptive' | 'Fixed';
+export type BenchmarkOperation = 'Benchmark' | 'EquivalentValidation';
+export type WindowLayout = 'Normal' | 'CompactProgress';
 
 /** 可靠性/信心摘要（camelCase，與後端 ReliabilitySummary 一致） */
 export interface ReliabilitySummary {
@@ -150,11 +158,25 @@ export interface ReliabilitySummary {
   p1LowPct: number | null;
   p01LowPct: number | null;
   // 新排程（篩選 + 確認）證據欄位：
-  screeningRounds: number; // 篩選 round 數（固定 2）；舊 session 缺欄為 0
+  screeningRounds: number; // 篩選 round 數（固定 3）；舊 session 缺欄為 0
   confirmationRounds: number; // 確認 round 數（3..=5）；舊 session 缺欄為 0
   ciLowerPct: number | null; // bootstrap 穩定性區間下界（%）；欄位名保留 ciLowerPct 供向後相容，非信賴區間
   ciUpperPct: number | null; // bootstrap 穩定性區間上界（%）；欄位名保留 ciUpperPct 供向後相容，非信賴區間
   stoppingReason: string; // 'passed' | 'equivalent' | 'inconclusive' | ''（舊 session）
+  // 前向/反向驗證 phase 證據（新排程；舊 session 缺欄 → 後端 serde default 仍會發出）：
+  forwardVerdict?: string; // 'passed' | 'reversal' | 'equivalent' | 'inconclusive' | ''
+  reverseRan?: boolean;
+  reverseVerdict?: string; // 'passed' | 'inconclusive' | ''
+  reverseCandidateLp?: number | null;
+  reverseRounds?: number;
+  // 演算法版本：新確認演算法（有界 log-ratio + 等效判定）為 2；舊 session 缺欄 → 0
+  algorithmVersion?: number;
+  // 等效判定的 raw median evidence（僅 Equivalent 判定時有值；% 或 pp）：
+  equivalentAvgImprovementPct?: number | null;
+  equivalentP1ImprovementPct?: number | null;
+  equivalentP01ImprovementPct?: number | null;
+  equivalentMadDeltaPp?: number | null;
+  equivalentSpikeDeltaPp?: number | null;
 }
 
 export interface GpuDevice {
@@ -175,6 +197,7 @@ export interface BenchmarkConfig {
   width: number; // 1280
   height: number; // 720
   fpsCap: number; // 0 = 不限
+  fpsCapPolicy?: FpsCapPolicy; // 校準策略：Adaptive（預設，忽略 fpsCap，依校準選定）| Fixed（沿用 fpsCap）
   tripleBuffer: boolean;
   vulkanArgs: string[]; // workload=Vulkan 時必須非空
   workloadExePath: string | null; // 覆寫（測試/除錯）
@@ -207,14 +230,26 @@ export interface LpResult {
 }
 
 /** 執行期 progress 事件（`gpu-benchmark-progress`） */
+export type BenchmarkPhase =
+  | 'Screening'
+  | 'Refinement'
+  | 'Confirmation'
+  | 'ReverseConfirmation'
+  | 'EquivalentValidation';
+
 export interface BenchmarkProgress {
   sessionId: string;
   stage: string; // starting/applying/launching/collecting/collected/finalizing
   round: number | null;
+  phase?: BenchmarkPhase | null;
+  phaseRound?: number | null;
   lp: number | null;
   percentage: number;
   etaSecs: number | null;
   error: string | null;
+  cancelStage?: string | null; // 取消專用階段（requested/stopping/restoring/finalizing）；非取消為 null
+  cancelProgress?: number | null; // 取消專用百分比 0..100（單調）；非取消為 null
+  windowIntegrity?: WindowIntegrity | null; // workload 視窗完整性快照（狀態改變才附帶；None = 未回報）
 }
 
 /** 執行期間的原始取樣 */
@@ -239,18 +274,86 @@ export interface SessionSummary {
   totalBytes: number; // 整個 session 資料夾位元組數（即時計算）
   config: BenchmarkConfig;
   error: string | null; // 終結失敗原因（i18n errors.* 代碼）；成功/取消為 null
+  // 新 schema（舊 session 缺欄 → 後端 serde default 仍會發出）：
+  screeningCandidateLp?: number | null; // 篩選（1 輪）+ refinement（2 輪）後的 Top 1 候選 LP
+  screeningRunnerUpLp?: number | null; // 篩選（1 輪）+ refinement（2 輪）後的 Top 2 亞軍 LP
+  confirmationWinnerLp?: number | null; // 前向確認 phase 的勝者（Passed=候選；Reversal=亞軍；否則 null）
+  verifiedBestLp?: number | null; // 反向驗證確認的最終最佳 LP（只有反向 Passed 才設置）
+  captureQuality?: CaptureQuality; // capture 完整性摘要
+  environmentStability?: EnvironmentStability; // 環境穩定度摘要
+  equivalentFinalistLps?: number[]; // Equivalent 判定的等效 finalists（[candidate, runner]）；非 Equivalent → 空
 }
 
 /** 歷史 session 的「可否套用」狀態（相容性判定只在後端） */
 export interface ApplyStatus {
   canApply: boolean;
   reason: string | null; // null = 可套用；否則為 i18n errors.* 代碼
+  equivalentMode: boolean; // 是否為 equivalent-mode session
+  allowedLps: number[]; // 允許套用的 LP（equivalent finalists）；非 equivalent → 空
+  requiresSafetyValidation: boolean; // 套用前是否需先完成 safety validation
+}
+
+/** Session 層的 capture 完整性摘要（camelCase，與後端 CaptureQuality 一致） */
+export interface CaptureQuality {
+  totalCaptures: number; // 所有 capture attempt（含校準/overflow retry/drift rerun）
+  validCaptures: number;
+  invalidCaptures: number;
+  windowInvalidCaptures?: number; // 因視窗完整性失敗而 invalid 的 capture 數
+  windowRetryCaptures?: number; // 因視窗完整性失敗觸發的重跑次數
+  overflowedPresentEvents: number;
+  etwEventsLost: number;
+  integrityPassed: boolean; // 全部正式用於結果的 capture 完整且 session 完成才 true
+  effectiveFpsCap: number; // 校準/正式鎖定的有效 FPS cap
+  circularBufferSize: number;
+}
+
+/** Session 層的環境穩定度摘要（camelCase，與後端 EnvironmentStability 一致） */
+export interface EnvironmentStability {
+  passed: boolean;
+  driftReruns: number;
+  error: string | null; // 不穩定時的穩定錯誤碼（= BENCHMARK_ENV_UNSTABLE）；穩定為 null
+}
+
+/** 等效安全驗證狀態（serde PascalCase；default None） */
+export type EquivalentSafetyStatus = 'None' | 'Pending' | 'Passed' | 'Failed' | 'Cancelled';
+
+/** 等效安全驗證 contract（camelCase，與後端 EquivalentSafetyValidation 一致） */
+export interface EquivalentSafetyValidation {
+  status: EquivalentSafetyStatus;
+  selectedLp: number | null;
+  referenceLp: number | null;
+  rounds: number;
+  avgImprovementPct: number | null;
+  p1ImprovementPct: number | null;
+  p01ImprovementPct: number | null;
+  madDeltaPp: number | null;
+  spikeDeltaPp: number | null;
+  captureQuality: CaptureQuality;
+  environmentStability: EnvironmentStability;
+  validatedAt: string | null;
+  referencePolicyMask: number[] | null; // 精簡 LE 單 LP mask bytes
+  reason: string | null; // 失敗原因或 "passed"
 }
 
 export interface SessionDetail {
   summary: SessionSummary;
   results: LpResult[];
   samples: CoreSample[];
+  // 分相結果（新 schema；舊 session 缺欄）：
+  screeningResults?: LpResult[]; // 篩選階段（3 round 全 LP）逐 LP 聚合結果
+  refinementResults?: LpResult[]; // refinement 階段（Top 3 各 2 round）逐 LP 聚合結果
+  confirmationResults?: LpResult[]; // 前向確認階段（Top 2，3..=5 round）逐 LP 聚合結果
+  equivalentSafetyValidation?: EquivalentSafetyValidation | null; // 等效安全驗證（後續 task 填值）
+}
+
+/** workload 視窗完整性快照（capture/warmup 期間輪詢回報） */
+export interface WindowIntegrity {
+  foreground: boolean; // true = 前景（ok）
+  minimized: boolean; // true = 最小化（異常）
+  position: boolean; // true = 位置正確（ok）
+  occlusion: boolean; // true = 被遮擋（異常）
+  retries: number; // 累計視窗完整性重跑次數
+  error: string | null; // 穩定錯誤碼（重試用盡）；null = 無
 }
 
 /** 執行期狀態（get_benchmark_state） */
@@ -263,6 +366,11 @@ export interface BenchmarkState {
   elapsedSecs: number;
   cancelRequested: boolean;
   recoveryRequired: boolean; // 啟動還原失敗 → 封鎖 test/apply
+  operation?: BenchmarkOperation | null; // 目前背景操作（Benchmark | EquivalentValidation | null）
+  windowLayout?: WindowLayout; // 主視窗版面（Normal | CompactProgress）
+  windowIntegrity?: WindowIntegrity; // workload 視窗完整性快照
+  cancelStage?: string | null; // 取消專用階段（requested/stopping/restoring/finalizing）；無取消為 null
+  cancelProgress?: number | null; // 取消專用百分比 0..100；無取消為 null
 }
 
 /** 單一註冊表值的精確快照（presence + 型別 + 原始位元組） */

@@ -63,6 +63,137 @@ pub fn parse_presentmon_csv(text: &str) -> Result<Vec<f64>, String> {
     }
 }
 
+/// 完整 capture 解析結果：capture 時間（供 duration/monotonic 驗證）。
+/// frametime 序列在解析期即驗證（finite positive、非空），不在此回傳。
+#[derive(Debug, Clone, Default)]
+pub struct CsvCapture {
+    /// 最早 capture 時間（秒）；僅當 CSV 含 `TimeInSeconds` 欄位時才有值。
+    pub first_time_secs: Option<f64>,
+    /// 最晚 capture 時間（秒）。
+    pub last_time_secs: Option<f64>,
+    /// capture 時間序列是否單調非遞減（有時間欄位才判定；無欄位 = true）。
+    pub monotonic: bool,
+}
+
+impl CsvCapture {
+    /// 觀測到的 capture 時長（秒）：`last - first`；無秒數欄位或非有限 → None。
+    pub fn observed_duration_secs(&self) -> Option<f64> {
+        let (a, b) = (self.first_time_secs?, self.last_time_secs?);
+        if !a.is_finite() || !b.is_finite() || b < a {
+            return None;
+        }
+        Some(b - a)
+    }
+}
+
+/// PresentMon CSV 的 capture 時間欄位名（秒，浮點；PresentMon 2.x 輸出）。
+pub const COL_TIME_IN_SECONDS: &str = "TimeInSeconds";
+/// PresentMon CSV 的 QPC 刻度時間欄位名（單調、非秒）。
+pub const COL_QPC_TIME: &str = "QpcTime";
+
+/// 解析 PresentMon CSV，同時擷取 capture 時間（供完整性驗證）。
+/// 與 [`parse_presentmon_csv`] 相同的 frametime 語意（跳過 NA/非有限/非正值）；
+/// 額外追蹤 `TimeInSeconds`（秒，供 `observed_duration_secs`）與時間單調性
+/// （優先 `TimeInSeconds`、其次 `QpcTime`）。時間欄位缺失 → 對應欄位為 None、
+/// `monotonic=true`（無資料不視為不單調）。
+pub fn parse_presentmon_csv_full(text: &str) -> Result<CsvCapture, String> {
+    let mut header_idx: Option<usize> = None;
+    let mut seconds_idx: Option<usize> = None;
+    let mut qpc_idx: Option<usize> = None;
+    let mut saw_data = false;
+
+    let mut first_secs: Option<f64> = None;
+    let mut last_secs: Option<f64> = None;
+    let mut prev_time: Option<f64> = None;
+    let mut monotonic = true;
+
+    for (lineno, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let fields = split_csv_line(line);
+        if header_idx.is_none() {
+            if let Some(i) = fields
+                .iter()
+                .position(|f| f.trim().eq_ignore_ascii_case(COL_MS_BETWEEN_PRESENTS))
+            {
+                header_idx = Some(i);
+            }
+            if let Some(i) = fields
+                .iter()
+                .position(|f| f.trim().eq_ignore_ascii_case(COL_TIME_IN_SECONDS))
+            {
+                seconds_idx = Some(i);
+            }
+            if let Some(i) = fields
+                .iter()
+                .position(|f| f.trim().eq_ignore_ascii_case(COL_QPC_TIME))
+            {
+                qpc_idx = Some(i);
+            }
+            continue;
+        }
+        let idx = header_idx.unwrap();
+        // 時間欄位（優先秒數、其次 QPC）的單調性與範圍。
+        let time_val: Option<f64> = seconds_idx
+            .and_then(|i| fields.get(i))
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .or_else(|| {
+                qpc_idx
+                    .and_then(|i| fields.get(i))
+                    .and_then(|v| v.trim().parse::<f64>().ok())
+            });
+        if let Some(t) = time_val {
+            if let Some(p) = prev_time {
+                if t < p {
+                    monotonic = false;
+                }
+            }
+            prev_time = Some(t);
+        }
+        if seconds_idx.is_some() {
+            if let Some(s) = seconds_idx.and_then(|i| fields.get(i)) {
+                if let Ok(v) = s.trim().parse::<f64>() {
+                    if v.is_finite() {
+                        if first_secs.is_none() {
+                            first_secs = Some(v);
+                        }
+                        last_secs = Some(v);
+                    }
+                }
+            }
+        }
+        if idx >= fields.len() {
+            continue;
+        }
+        let value = fields[idx].trim();
+        if value.is_empty() || value.eq_ignore_ascii_case("NA") {
+            continue;
+        }
+        let v: f64 = value.parse().map_err(|_| {
+            format!(
+                "CSV 第 {} 行 msBetweenPresents 非數值: {:?}",
+                lineno + 1,
+                fields[idx]
+            )
+        })?;
+        if v.is_finite() && v > 0.0 {
+            saw_data = true;
+        }
+    }
+
+    match header_idx {
+        None => Err("CSV 缺 msBetweenPresents 欄位".to_string()),
+        Some(_) if !saw_data => Err("CSV 沒有有效 frametime 資料".to_string()),
+        Some(_) => Ok(CsvCapture {
+            first_time_secs: first_secs,
+            last_time_secs: last_secs,
+            monotonic,
+        }),
+    }
+}
+
 /// 對含引號欄位的 CSV 列做正確的欄位切割（PresentMon 的 Application 帶引號）
 fn split_csv_line(line: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -369,6 +500,57 @@ pub fn robust_candidates(scores_by_lp: &[(u32, Vec<f64>)]) -> Vec<RobustCandidat
             .then_with(|| a.lp.cmp(&b.lp))
     });
     out
+}
+
+// ── 確認專用分數（有界 log-ratio；與 screening/refinement 的 competitive_score 分離）──
+
+/// 確認分數權重（總和 1.0）：1% low 主導、0.1% low 次之、MAD 與 avg 為輔。
+/// spike 不進主分數，只當 guardrail。
+pub const CONFIRM_W_P1_LOW: f64 = 0.40;
+pub const CONFIRM_W_P01_LOW: f64 = 0.20;
+pub const CONFIRM_W_MAD: f64 = 0.25;
+pub const CONFIRM_W_AVG_FPS: f64 = 0.15;
+
+/// 有界 log-ratio 效應（每項 clamp 到 [-5, +5]）：
+/// - `higher_is_better=true` → `100 * ln(candidate / runner)`。
+/// - `higher_is_better=false`（MAD 越低越好）→ `100 * ln(runner / candidate)`。
+///
+/// 守門：任一值非有限或 ≤0 → None（fail closed，不給中性分）。
+pub fn confirmation_log_ratio(candidate: f64, runner: f64, higher_is_better: bool) -> Option<f64> {
+    if !candidate.is_finite() || !runner.is_finite() || candidate <= 0.0 || runner <= 0.0 {
+        return None;
+    }
+    let ratio = if higher_is_better {
+        candidate / runner
+    } else {
+        runner / candidate
+    };
+    let effect = 100.0 * ratio.ln();
+    if effect.is_finite() {
+        Some(effect.clamp(-5.0, 5.0))
+    } else {
+        None
+    }
+}
+
+/// 單一 (candidate vs runner) 配對的確認複合分數：加權有界 log-ratio。
+/// 任一必要指標（avg / 1% low / 0.1% low / MAD）非有限或 ≤0 → None（fail closed）。
+/// spike 不進主分數（只當 guardrail）。
+pub fn confirmation_effect(candidate: &LpResult, runner: &LpResult) -> Option<f64> {
+    let avg = confirmation_log_ratio(candidate.avg_fps?, runner.avg_fps?, true)?;
+    let p1 = confirmation_log_ratio(candidate.p1_low?, runner.p1_low?, true)?;
+    let p01 = confirmation_log_ratio(candidate.p01_low?, runner.p01_low?, true)?;
+    let mad = confirmation_log_ratio(
+        candidate.frametime_mad_pct?,
+        runner.frametime_mad_pct?,
+        false,
+    )?;
+    Some(
+        CONFIRM_W_P1_LOW * p1
+            + CONFIRM_W_P01_LOW * p01
+            + CONFIRM_W_MAD * mad
+            + CONFIRM_W_AVG_FPS * avg,
+    )
 }
 
 // ── 排序與選擇 ──────────────────────────────────────────────────────────
@@ -869,7 +1051,10 @@ Application,ProcessID,msBetweenPresents
             .map(|&v| normalized_ratio(v, 10.0, false))
             .collect();
         for w in ratios.windows(2) {
-            assert!(w[0] > w[1], "lower-is-better 應隨 value 單調遞減: {ratios:?}");
+            assert!(
+                w[0] > w[1],
+                "lower-is-better 應隨 value 單調遞減: {ratios:?}"
+            );
         }
         // 端點：value=0 → 2、value=median → 1、value→∞ 趨近 0
         assert!((ratios[0] - 2.0).abs() < 1e-12);
@@ -925,10 +1110,7 @@ Application,ProcessID,msBetweenPresents
         let med = round_medians(&[a.clone(), b.clone()]);
         let sa = competitive_score(&a, &med).unwrap();
         let sb = competitive_score(&b, &med).unwrap();
-        assert!(
-            sb > sa,
-            "零 MAD/spike 不應主導分數：sa={sa}, sb={sb}"
-        );
+        assert!(sb > sa, "零 MAD/spike 不應主導分數：sa={sa}, sb={sb}");
     }
 
     #[test]
@@ -963,5 +1145,83 @@ Application,ProcessID,msBetweenPresents
         let cands = robust_candidates(&[(0, vec![]), (1, vec![1.0])]);
         assert_eq!(cands.len(), 1);
         assert_eq!(cands[0].lp, 1);
+    }
+
+    // ── 確認分數（有界 log-ratio）──
+
+    #[test]
+    fn confirmation_log_ratio_higher_and_lower_better() {
+        // higher-is-better：candidate 快 5% → 100*ln(1.05) ≈ 4.879（clamp 內）
+        let hi = confirmation_log_ratio(105.0, 100.0, true).unwrap();
+        assert!((hi - 4.8790).abs() < 1e-3, "hi={hi}");
+        // lower-is-better：candidate 較低較好（97 vs 100）→ 100*ln(100/97) ≈ 3.046
+        let lo = confirmation_log_ratio(97.0, 100.0, false).unwrap();
+        assert!((lo - 3.0460).abs() < 1e-3, "lo={lo}");
+        // 完全相等 → 0
+        assert_eq!(confirmation_log_ratio(50.0, 50.0, true), Some(0.0));
+    }
+
+    #[test]
+    fn confirmation_log_ratio_clamps_to_five() {
+        // candidate 極快（1000x）→ 100*ln(1000) ≈ 690 → clamp +5
+        assert_eq!(confirmation_log_ratio(1000.0, 1.0, true), Some(5.0));
+        // candidate 極慢 → clamp -5
+        assert_eq!(confirmation_log_ratio(1.0, 1000.0, true), Some(-5.0));
+        // lower-is-better 反向亦然
+        assert_eq!(confirmation_log_ratio(1000.0, 1.0, false), Some(-5.0));
+    }
+
+    #[test]
+    fn confirmation_log_ratio_fails_closed_on_invalid() {
+        // 非有限或 ≤0 一律 None（不得給中性分）
+        assert_eq!(confirmation_log_ratio(f64::NAN, 10.0, true), None);
+        assert_eq!(confirmation_log_ratio(10.0, f64::INFINITY, true), None);
+        assert_eq!(confirmation_log_ratio(0.0, 10.0, true), None);
+        assert_eq!(confirmation_log_ratio(10.0, 0.0, false), None);
+        assert_eq!(confirmation_log_ratio(-1.0, 10.0, true), None);
+    }
+
+    #[test]
+    fn confirmation_effect_spike_does_not_affect_score() {
+        let a = lp_comp(0, 100.0, 90.0, 80.0, 10.0, 0.0);
+        let b = lp_comp(1, 90.0, 80.0, 70.0, 12.0, 0.0);
+        let base = confirmation_effect(&a, &b).unwrap();
+        // spike 只當 guardrail，不進主分數：改動 spike 不影響分數
+        let mut a_spiky = a.clone();
+        a_spiky.spike_rate_pct = Some(80.0);
+        let mut b_spiky = b.clone();
+        b_spiky.spike_rate_pct = Some(0.1);
+        let spiky = confirmation_effect(&a_spiky, &b_spiky).unwrap();
+        assert_eq!(base, spiky, "spike 變化不得影響確認主分數");
+    }
+
+    #[test]
+    fn confirmation_effect_fails_closed_on_missing_or_zero_mad() {
+        let a = lp_comp(0, 100.0, 90.0, 80.0, 10.0, 0.0);
+        let b = lp_comp(1, 90.0, 80.0, 70.0, 12.0, 0.0);
+        // MAD = 0（完美穩定）→ fail closed（log-ratio 無法定義）
+        let mut z = a.clone();
+        z.frametime_mad_pct = Some(0.0);
+        assert_eq!(confirmation_effect(&z, &b), None);
+        // 缺 MAD → None
+        let mut miss = a.clone();
+        miss.frametime_mad_pct = None;
+        assert_eq!(confirmation_effect(&miss, &b), None);
+        assert!(confirmation_effect(&a, &b).is_some());
+    }
+
+    #[test]
+    fn confirmation_effect_is_symmetric_in_direction() {
+        // candidate 全面較佳 → 正向為正、反向為負
+        let a = lp_comp(0, 100.0, 90.0, 80.0, 10.0, 0.0);
+        let b = lp_comp(1, 90.0, 80.0, 70.0, 12.0, 0.0);
+        let fwd = confirmation_effect(&a, &b).unwrap();
+        let rev = confirmation_effect(&b, &a).unwrap();
+        assert!(fwd > 0.0, "fwd={fwd}");
+        assert!(rev < 0.0, "rev={rev}");
+        assert!(
+            (fwd + rev).abs() < 1e-9,
+            "反向應完全對稱: fwd={fwd} rev={rev}"
+        );
     }
 }

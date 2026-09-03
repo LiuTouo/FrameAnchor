@@ -17,6 +17,7 @@
   const KNOWN_ERRORS = [
     'ACCESS_DENIED',
     'OPEN_FAILED',
+    'TOPOLOGY_FAILED',
     'SET_AFFINITY_FAILED',
     'SET_PRIORITY_FAILED',
     'IO_FAILED',
@@ -64,10 +65,17 @@
             <td class="cell-pid">{a.pid}</td>
             <td class="cell-rule" title={a.ruleName}>{a.ruleName}</td>
             <td>
-              {#if a.softAffinity}
-                <span class="badge soft">{$t('dashboard.softAffinity')}</span>
+              {#if a.strategy === 'Hard'}
+                <span class="badge hard">{$t('dashboard.strategyHard')}</span>
+              {:else if a.strategy === 'CpuSets'}
+                <span class="badge cpusets">{$t('dashboard.strategyCpuSets')}</span>
+              {:else if a.strategy === 'Prefer'}
+                <span class="badge soft">{$t('dashboard.strategyPrefer')}</span>
               {/if}
               <span class="mono">{fmtCores(a.currentCores)}</span>
+              {#if a.strategy === 'Prefer'}
+                <div class="sub-hint">{$t('dashboard.preferHint')}</div>
+              {/if}
             </td>
             <td>{a.currentPriority || '—'}</td>
             <td class="cell-status">
@@ -134,15 +142,17 @@
 
   th {
     text-align: left;
-    padding: 7px 10px;
+    padding: 9px 12px;
     color: var(--text-secondary);
     font-size: 11px;
-    font-weight: var(--font-weight-medium);
-    border-bottom: 2px solid var(--border-subtle);
+    font-weight: var(--font-weight-semibold);
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border-default);
   }
 
   td {
-    padding: 8px 10px;
+    padding: 10px 12px;
     border-bottom: 1px solid var(--border-subtle);
     vertical-align: top;
   }
@@ -183,10 +193,30 @@
   }
 
   .badge.soft {
+    background: var(--warning-muted);
+    color: var(--warning);
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+
+  .badge.hard {
+    background: var(--success-muted);
+    color: var(--success);
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+
+  .badge.cpusets {
     background: var(--accent-muted);
     color: var(--accent);
     margin-right: 4px;
     vertical-align: middle;
+  }
+
+  .sub-hint {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
   }
 
   .status-marker {

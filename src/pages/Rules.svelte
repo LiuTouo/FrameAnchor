@@ -25,6 +25,8 @@
 
   // ── 刪除確認 ──
   let deleteTarget = $state<Rule | null>(null);
+  let actionError = $state<string | null>(null);
+  let actionBusy = $state(false);
 
   // ── 全部規則：已儲存規則優先（保留後端順序，有草稿則用草稿），pending 規則接在後面 ──
   let allRules = $derived.by(() => {
@@ -112,18 +114,25 @@
 
   // ── 套用 ──
   async function onApply(rule: Rule) {
+    if (actionBusy) return;
+    actionError = null;
+    actionBusy = true;
     try {
       await ipc.saveRule(rule);
       // reload 會以 savedId 參數明確替換剛儲存規則的草稿
       await reload(rule.id);
       selectedId = rule.id;
+      actionError = null;
     } catch (e) {
-      console.error('save_rule failed', e);
+      actionError = String(e);
+    } finally {
+      actionBusy = false;
     }
   }
 
   // ── 刪除 ──
   function onDeleteRequest(id: string) {
+    actionError = null;
     if (!$rules.some((r) => r.id === id)) {
       // pending 規則：直接丟棄草稿
       const next = new Map(drafts);
@@ -150,20 +159,23 @@
   }
 
   async function confirmDelete() {
-    if (!deleteTarget) return;
+    if (!deleteTarget || actionBusy) return;
     const id = deleteTarget.id;
-    deleteTarget = null;
+    actionBusy = true;
     try {
       await ipc.deleteRule(id);
-      // 先移除草稿，再選取最近規則（此時 allRules 尚含已刪除項目的 pre-delete 位置）
+      // 後端確認刪除後才改本地草稿與選取。
+      selectNearestAfterDelete(id);
       const nextDrafts = new Map(drafts);
       nextDrafts.delete(id);
       drafts = nextDrafts;
-      selectNearestAfterDelete(id);
-      // reload 會從後端取得最新清單
       await reload();
+      deleteTarget = null;
+      actionError = null;
     } catch (e) {
-      console.error('delete_rule failed', e);
+      actionError = String(e);
+    } finally {
+      actionBusy = false;
     }
   }
 
@@ -188,7 +200,7 @@
 
 <!-- 頁首工具列 -->
 <div class="page-header">
-  <h2>{$t('nav.rules')}</h2>
+  <h2 class="page-title">{$t('nav.rules')}</h2>
   <div class="header-actions">
     <button class="primary" onclick={() => (browseOpen = true)}>
       <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" fill="currentColor"/></svg>
@@ -199,6 +211,12 @@
     </button>
   </div>
 </div>
+
+{#if actionError}
+  <div class="save-error" role="alert">
+    {$t('rules.actionFailed', { values: { error: actionError } })}
+  </div>
+{/if}
 
 {#if allRules.length === 0}
   <div class="empty-state">
@@ -251,6 +269,7 @@
           onchange={onDraftChange}
           onapply={onApply}
           ondelete={onDeleteRequest}
+          busy={actionBusy}
         />
       {:else}
         <div class="detail-empty">
@@ -269,9 +288,11 @@
   open={deleteTarget !== null}
   title={$t('rules.deleteTitle') as string}
   message={$t('rules.deleteConfirm', { values: { name: deleteTarget?.name ?? '' } }) as string}
+  detail={actionError}
   confirmLabel={$t('rules.delete') as string}
   cancelLabel={$t('common.cancel') as string}
   danger
+  busy={actionBusy}
   onconfirm={confirmDelete}
   oncancel={() => (deleteTarget = null)}
 />
@@ -283,12 +304,7 @@
     align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
-    margin-bottom: var(--space-4);
-  }
-
-  .page-header h2 {
-    margin: 0;
-    font-size: 15px;
+    margin-bottom: var(--space-5);
   }
 
   .header-actions {
@@ -300,21 +316,26 @@
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: var(--space-3);
+    gap: var(--space-4);
     padding: var(--space-8);
     color: var(--text-secondary);
+    background: var(--surface-1);
+    border: 1px dashed var(--border-default);
+    border-radius: var(--radius-lg);
+    text-align: center;
   }
 
   .workspace {
     display: flex;
     gap: 0;
     border: 1px solid var(--border-subtle);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-lg);
     overflow: hidden;
+    background: var(--surface-0);
   }
 
   .master {
-    width: 260px;
+    width: 272px;
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
@@ -325,14 +346,14 @@
   .master-item {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 3px;
     width: 100%;
     text-align: left;
     background: transparent;
     border: none;
     border-bottom: 1px solid var(--border-subtle);
     border-radius: 0;
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-3);
     height: auto;
     cursor: pointer;
     color: var(--text-primary);
@@ -360,7 +381,7 @@
 
   .master-name {
     font-weight: var(--font-weight-medium);
-    font-size: 13px;
+    font-size: 13.5px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;

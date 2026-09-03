@@ -19,14 +19,18 @@ use crate::gpu::{
 use crate::topology::Topology;
 
 use super::assets::{self, BenchmarkAssets};
+use super::env::RealEnvironmentProbe;
 use super::process_win::RealProcessRunner;
 use super::recovery::{self, RecoveryJournal, RecoveryStage};
 use super::runner::{self, CancelSignal, ProcessRunner, RunContext};
 use super::storage;
+use super::window_layout::{self, plan_layout, RealMainWindowController};
 use super::window_win::RealWorkloadWindow;
 use super::{
-    cpu_fingerprint_with, detect_cpu_identity, ApplyStatus, BenchmarkConfig, BenchmarkStage,
-    BenchmarkState, CpuIdentity, ReliabilityStatus, SessionStatus, SessionSummary, WorkloadKind,
+    cpu_fingerprint_with, detect_cpu_identity, ApplyStatus, BenchmarkConfig, BenchmarkOperation,
+    BenchmarkProgress, BenchmarkStage, BenchmarkState, CpuIdentity, EnvironmentStability,
+    EquivalentSafetyStatus, EquivalentSafetyValidation, ReliabilityStatus, SessionDetail,
+    SessionStatus, SessionSummary, WindowIntegrity, WindowLayout, WorkloadKind,
 };
 
 /// 一層還原記錄檔：`%APPDATA%\FrameAnchor\gpu-restore.json`。
@@ -127,7 +131,14 @@ pub fn apply_best_affinity(
     }
 
     // 4) 委派到共享 mutation 路徑
-    apply_affinity_to_gpu(backend, sleeper, instance_id, best_lp, journal_path, restore_path)
+    apply_affinity_to_gpu(
+        backend,
+        sleeper,
+        instance_id,
+        best_lp,
+        journal_path,
+        restore_path,
+    )
 }
 
 /// 將 GPU 中斷親和性套用到指定 LP。
@@ -417,6 +428,7 @@ pub mod inject {
 const OP_IDLE: u8 = 0;
 const OP_BENCHMARK: u8 = 1;
 const OP_MUTATION: u8 = 2;
+const OP_VALIDATION: u8 = 3;
 
 /// RAII 釋放：drop 時把 reservation 歸零。背景 benchmark 的 guard 會被移入
 /// runner 的 closure，直到 runner 終結（寫完最終 status 後）才 drop，確保
@@ -466,12 +478,10 @@ impl BenchmarkManager {
     /// [`codes::BENCHMARK_ALREADY_RUNNING`]。single-flight 由這個原子 CAS 保證，
     /// 兩個同時 `start` 只會有一個成功。
     fn reserve(&self, kind: u8) -> Result<GpuOperationGuard, String> {
-        match self.reservation.compare_exchange(
-            OP_IDLE,
-            kind,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        ) {
+        match self
+            .reservation
+            .compare_exchange(OP_IDLE, kind, Ordering::AcqRel, Ordering::Acquire)
+        {
             Ok(_) => Ok(GpuOperationGuard {
                 reservation: self.reservation.clone(),
             }),
@@ -485,6 +495,8 @@ impl BenchmarkManager {
         let _ = self.cancel_tx.send(false);
         if let Ok(mut s) = self.state.write() {
             s.cancel_requested = false;
+            s.cancel_stage = None;
+            s.cancel_progress = None;
         }
     }
 
@@ -536,6 +548,11 @@ impl BenchmarkManager {
             .unwrap_or(false)
     }
 
+    /// 等效安全驗證背景 capture 進行中？（以 reservation 辨識，不改變 session status）
+    pub fn validation_running(&self) -> bool {
+        self.reservation.load(Ordering::Acquire) == OP_VALIDATION
+    }
+
     /// 執行中 → 拒絕退出/重啟（讓 runner 完成或安全取消/還原），
     /// 非執行中（Idle/Completed/Failed/Cancelled）→ 允許。
     pub fn refuse_exit_if_running(&self) -> Result<(), String> {
@@ -581,6 +598,9 @@ impl BenchmarkManager {
             return ApplyStatus {
                 can_apply: false,
                 reason: Some(codes::BENCHMARK_RECOVERY_REQUIRED.to_string()),
+                equivalent_mode: false,
+                allowed_lps: Vec::new(),
+                requires_safety_validation: false,
             };
         }
         check_apply_at(
@@ -678,6 +698,241 @@ impl BenchmarkManager {
         )
     }
 
+    /// 等效安全驗證：single-flight。目前鎖定核心已在 pair 內 → 立即 Passed；
+    /// 否則 spawn_blocking 跑 3 組 AB/BA，結果寫回原 session（保持 Completed）。
+    pub fn validate_equivalent_candidate(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        topo: &Topology,
+        session_id: String,
+        selected_lp: u32,
+    ) -> Result<(), String> {
+        if self.recovery_required() {
+            return Err(codes::BENCHMARK_RECOVERY_REQUIRED.to_string());
+        }
+        let guard = self.reserve(OP_VALIDATION)?;
+        let storage_root = storage::benchmarks_root();
+        let detail = storage::get_at(&storage_root, &session_id)?;
+        let current_policy = self
+            .backend
+            .read_affinity_policy(&detail.summary.gpu_instance_id)
+            .map_err(|e| e.code().to_string())?;
+        let cpu_identity = detect_cpu_identity();
+        let plan = equivalent_validation_plan(
+            self.backend.as_ref(),
+            topo,
+            &cpu_identity,
+            &detail,
+            &current_policy,
+            selected_lp,
+        )?;
+        let ref_mask = current_policy.assignment_set_override.bytes.clone();
+
+        match plan {
+            EquivalentValidationPlan::ImmediatePass { reference_lp } => {
+                let validation = EquivalentSafetyValidation {
+                    status: EquivalentSafetyStatus::Passed,
+                    selected_lp: Some(selected_lp),
+                    reference_lp: Some(reference_lp),
+                    rounds: 0,
+                    capture_quality: detail.summary.capture_quality.clone(),
+                    environment_stability: detail.summary.environment_stability.clone(),
+                    validated_at: Some(chrono::Local::now().to_rfc3339()),
+                    reference_policy_mask: ref_mask,
+                    reason: Some("already_in_equivalent_pair".to_string()),
+                    ..Default::default()
+                };
+                write_equivalent_validation(&storage_root, &session_id, validation)
+            }
+            EquivalentValidationPlan::RunCaptures { reference_lp } => {
+                // 資源解析 + 驗證同步執行（失敗立即回 Err，不寫任何 validation 狀態、
+                // 不進入背景）。先驗證 assets，成功才寫 Pending 並 spawn，避免失敗留下永久 Pending。
+                let assets = begin_equivalent_validation(
+                    &storage_root,
+                    &session_id,
+                    selected_lp,
+                    reference_lp,
+                    ref_mask.clone(),
+                    resolve_and_verify_assets(app, &detail.summary.config),
+                )?;
+                self.spawn_equivalent_validation(
+                    app,
+                    topo,
+                    session_id,
+                    selected_lp,
+                    reference_lp,
+                    ref_mask,
+                    detail,
+                    assets,
+                    guard,
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// 套用等效親和性：驗證 validation Passed / selected 一致 / live reference 未變，
+    /// 然後委派到共享 mutation 路徑 [`apply_affinity_to_gpu`]。
+    pub fn apply_equivalent_gpu_affinity(
+        &self,
+        topo: &Topology,
+        session_id: &str,
+        selected_lp: u32,
+    ) -> Result<(), String> {
+        if self.recovery_required() {
+            return Err(codes::BENCHMARK_RECOVERY_REQUIRED.to_string());
+        }
+        let _guard = self.reserve(OP_MUTATION)?;
+        let storage_root = storage::benchmarks_root();
+        let detail = storage::get_at(&storage_root, session_id)?;
+        let current_policy = self
+            .backend
+            .read_affinity_policy(&detail.summary.gpu_instance_id)
+            .map_err(|e| e.code().to_string())?;
+        let cpu_identity = detect_cpu_identity();
+        let target_lp = apply_equivalent_decision(
+            self.backend.as_ref(),
+            topo,
+            &cpu_identity,
+            &detail,
+            &current_policy,
+            selected_lp,
+        )?;
+        let journal = recovery::recovery_path();
+        let result = apply_affinity_to_gpu(
+            self.backend.as_ref(),
+            self.sleeper.as_ref(),
+            &detail.summary.gpu_instance_id,
+            target_lp,
+            &journal,
+            &restore_record_path(),
+        );
+        self.flag_recovery_if_needed(&result);
+        result.map_err(|e| e.code)
+    }
+
+    /// 背景執行 3 AB/BA 等效安全驗證（寫回結果後 drop reservation guard）。
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_equivalent_validation(
+        self: &Arc<Self>,
+        app: &AppHandle,
+        topo: &Topology,
+        session_id: String,
+        selected_lp: u32,
+        reference_lp: u32,
+        ref_mask: Option<Vec<u8>>,
+        detail: SessionDetail,
+        assets: BenchmarkAssets,
+        guard: GpuOperationGuard,
+    ) {
+        let storage_root = storage::benchmarks_root();
+        let config = detail.summary.config.clone();
+        let fps_cap = detail.summary.capture_quality.effective_fps_cap;
+        let buffer = detail.summary.capture_quality.circular_buffer_size;
+        let validation_dir = std::env::temp_dir().join(format!("frameanchor_equiv_{session_id}"));
+        let _ = std::fs::create_dir_all(&validation_dir);
+
+        self.reset_cancel();
+        // 主視窗 compact + runtime operation/layout（runner 於背景 snapshot/compact/RAII 還原）
+        let window_control: Arc<dyn window_layout::MainWindowController> =
+            Arc::new(RealMainWindowController::new(app.clone()));
+        if let Ok(mut st) = self.state.write() {
+            st.operation = Some(BenchmarkOperation::EquivalentValidation);
+            st.window_layout = WindowLayout::CompactProgress;
+            st.window_integrity = WindowIntegrity::default();
+        }
+        let process_runner: Arc<dyn ProcessRunner> = Arc::new(RealProcessRunner::new());
+        let cancel: Arc<dyn CancelSignal> = Arc::new(ManagerCancel {
+            rx: self.cancel_rx.clone(),
+        });
+        let validation_id = uuid::Uuid::new_v4().to_string();
+        let app_emit = app.clone();
+        let manager_done = self.clone();
+        let manager_integrity = self.clone();
+
+        let mut ctx = RunContext {
+            backend: self.backend.clone(),
+            sleeper: self.sleeper.clone(),
+            processes: process_runner,
+            cancel,
+            env: Arc::new(RealEnvironmentProbe::new()),
+            topo: topo.clone(),
+            capture_quality: Default::default(),
+            cpu_identity: detect_cpu_identity(),
+            assets,
+            storage_root: validation_dir.clone(),
+            journal_path: recovery::recovery_path(),
+            session_id: validation_id,
+            config,
+            on_progress: Box::new(move |p| {
+                let _ = app_emit.emit("gpu-benchmark-progress", p);
+            }),
+            baseline: None,
+            owned_processes: Vec::new(),
+            window: Arc::new(RealWorkloadWindow::new()),
+            window_control,
+            layout: None,
+            on_integrity: Box::new(move |wi| {
+                if let Ok(mut st) = manager_integrity.state.write() {
+                    st.window_integrity = wi.clone();
+                }
+            }),
+            window_retries: 0,
+            last_integrity: None,
+        };
+
+        tauri::async_runtime::spawn_blocking(move || {
+            let _guard = guard;
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runner::run_equivalent_validation(
+                    &mut ctx,
+                    selected_lp,
+                    reference_lp,
+                    fps_cap,
+                    buffer,
+                )
+            }))
+            .unwrap_or_else(|_| {
+                log::error!(
+                    "等效安全驗證 runner panic: {}",
+                    codes::BENCHMARK_RUNNER_PANIC
+                );
+                runner::equivalent_panic_failure(&mut ctx)
+            });
+            if outcome.recovery_required {
+                manager_done.set_recovery_required();
+            }
+            if let Ok(mut st) = manager_done.state.write() {
+                st.operation = None;
+                st.window_layout = WindowLayout::Normal;
+            }
+            let validation = EquivalentSafetyValidation {
+                status: outcome.status,
+                selected_lp: Some(selected_lp),
+                reference_lp: Some(reference_lp),
+                rounds: outcome.rounds,
+                avg_improvement_pct: outcome.avg_improvement_pct,
+                p1_improvement_pct: outcome.p1_improvement_pct,
+                p01_improvement_pct: outcome.p01_improvement_pct,
+                mad_delta_pp: outcome.mad_delta_pp,
+                spike_delta_pp: outcome.spike_delta_pp,
+                capture_quality: outcome.capture_quality,
+                environment_stability: EnvironmentStability {
+                    passed: outcome.status == EquivalentSafetyStatus::Passed,
+                    drift_reruns: outcome.drift_reruns,
+                    error: outcome.reason.clone(),
+                },
+                validated_at: Some(chrono::Local::now().to_rfc3339()),
+                reference_policy_mask: ref_mask,
+                reason: outcome.reason,
+            };
+            if let Err(e) = write_equivalent_validation(&storage_root, &session_id, validation) {
+                log::error!("寫入等效安全驗證結果失敗: {e}");
+            }
+            let _ = std::fs::remove_dir_all(&validation_dir);
+        });
+    }
+
     /// 開始基準測試：單一並行的背景 session。前置驗證（config、資源 hash、
     /// GPU 存在、BasicDisplay、未在 RecoveryRequired）通過後立即回傳 Ok。
     pub fn start(
@@ -720,6 +975,14 @@ impl BenchmarkManager {
             return Err(codes::GPU_BASIC_DISPLAY_DISABLED.to_string());
         }
 
+        // 空間預檢：主視窗所在 monitor 的 rcWork 內，workload 與 compact 視窗不可重疊。
+        // 不足立即拒絕（穩定錯誤碼），不縮 workload、不進入 Running。runner 於背景會再
+        // 以相同 plan_layout 做一次（並 snapshot/compact/RAII 還原）。
+        let window_control: Arc<dyn window_layout::MainWindowController> =
+            Arc::new(RealMainWindowController::new(app.clone()));
+        let mon = window_control.monitor_info()?;
+        plan_layout(mon.rc_work, mon.dpi, (config.width, config.height))?;
+
         // 建立 CancelSignal receiver 前，把 watch channel 實際值重設 false，
         // 否則上一場 request_cancel 留下的 true 會讓新 session 立即 Cancelled。
         self.reset_cancel();
@@ -733,6 +996,9 @@ impl BenchmarkManager {
             st.progress_pct = 0;
             st.elapsed_secs = 0;
             st.current_lp = None;
+            st.operation = Some(BenchmarkOperation::Benchmark);
+            st.window_layout = WindowLayout::CompactProgress;
+            st.window_integrity = WindowIntegrity::default();
         }
 
         let process_runner: Arc<dyn ProcessRunner> = Arc::new(RealProcessRunner::new());
@@ -742,14 +1008,18 @@ impl BenchmarkManager {
 
         let manager_progress = self.clone();
         let manager_done = self.clone();
+        let manager_integrity = self.clone();
         let app_emit = app.clone();
+        let app_final = app.clone();
         let started = std::time::Instant::now();
         let mut ctx = RunContext {
             backend: self.backend.clone(),
             sleeper: self.sleeper.clone(),
             processes: process_runner,
             cancel,
+            env: Arc::new(RealEnvironmentProbe::new()),
             topo: topo.clone(),
+            capture_quality: Default::default(),
             cpu_identity: detect_cpu_identity(),
             assets,
             storage_root: storage::benchmarks_root(),
@@ -763,19 +1033,42 @@ impl BenchmarkManager {
                     st.current_lp = p.lp;
                     st.progress_pct = p.percentage;
                     st.elapsed_secs = started.elapsed().as_secs();
+                    // 取消欄位只在事件有值時更新，避免一般 progress（None）抹掉
+                    // request_cancel 已寫入的「requested」階段。
+                    if let Some(cs) = &p.cancel_stage {
+                        st.cancel_stage = Some(cs.clone());
+                    }
+                    if let Some(cp) = p.cancel_progress {
+                        st.cancel_progress = Some(cp);
+                    }
                 }
                 let _ = app_emit.emit("gpu-benchmark-progress", p);
             }),
             baseline: None,
             owned_processes: Vec::new(),
             window: Arc::new(RealWorkloadWindow::new()),
+            window_control,
+            layout: None,
+            on_integrity: Box::new(move |wi| {
+                if let Ok(mut st) = manager_integrity.state.write() {
+                    st.window_integrity = wi.clone();
+                }
+            }),
+            window_retries: 0,
+            last_integrity: None,
         };
 
         tauri::async_runtime::spawn_blocking(move || {
             // reservation guard 存活到 closure 結束（runner 終結、寫完最終 status 後）
             // 才 drop；期間其他 mutation/start 一律被拒，panic 也會經 drop 釋放。
             let _guard = guard;
-            let result = runner::run_benchmark(&mut ctx);
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                runner::run_benchmark(&mut ctx)
+            }))
+            .unwrap_or_else(|_| {
+                log::error!("benchmark runner panic: {}", codes::BENCHMARK_RUNNER_PANIC);
+                runner::panic_failure(&mut ctx)
+            });
             log::info!(
                 "基準測試 session {} 結束: status={:?}, best_lp={:?}, severe_lps={:?}, recommended={:?}",
                 result.detail.summary.id,
@@ -793,6 +1086,8 @@ impl BenchmarkManager {
                 st.stage = BenchmarkStage::Finalizing;
                 st.current_lp = None;
                 st.elapsed_secs = started.elapsed().as_secs();
+                st.operation = None;
+                st.window_layout = WindowLayout::Normal;
             }
             if result.recovery_required {
                 manager_done
@@ -802,15 +1097,38 @@ impl BenchmarkManager {
                     st.recovery_required = true;
                 }
             }
+            // 終態 state 寫入完成後，再 emit 一個事件，讓 App 的既有 listener 重新
+            // get_benchmark_state 讀到已提交的終態（Completed/Failed/Cancelled），
+            // 不依賴 setTimeout race。
+            let final_progress = BenchmarkProgress {
+                session_id: result.detail.summary.id.clone(),
+                stage: "finalizing".to_string(),
+                round: None,
+                phase: None,
+                phase_round: None,
+                lp: None,
+                percentage: 100,
+                eta_secs: None,
+                error: result.error.clone(),
+                window_integrity: None,
+                cancel_stage: (result.status == SessionStatus::Cancelled)
+                    .then(|| "finalizing".to_string()),
+                cancel_progress: (result.status == SessionStatus::Cancelled).then_some(100),
+            };
+            let _ = app_final.emit("gpu-benchmark-progress", final_progress);
         });
         Ok(())
     }
 
     /// 請求取消正在跑的基準測試（runner 在安全階段邊界檢查）。
+    /// 立即在 state 標記取消階段=requested、百分比=0，讓前端不等 runner 下一個
+    /// capture boundary event 就顯示「已收到取消請求 / 0%」。
     pub fn request_cancel(&self) {
         let _ = self.cancel_tx.send(true);
         if let Ok(mut s) = self.state.write() {
             s.cancel_requested = true;
+            s.cancel_stage = Some("requested".to_string());
+            s.cancel_progress = Some(0);
         }
     }
 
@@ -824,8 +1142,8 @@ impl BenchmarkManager {
 }
 
 /// 判定某個 session「現在可否套用」的核心邏輯（free function，注入路徑/身分供測試）。
-/// 順序：session 存在 → Completed + bestLp → 可靠性 Passed → LP 範圍 →
-/// CPU 指紋 → GPU 存在 → BasicDisplay。
+/// 順序：session 存在 →（Equivalent 走等效契約）→ Completed + bestLp → 可靠性 Passed →
+/// LP 範圍 → CPU 指紋 → GPU 存在 → BasicDisplay。
 fn check_apply_at(
     backend: &dyn GpuBackend,
     topo: &Topology,
@@ -836,10 +1154,19 @@ fn check_apply_at(
     let cannot = |reason: &str| ApplyStatus {
         can_apply: false,
         reason: Some(reason.to_string()),
+        equivalent_mode: false,
+        allowed_lps: Vec::new(),
+        requires_safety_validation: false,
     };
     let Ok(detail) = storage::get_at(storage_root, session_id) else {
         return cannot(codes::BENCHMARK_SESSION_NOT_FOUND);
     };
+    // Equivalent 契約：algorithmVersion=2 且 reliability=Equivalent → 走等效套用路徑。
+    if detail.summary.reliability.status == ReliabilityStatus::Equivalent
+        && detail.summary.reliability.algorithm_version == 2
+    {
+        return check_equivalent_apply(backend, topo, cpu_identity, &detail);
+    }
     if detail.summary.status != SessionStatus::Completed || detail.summary.best_lp.is_none() {
         return cannot(codes::BENCHMARK_SESSION_NOT_COMPLETED);
     }
@@ -871,6 +1198,77 @@ fn check_apply_at(
     ApplyStatus {
         can_apply: true,
         reason: None,
+        equivalent_mode: false,
+        allowed_lps: Vec::new(),
+        requires_safety_validation: false,
+    }
+}
+
+/// Equivalent-mode session 的「可否套用」契約（與 legacy `bestLp` 路徑分離）。
+fn check_equivalent_apply(
+    backend: &dyn GpuBackend,
+    topo: &Topology,
+    cpu_identity: &CpuIdentity,
+    detail: &SessionDetail,
+) -> ApplyStatus {
+    let finalists = &detail.summary.equivalent_finalist_lps;
+    let cannot = |reason: &str| ApplyStatus {
+        can_apply: false,
+        reason: Some(reason.to_string()),
+        equivalent_mode: true,
+        allowed_lps: finalists.clone(),
+        requires_safety_validation: true,
+    };
+    if detail.summary.status != SessionStatus::Completed || finalists.len() != 2 {
+        return cannot(codes::BENCHMARK_NOT_EQUIVALENT);
+    }
+    if finalists.iter().any(|&lp| lp >= topo.total_lp.min(64)) {
+        return cannot(codes::BENCHMARK_SESSION_INCOMPATIBLE);
+    }
+    if detail.summary.cpu_fingerprint != cpu_fingerprint_with(topo, cpu_identity) {
+        return cannot(codes::BENCHMARK_SESSION_INCOMPATIBLE);
+    }
+    let present = backend
+        .enumerate_present_adapters()
+        .map(|a| {
+            a.iter().any(|d| {
+                d.instance_id
+                    .eq_ignore_ascii_case(&detail.summary.gpu_instance_id)
+            })
+        })
+        .unwrap_or(false);
+    if !present {
+        return cannot(codes::GPU_NOT_FOUND);
+    }
+    if !backend.basic_display_enabled().unwrap_or(false) {
+        return cannot(codes::GPU_BASIC_DISPLAY_DISABLED);
+    }
+    // 已通過 safety validation（Passed 且 selected 在 pair 內）→ 可套用。
+    let validation = detail.equivalent_safety_validation.as_ref();
+    let validated = validation.is_some_and(|v| {
+        v.status == EquivalentSafetyStatus::Passed
+            && v.selected_lp.is_some_and(|lp| finalists.contains(&lp))
+    });
+    if validated {
+        // live reference policy 必須仍與驗證 snapshot 一致，否則需重驗（不可先顯示可套用）。
+        let reference_ok = validation.is_some_and(|v| {
+            backend
+                .read_affinity_policy(&detail.summary.gpu_instance_id)
+                .map(|current| equivalent_reference_matches(v, &current))
+                .unwrap_or(false)
+        });
+        if !reference_ok {
+            return cannot(codes::BENCHMARK_EQUIVALENT_REFERENCE_CHANGED);
+        }
+        ApplyStatus {
+            can_apply: true,
+            reason: None,
+            equivalent_mode: true,
+            allowed_lps: finalists.clone(),
+            requires_safety_validation: false,
+        }
+    } else {
+        cannot(codes::BENCHMARK_EQUIVALENT_VALIDATION_REQUIRED)
     }
 }
 
@@ -899,6 +1297,202 @@ fn list_importable(
                     .any(|g| g.eq_ignore_ascii_case(&s.gpu_instance_id))
         })
         .collect()
+}
+
+/// 由精簡 LE 單 LP mask bytes 反解 LP index（單一位元）；非單一位元 → None。
+pub fn mask_bytes_to_lp(bytes: Option<&[u8]>) -> Option<u32> {
+    let bytes = bytes?;
+    if bytes.is_empty() || bytes.len() > 8 {
+        return None;
+    }
+    let mut le = [0u8; 8];
+    le[..bytes.len()].copy_from_slice(bytes);
+    let mask = u64::from_le_bytes(le);
+    if mask == 0 || !mask.is_power_of_two() {
+        return None;
+    }
+    Some(mask.trailing_zeros())
+}
+
+/// 等效安全驗證的前置決策。
+#[derive(Debug)]
+pub enum EquivalentValidationPlan {
+    /// 目前鎖定核心已在 pair 內 → 立即 Passed（同核心 no-op 或選另一 finalist）。
+    ImmediatePass { reference_lp: u32 },
+    /// 目前鎖定核心不在 pair 內 → 跑 3 組 AB/BA 比較 selected vs reference。
+    RunCaptures { reference_lp: u32 },
+}
+
+/// 前置決策：session 為 equivalent 契約、selected 在 pair 內、相容性通過，且能由目前
+/// policy 解出鎖定核心（reference）。回傳 ImmediatePass / RunCaptures，或拒絕原因。
+pub fn equivalent_validation_plan(
+    backend: &dyn GpuBackend,
+    topo: &Topology,
+    cpu_identity: &CpuIdentity,
+    detail: &SessionDetail,
+    current_policy: &AffinityPolicy,
+    selected_lp: u32,
+) -> Result<EquivalentValidationPlan, String> {
+    let finalists = &detail.summary.equivalent_finalist_lps;
+    if detail.summary.status != SessionStatus::Completed
+        || detail.summary.reliability.status != ReliabilityStatus::Equivalent
+        || detail.summary.reliability.algorithm_version != 2
+        || finalists.len() != 2
+    {
+        return Err(codes::BENCHMARK_NOT_EQUIVALENT.to_string());
+    }
+    if !finalists.contains(&selected_lp) {
+        return Err(codes::BENCHMARK_EQUIVALENT_LP_INVALID.to_string());
+    }
+    if finalists.iter().any(|&lp| lp >= topo.total_lp.min(64)) {
+        return Err(codes::BENCHMARK_SESSION_INCOMPATIBLE.to_string());
+    }
+    if detail.summary.cpu_fingerprint != cpu_fingerprint_with(topo, cpu_identity) {
+        return Err(codes::BENCHMARK_SESSION_INCOMPATIBLE.to_string());
+    }
+    let present = backend
+        .enumerate_present_adapters()
+        .map_err(|e| e.code().to_string())?
+        .iter()
+        .any(|d| {
+            d.instance_id
+                .eq_ignore_ascii_case(&detail.summary.gpu_instance_id)
+        });
+    if !present {
+        return Err(codes::GPU_NOT_FOUND.to_string());
+    }
+    if !backend
+        .basic_display_enabled()
+        .map_err(|e| e.code().to_string())?
+    {
+        return Err(codes::GPU_BASIC_DISPLAY_DISABLED.to_string());
+    }
+    let reference_lp = mask_bytes_to_lp(current_policy.assignment_set_override.bytes.as_deref())
+        .ok_or_else(|| codes::BENCHMARK_EQUIVALENT_NO_REFERENCE.to_string())?;
+    if finalists.contains(&reference_lp) {
+        Ok(EquivalentValidationPlan::ImmediatePass { reference_lp })
+    } else {
+        Ok(EquivalentValidationPlan::RunCaptures { reference_lp })
+    }
+}
+
+/// 套用等效親和性的前置決策：validation Passed、selected 一致、live reference policy
+/// 未變、相容性通過。通過 → 回傳要套用的 selected_lp；否則拒絕原因。
+pub fn apply_equivalent_decision(
+    backend: &dyn GpuBackend,
+    topo: &Topology,
+    cpu_identity: &CpuIdentity,
+    detail: &SessionDetail,
+    current_policy: &AffinityPolicy,
+    selected_lp: u32,
+) -> Result<u32, String> {
+    let finalists = &detail.summary.equivalent_finalist_lps;
+    if detail.summary.status != SessionStatus::Completed
+        || detail.summary.reliability.status != ReliabilityStatus::Equivalent
+        || detail.summary.reliability.algorithm_version != 2
+        || finalists.len() != 2
+    {
+        return Err(codes::BENCHMARK_NOT_EQUIVALENT.to_string());
+    }
+    if !finalists.contains(&selected_lp) {
+        return Err(codes::BENCHMARK_EQUIVALENT_LP_INVALID.to_string());
+    }
+    if finalists.iter().any(|&lp| lp >= topo.total_lp.min(64)) {
+        return Err(codes::BENCHMARK_SESSION_INCOMPATIBLE.to_string());
+    }
+    if detail.summary.cpu_fingerprint != cpu_fingerprint_with(topo, cpu_identity) {
+        return Err(codes::BENCHMARK_SESSION_INCOMPATIBLE.to_string());
+    }
+    let present = backend
+        .enumerate_present_adapters()
+        .map_err(|e| e.code().to_string())?
+        .iter()
+        .any(|d| {
+            d.instance_id
+                .eq_ignore_ascii_case(&detail.summary.gpu_instance_id)
+        });
+    if !present {
+        return Err(codes::GPU_NOT_FOUND.to_string());
+    }
+    if !backend
+        .basic_display_enabled()
+        .map_err(|e| e.code().to_string())?
+    {
+        return Err(codes::GPU_BASIC_DISPLAY_DISABLED.to_string());
+    }
+    let validation = detail
+        .equivalent_safety_validation
+        .as_ref()
+        .ok_or_else(|| codes::BENCHMARK_EQUIVALENT_VALIDATION_REQUIRED.to_string())?;
+    if validation.status != EquivalentSafetyStatus::Passed
+        || validation.selected_lp != Some(selected_lp)
+    {
+        return Err(codes::BENCHMARK_EQUIVALENT_VALIDATION_REQUIRED.to_string());
+    }
+    if !equivalent_reference_matches(validation, current_policy) {
+        return Err(codes::BENCHMARK_EQUIVALENT_REFERENCE_CHANGED.to_string());
+    }
+    Ok(selected_lp)
+}
+
+/// 把等效安全驗證結果寫回原 session（不重算、不遷移歷史；原 session 保持 Completed）。
+pub fn write_equivalent_validation(
+    storage_root: &Path,
+    session_id: &str,
+    validation: EquivalentSafetyValidation,
+) -> Result<(), String> {
+    let mut detail = storage::get_at(storage_root, session_id)?;
+    detail.equivalent_safety_validation = Some(validation);
+    storage::save_session_at(storage_root, &detail)
+}
+
+/// 等效安全驗證的前置：assets 解析/驗證成功（`assets` 為 Ok）才寫 `Pending` 並回傳
+/// 已驗證的 assets；失敗不寫任何狀態、直接回傳 Err。讓呼叫端在 spawn 前失敗時
+/// session 保持原狀（可重試），不會留下永久 `Pending`。
+fn begin_equivalent_validation(
+    storage_root: &Path,
+    session_id: &str,
+    selected_lp: u32,
+    reference_lp: u32,
+    ref_mask: Option<Vec<u8>>,
+    assets: Result<BenchmarkAssets, String>,
+) -> Result<BenchmarkAssets, String> {
+    let assets = assets?;
+    write_equivalent_validation(
+        storage_root,
+        session_id,
+        EquivalentSafetyValidation {
+            status: EquivalentSafetyStatus::Pending,
+            selected_lp: Some(selected_lp),
+            reference_lp: Some(reference_lp),
+            rounds: 0,
+            reference_policy_mask: ref_mask,
+            ..Default::default()
+        },
+    )?;
+    Ok(assets)
+}
+
+/// validation 的 reference snapshot 是否仍與目前 live policy 一致（逐位元組）。
+/// snapshot 為 None（舊資料或缺漏）→ false（保守拒絕）。
+fn equivalent_reference_matches(
+    validation: &EquivalentSafetyValidation,
+    current: &AffinityPolicy,
+) -> bool {
+    match validation.reference_policy_mask.as_deref() {
+        Some(mask) => current.assignment_set_override.bytes.as_deref() == Some(mask),
+        None => false,
+    }
+}
+
+/// 解析並驗證內建資源（assets）；任一失敗不寫任何 validation 狀態。
+fn resolve_and_verify_assets(
+    app: &AppHandle,
+    config: &BenchmarkConfig,
+) -> Result<BenchmarkAssets, String> {
+    let assets = resolve_assets(app, config)?;
+    assets::verify(&assets).map_err(|e| e.code().to_string())?;
+    Ok(assets)
 }
 
 /// 由 AppHandle 解析內建資源目錄（tauri.conf.json `bundle.resources`）。
@@ -1023,9 +1617,11 @@ mod tests {
                 total_bytes: 0,
                 config: BenchmarkConfig::default(),
                 error: None,
+                ..Default::default()
             },
             results: vec![],
             samples: vec![],
+            ..Default::default()
         };
         storage::save_session_at(storage_root, &detail).unwrap();
         id
@@ -1702,9 +2298,21 @@ mod tests {
         assert_eq!(s.status, SessionStatus::Pending);
         assert!(!s.recovery_required);
         assert!(!m.cancel_requested());
+        assert_eq!(s.cancel_stage, None);
+        assert_eq!(s.cancel_progress, None);
         m.request_cancel();
         assert!(m.cancel_requested());
-        assert!(m.state_snapshot().cancel_requested);
+        let sc = m.state_snapshot();
+        assert!(sc.cancel_requested);
+        // request_cancel 立即在 state 標記 requested/0%，供前端立刻顯示「已收到取消請求」。
+        assert_eq!(sc.cancel_stage.as_deref(), Some("requested"));
+        assert_eq!(sc.cancel_progress, Some(0));
+        // reset_cancel 歸零取消欄位（下一場 session 不再殘留 requested/0%）。
+        m.reset_cancel();
+        let s2 = m.state_snapshot();
+        assert!(!s2.cancel_requested);
+        assert_eq!(s2.cancel_stage, None);
+        assert_eq!(s2.cancel_progress, None);
     }
 
     /// exit guard：Running 阻擋退出，Idle/Completed 允許
@@ -1773,7 +2381,7 @@ mod tests {
     fn effective_lps_excludes_core_zero() {
         let t = topo(); // 8 LP（core c = LP c，故 core 0 = LP 0）
         let c = BenchmarkConfig::default();
-        // 預設全部支援 LP，但排除 physical Core 0 的 LP 0
+        // 無 SMT 均質拓撲：預設 = 所有 primary LP（= 全部 LP），排除 physical Core 0 的 LP 0
         assert_eq!(runner::effective_lps(&c, &t), vec![1, 2, 3, 4, 5, 6, 7]);
         // 候選過濾 + 去重 + 排序（LP 0 已在候選外，故不變）
         let c = BenchmarkConfig {
@@ -1787,6 +2395,35 @@ mod tests {
             ..Default::default()
         };
         assert!(runner::effective_lps(&c, &t).is_empty());
+    }
+
+    #[test]
+    fn effective_lps_default_excludes_smt_siblings() {
+        // 8C16T SMT：sibling 與 primary 同一顆物理核心（GPU policy 綁單一 LP），
+        // 預設只測 primary，排除 physical Core 0（LP 0,1）
+        let cores: Vec<(Vec<u32>, u8, bool)> =
+            (0..8u32).map(|c| (vec![c * 2, c * 2 + 1], 0, true)).collect();
+        let t = crate::topology::build_topology(cores);
+        let c = BenchmarkConfig::default();
+        assert_eq!(runner::effective_lps(&c, &t), vec![2, 4, 6, 8, 10, 12, 14]);
+    }
+
+    #[test]
+    fn effective_lps_default_p_core_only_on_hybrid() {
+        // 8P(HT)+8E：預設只測 P-core primary；E-core 不當 GPU 中斷目標，不測
+        let mut cores: Vec<(Vec<u32>, u8, bool)> = Vec::new();
+        let mut lp = 0u32;
+        for _ in 0..8 {
+            cores.push((vec![lp, lp + 1], 1, true));
+            lp += 2;
+        }
+        for _ in 0..8 {
+            cores.push((vec![lp], 0, false));
+            lp += 1;
+        }
+        let t = crate::topology::build_topology(cores);
+        let c = BenchmarkConfig::default();
+        assert_eq!(runner::effective_lps(&c, &t), vec![2, 4, 6, 8, 10, 12, 14]);
     }
 
     #[test]
@@ -1833,9 +2470,11 @@ mod tests {
                     total_bytes: 0,
                     config: BenchmarkConfig::default(),
                     error: None,
+                    ..Default::default()
                 },
                 results: vec![],
                 samples: vec![],
+                ..Default::default()
             };
             storage::save_session_at(&root, &detail).unwrap();
             id
@@ -2007,8 +2646,8 @@ mod tests {
         backend.set_policy(original.clone());
         backend.fail_next_write();
 
-        let err =
-            apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore).unwrap_err();
+        let err = apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore)
+            .unwrap_err();
         assert_eq!(err, codes::GPU_APPLY_FAILED);
         assert_eq!(backend.current_policy(GPU_A), original);
         assert!(!journal.exists());
@@ -2102,15 +2741,12 @@ mod tests {
         fake.set_policy(original.clone());
         fake.fail_next_write();
 
-        let err =
-            m.apply_gpu_affinity_at(&topo(), GPU_A, 4, &journal, &restore)
-                .unwrap_err();
+        let err = m
+            .apply_gpu_affinity_at(&topo(), GPU_A, 4, &journal, &restore)
+            .unwrap_err();
         assert_eq!(err, codes::GPU_APPLY_FAILED);
         // 還原成功 → 策略回原樣，日誌清除
-        assert_eq!(
-            m.backend.read_affinity_policy(GPU_A).unwrap(),
-            original
-        );
+        assert_eq!(m.backend.read_affinity_policy(GPU_A).unwrap(), original);
         assert!(!journal.exists(), "還原成功後日誌應清除");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2187,7 +2823,10 @@ mod tests {
         let (m, _fake) = manager_with_gpu(GPU_A);
         let _guard = m.reserve(OP_MUTATION).unwrap();
         assert!(m.reserve(OP_BENCHMARK).is_err(), "start 不得搶 mutation");
-        assert!(m.reserve(OP_MUTATION).is_err(), "mutation 不得並行另一 mutation");
+        assert!(
+            m.reserve(OP_MUTATION).is_err(),
+            "mutation 不得並行另一 mutation"
+        );
         assert_eq!(
             m.apply_gpu_affinity(&topo(), GPU_A, 3).unwrap_err(),
             codes::BENCHMARK_ALREADY_RUNNING
@@ -2235,8 +2874,8 @@ mod tests {
         backend.set_policy(original.clone());
         recovery::inject::fail_next_advance();
 
-        let err =
-            apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore).unwrap_err();
+        let err = apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore)
+            .unwrap_err();
         assert_eq!(err, codes::GPU_APPLY_FAILED);
         assert_eq!(backend.current_policy(GPU_A), original);
         assert!(!journal.exists(), "advance 失敗 rollback 後日誌應清除");
@@ -2254,8 +2893,8 @@ mod tests {
         backend.set_policy(original.clone());
         backend.fail_nth_read(2); // snapshot read=1 成功；read-back read=2 失敗
 
-        let err =
-            apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore).unwrap_err();
+        let err = apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore)
+            .unwrap_err();
         assert_eq!(err, codes::GPU_REGISTRY_FAILED);
         assert_eq!(backend.current_policy(GPU_A), original);
         assert!(!journal.exists(), "read-back 失敗 rollback 後日誌應清除");
@@ -2273,8 +2912,8 @@ mod tests {
         backend.set_policy(original.clone());
         backend.fail_nth_read_mismatch(2);
 
-        let err =
-            apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore).unwrap_err();
+        let err = apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore)
+            .unwrap_err();
         assert_eq!(err, codes::GPU_APPLY_FAILED);
         assert_eq!(backend.current_policy(GPU_A), original);
         assert!(!journal.exists(), "read-back 不符 rollback 後日誌應清除");
@@ -2295,8 +2934,8 @@ mod tests {
         let original = policy_on(GPU_A, 2, 0b1);
         backend.set_policy(original.clone());
 
-        let err =
-            apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore).unwrap_err();
+        let err = apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore)
+            .unwrap_err();
         assert_eq!(err, codes::GPU_APPLY_FAILED);
         assert_eq!(backend.current_policy(GPU_A), original);
         assert!(!journal.exists(), "還原記錄寫入失敗 rollback 後日誌應清除");
@@ -2315,8 +2954,8 @@ mod tests {
         backend.set_policy(original.clone());
         recovery::inject::fail_next_clear();
 
-        let err =
-            apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore).unwrap_err();
+        let err = apply_affinity_to_gpu(&backend, &NoopSleeper, GPU_A, 4, &journal, &restore)
+            .unwrap_err();
         assert_eq!(err, codes::GPU_APPLY_FAILED);
         assert_eq!(backend.current_policy(GPU_A), original);
         assert!(!journal.exists(), "clear 失敗 rollback 後日誌應清除");
@@ -2371,7 +3010,10 @@ mod tests {
             .apply_gpu_affinity_at(&topo(), GPU_A, 4, &journal, &restore)
             .unwrap_err();
         assert_eq!(err, codes::GPU_APPLY_FAILED);
-        assert!(m.recovery_required(), "restore record 清理失敗應設 recoveryRequired");
+        assert!(
+            m.recovery_required(),
+            "restore record 清理失敗應設 recoveryRequired"
+        );
         assert_eq!(m.backend.read_affinity_policy(GPU_A).unwrap(), original);
         assert!(journal.exists(), "清理失敗應保留 dirty journal");
         let j = recovery::load_from(&journal).unwrap().unwrap();
@@ -2395,7 +3037,10 @@ mod tests {
             .apply_gpu_affinity_at(&topo(), GPU_A, 4, &journal, &restore)
             .unwrap_err();
         assert_eq!(err, codes::GPU_APPLY_FAILED);
-        assert!(m.recovery_required(), "journal cleanup 失敗不得視為乾淨 rollback");
+        assert!(
+            m.recovery_required(),
+            "journal cleanup 失敗不得視為乾淨 rollback"
+        );
         assert!(journal.exists(), "清理失敗應保留 dirty journal");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2418,7 +3063,10 @@ mod tests {
             .apply_gpu_affinity_at(&topo(), GPU_A, 4, &journal, &restore)
             .unwrap_err();
         assert_eq!(err, codes::GPU_APPLY_FAILED);
-        assert!(m.recovery_required(), "advance + restore 失敗必須 fail-closed");
+        assert!(
+            m.recovery_required(),
+            "advance + restore 失敗必須 fail-closed"
+        );
         assert!(journal.exists());
         let j = recovery::load_from(&journal).unwrap().unwrap();
         assert_eq!(
@@ -2438,7 +3086,10 @@ mod tests {
     fn load_restore_record_distinguishes_notfound_and_errors() {
         let dir = temp_dir("loadrec");
         // NotFound → None
-        assert_eq!(load_restore_record(&dir.join("missing.json")).unwrap(), None);
+        assert_eq!(
+            load_restore_record(&dir.join("missing.json")).unwrap(),
+            None
+        );
         // 有效 JSON → Some
         let good = dir.join("good.json");
         let snap = policy_on(GPU_A, 2, 0b1);
@@ -2452,6 +3103,370 @@ mod tests {
         let as_dir = dir.join("asdir.json");
         std::fs::create_dir_all(&as_dir).unwrap();
         assert!(load_restore_record(&as_dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── 等效安全驗證 / 等效套用（Task 3）──
+
+    fn equivalent_reliability() -> ReliabilitySummary {
+        ReliabilitySummary {
+            status: ReliabilityStatus::Equivalent,
+            algorithm_version: 2,
+            ..Default::default()
+        }
+    }
+
+    /// 寫入一個 equivalent-mode Completed session（equivalent_finalist_lps = finalists）。
+    fn equivalent_session(
+        storage_root: &Path,
+        topo: &Topology,
+        gpu: &str,
+        finalists: &[u32],
+    ) -> String {
+        let id = Uuid::new_v4().to_string();
+        let detail = SessionDetail {
+            summary: crate::benchmark::SessionSummary {
+                id: id.clone(),
+                status: SessionStatus::Completed,
+                started_at: "2026-08-11T00:00:00Z".into(),
+                finished_at: Some("2026-08-11T00:01:00Z".into()),
+                gpu_name: "GPU".into(),
+                gpu_instance_id: gpu.to_string(),
+                cpu_fingerprint: cpu_fingerprint_with(topo, &fixed_identity()),
+                best_lp: None,
+                reliability: equivalent_reliability(),
+                equivalent_finalist_lps: finalists.to_vec(),
+                severe_lps: vec![],
+                sample_count: 5,
+                total_bytes: 0,
+                config: BenchmarkConfig::default(),
+                error: None,
+                ..Default::default()
+            },
+            results: vec![],
+            samples: vec![],
+            ..Default::default()
+        };
+        storage::save_session_at(storage_root, &detail).unwrap();
+        id
+    }
+
+    #[test]
+    fn mask_bytes_to_lp_roundtrips_and_rejects_non_single_bit() {
+        assert_eq!(mask_bytes_to_lp(Some(&single_lp_mask_bytes(0))), Some(0));
+        assert_eq!(mask_bytes_to_lp(Some(&single_lp_mask_bytes(3))), Some(3));
+        assert_eq!(mask_bytes_to_lp(Some(&single_lp_mask_bytes(63))), Some(63));
+        // 非單一位元 / 空 → None
+        assert_eq!(mask_bytes_to_lp(None), None);
+        assert_eq!(mask_bytes_to_lp(Some(&[])), None);
+        assert_eq!(mask_bytes_to_lp(Some(&[0b11])), None);
+    }
+
+    #[test]
+    fn equivalent_validation_plan_immediate_pass_when_current_in_pair() {
+        let dir = temp_dir("plan_imm");
+        let storage_root = dir.join("benchmarks");
+        std::fs::create_dir_all(&storage_root).unwrap();
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        let sid = equivalent_session(&storage_root, &topo(), GPU_A, &[3, 5]);
+        let detail = storage::get_at(&storage_root, &sid).unwrap();
+        // 目前鎖定 LP 5（在 pair 內）
+        let policy = policy_on(GPU_A, 4, 1 << 5);
+        match equivalent_validation_plan(&backend, &topo(), &fixed_identity(), &detail, &policy, 3)
+        {
+            Ok(EquivalentValidationPlan::ImmediatePass { reference_lp }) => {
+                assert_eq!(reference_lp, 5);
+            }
+            other => panic!("應 ImmediatePass: {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn equivalent_validation_plan_run_captures_when_current_outside_pair() {
+        let dir = temp_dir("plan_run");
+        let storage_root = dir.join("benchmarks");
+        std::fs::create_dir_all(&storage_root).unwrap();
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        let sid = equivalent_session(&storage_root, &topo(), GPU_A, &[3, 5]);
+        let detail = storage::get_at(&storage_root, &sid).unwrap();
+        // 目前鎖定 LP 2（不在 pair 內）
+        let policy = policy_on(GPU_A, 4, 1 << 2);
+        match equivalent_validation_plan(&backend, &topo(), &fixed_identity(), &detail, &policy, 3)
+        {
+            Ok(EquivalentValidationPlan::RunCaptures { reference_lp }) => {
+                assert_eq!(reference_lp, 2);
+            }
+            other => panic!("應 RunCaptures: {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn equivalent_validation_plan_rejects_non_pair_selected_and_no_reference() {
+        let dir = temp_dir("plan_reject");
+        let storage_root = dir.join("benchmarks");
+        std::fs::create_dir_all(&storage_root).unwrap();
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        let sid = equivalent_session(&storage_root, &topo(), GPU_A, &[3, 5]);
+        let detail = storage::get_at(&storage_root, &sid).unwrap();
+        let policy = policy_on(GPU_A, 4, 1 << 5);
+        // selected 不在 pair → LP_INVALID
+        assert_eq!(
+            equivalent_validation_plan(&backend, &topo(), &fixed_identity(), &detail, &policy, 9)
+                .unwrap_err(),
+            codes::BENCHMARK_EQUIVALENT_LP_INVALID
+        );
+        // 無單一鎖定核心（policy 空）→ NO_REFERENCE
+        let empty = AffinityPolicy {
+            instance_id: GPU_A.to_string(),
+            ..Default::default()
+        };
+        assert_eq!(
+            equivalent_validation_plan(&backend, &topo(), &fixed_identity(), &detail, &empty, 3)
+                .unwrap_err(),
+            codes::BENCHMARK_EQUIVALENT_NO_REFERENCE
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_equivalent_decision_requires_passed_matching_validation() {
+        let dir = temp_dir("apply_decision");
+        let storage_root = dir.join("benchmarks");
+        std::fs::create_dir_all(&storage_root).unwrap();
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        let sid = equivalent_session(&storage_root, &topo(), GPU_A, &[3, 5]);
+        // 未驗證 → VALIDATION_REQUIRED
+        {
+            let detail = storage::get_at(&storage_root, &sid).unwrap();
+            let policy = policy_on(GPU_A, 4, 1 << 2);
+            assert_eq!(
+                apply_equivalent_decision(
+                    &backend,
+                    &topo(),
+                    &fixed_identity(),
+                    &detail,
+                    &policy,
+                    3
+                )
+                .unwrap_err(),
+                codes::BENCHMARK_EQUIVALENT_VALIDATION_REQUIRED
+            );
+        }
+        // 寫入 Passed validation（selected=3、ref mask=LP2）→ 通過
+        write_equivalent_validation(
+            &storage_root,
+            &sid,
+            EquivalentSafetyValidation {
+                status: EquivalentSafetyStatus::Passed,
+                selected_lp: Some(3),
+                reference_lp: Some(2),
+                rounds: 3,
+                reference_policy_mask: Some(single_lp_mask_bytes(2)),
+                reason: Some("passed".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let detail = storage::get_at(&storage_root, &sid).unwrap();
+        // live policy 仍為 LP2（未變）→ 通過
+        let policy = policy_on(GPU_A, 4, 1 << 2);
+        assert_eq!(
+            apply_equivalent_decision(&backend, &topo(), &fixed_identity(), &detail, &policy, 3)
+                .unwrap(),
+            3
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn apply_equivalent_decision_rejects_reference_changed() {
+        let dir = temp_dir("apply_changed");
+        let storage_root = dir.join("benchmarks");
+        std::fs::create_dir_all(&storage_root).unwrap();
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        let sid = equivalent_session(&storage_root, &topo(), GPU_A, &[3, 5]);
+        write_equivalent_validation(
+            &storage_root,
+            &sid,
+            EquivalentSafetyValidation {
+                status: EquivalentSafetyStatus::Passed,
+                selected_lp: Some(3),
+                reference_lp: Some(2),
+                rounds: 3,
+                reference_policy_mask: Some(single_lp_mask_bytes(2)),
+                reason: Some("passed".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let detail = storage::get_at(&storage_root, &sid).unwrap();
+        // live policy 變更為 LP4（≠ snapshot LP2）→ REFERENCE_CHANGED
+        let policy = policy_on(GPU_A, 4, 1 << 4);
+        assert_eq!(
+            apply_equivalent_decision(&backend, &topo(), &fixed_identity(), &detail, &policy, 3)
+                .unwrap_err(),
+            codes::BENCHMARK_EQUIVALENT_REFERENCE_CHANGED
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_apply_equivalent_requires_validation_then_can_apply() {
+        let dir = temp_dir("check_equiv");
+        let storage_root = dir.join("benchmarks");
+        std::fs::create_dir_all(&storage_root).unwrap();
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        let sid = equivalent_session(&storage_root, &topo(), GPU_A, &[3, 5]);
+        // 尚未驗證 → equivalent_mode=true、requires_safety_validation=true、can_apply=false
+        let st = check_apply_at(&backend, &topo(), &fixed_identity(), &storage_root, &sid);
+        assert!(st.equivalent_mode);
+        assert_eq!(st.allowed_lps, vec![3, 5]);
+        assert!(st.requires_safety_validation);
+        assert!(!st.can_apply);
+        assert_eq!(
+            st.reason.as_deref(),
+            Some(codes::BENCHMARK_EQUIVALENT_VALIDATION_REQUIRED)
+        );
+        // 寫入 Passed validation（ref snapshot=LP2），live policy 仍為 LP2 → can_apply=true、requires=false
+        write_equivalent_validation(
+            &storage_root,
+            &sid,
+            EquivalentSafetyValidation {
+                status: EquivalentSafetyStatus::Passed,
+                selected_lp: Some(3),
+                reference_lp: Some(2),
+                rounds: 3,
+                reference_policy_mask: Some(single_lp_mask_bytes(2)),
+                reason: Some("passed".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        backend.set_policy(policy_on(GPU_A, 4, 1 << 2));
+        let st = check_apply_at(&backend, &topo(), &fixed_identity(), &storage_root, &sid);
+        assert!(st.equivalent_mode);
+        assert!(st.can_apply);
+        assert!(!st.requires_safety_validation);
+        assert_eq!(st.reason, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_apply_legacy_path_unchanged_for_passed_session() {
+        let dir = temp_dir("check_legacy");
+        let storage_root = dir.join("benchmarks");
+        std::fs::create_dir_all(&storage_root).unwrap();
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        let sid = completed_session(&storage_root, &topo(), GPU_A, 3);
+        let st = check_apply_at(&backend, &topo(), &fixed_identity(), &storage_root, &sid);
+        assert!(st.can_apply);
+        assert!(!st.equivalent_mode);
+        assert!(st.allowed_lps.is_empty());
+        assert!(!st.requires_safety_validation);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// asset 解析/驗證失敗不得留下永久 Pending；assets 就緒後可重試成功。
+    #[test]
+    fn begin_equivalent_validation_asset_failure_leaves_no_pending_and_is_retryable() {
+        let dir = temp_dir("begin_assets");
+        let storage_root = dir.join("benchmarks");
+        std::fs::create_dir_all(&storage_root).unwrap();
+        let sid = equivalent_session(&storage_root, &topo(), GPU_A, &[3, 5]);
+
+        // asset 驗證失敗 → 不寫 Pending，session validation 保持 None（可重試）
+        let err = begin_equivalent_validation(
+            &storage_root,
+            &sid,
+            3,
+            2,
+            Some(single_lp_mask_bytes(2)),
+            Err(codes::BENCHMARK_ASSETS_MISSING.to_string()),
+        )
+        .unwrap_err();
+        assert_eq!(err, codes::BENCHMARK_ASSETS_MISSING);
+        assert!(
+            storage::get_at(&storage_root, &sid)
+                .unwrap()
+                .equivalent_safety_validation
+                .is_none(),
+            "asset 失敗不得留下 Pending"
+        );
+
+        // assets 就緒 → 重試成功寫入 Pending
+        let assets = BenchmarkAssets {
+            presentmon: PathBuf::from("pm"),
+            vulkan_workload: PathBuf::from("vk"),
+            d3d9_workload: PathBuf::from("d3d9"),
+            manifest: PathBuf::from("manifest"),
+        };
+        let out = begin_equivalent_validation(
+            &storage_root,
+            &sid,
+            3,
+            2,
+            Some(single_lp_mask_bytes(2)),
+            Ok(assets),
+        )
+        .unwrap();
+        assert_eq!(out.presentmon, PathBuf::from("pm"));
+        let v = storage::get_at(&storage_root, &sid)
+            .unwrap()
+            .equivalent_safety_validation
+            .unwrap();
+        assert_eq!(v.status, EquivalentSafetyStatus::Pending);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// validation_running 以 OP_VALIDATION reservation 辨識（不讀 session status）。
+    #[test]
+    fn validation_running_reflects_reservation() {
+        let (m, _fake) = manager_with_gpu(GPU_A);
+        assert!(!m.validation_running());
+        let guard = m.reserve(OP_VALIDATION).unwrap();
+        assert!(m.validation_running());
+        drop(guard);
+        assert!(!m.validation_running());
+    }
+
+    /// check_apply：live reference policy 變更 → can_apply=false、reason=REFERENCE_CHANGED。
+    #[test]
+    fn check_apply_equivalent_rejects_reference_changed() {
+        let dir = temp_dir("check_ref_changed");
+        let storage_root = dir.join("benchmarks");
+        std::fs::create_dir_all(&storage_root).unwrap();
+        let backend = FakeBackend::new(vec![device(GPU_A)]);
+        let sid = equivalent_session(&storage_root, &topo(), GPU_A, &[3, 5]);
+        write_equivalent_validation(
+            &storage_root,
+            &sid,
+            EquivalentSafetyValidation {
+                status: EquivalentSafetyStatus::Passed,
+                selected_lp: Some(3),
+                reference_lp: Some(2),
+                rounds: 3,
+                reference_policy_mask: Some(single_lp_mask_bytes(2)),
+                reason: Some("passed".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // live policy 仍是 LP2 → can_apply
+        backend.set_policy(policy_on(GPU_A, 4, 1 << 2));
+        let st = check_apply_at(&backend, &topo(), &fixed_identity(), &storage_root, &sid);
+        assert!(st.can_apply);
+
+        // live policy 變更為 LP4 → 拒絕
+        backend.set_policy(policy_on(GPU_A, 4, 1 << 4));
+        let st = check_apply_at(&backend, &topo(), &fixed_identity(), &storage_root, &sid);
+        assert!(!st.can_apply);
+        assert_eq!(
+            st.reason.as_deref(),
+            Some(codes::BENCHMARK_EQUIVALENT_REFERENCE_CHANGED)
+        );
+        assert!(st.requires_safety_validation);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -5,40 +5,18 @@
 //! 退避策略：ACCESS_DENIED（反作弊）每 30 秒重試；其他錯誤重試 3 次。
 
 use std::collections::HashSet;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
 use tauri::AppHandle;
 use windows::Win32::Foundation::HANDLE;
 
+use crate::applied::{emit_applied, AffinityStrategy, AppliedProcess};
 use crate::error::{codes, ProcessError};
 use crate::model::{AffinityMode, AffinitySpec, MatchBy, Rule};
 use crate::topology::{self, Topology};
-use crate::{commands, priority, process, AppState};
-
-/// 已套用進程（PLAN §5.4）
-#[derive(Serialize, Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct AppliedProcess {
-    pub pid: u32,
-    pub exe_name: String,
-    pub rule_id: String,
-    pub rule_name: String,
-    pub affinity_ok: bool,
-    pub priority_ok: bool,
-    pub io_ok: Option<bool>, // None = 規則未設定此項
-    pub mem_ok: Option<bool>,
-    pub error: Option<String>, // 錯誤代碼（前端查 i18n）
-    pub applied_at: String,    // RFC3339
-    pub current_cores: Vec<u32>,
-    pub current_priority: String,
-    /// true = 軟綁定（Prefer 模式），current_cores 為偏好清單而非實際 mask
-    pub soft_affinity: bool,
-    /// 執行緒 ideal 套用統計；None = 未走執行緒 ideal 路徑。partial = succeeded < attempted
-    pub thread_ideal_attempted: Option<usize>,
-    pub thread_ideal_succeeded: Option<usize>,
-}
+use crate::{priority, process, AppState};
 
 /// watcher 內部狀態（含重試資訊，不序列化給前端）
 pub struct AppliedEntry {
@@ -86,8 +64,8 @@ enum AffinityResult {
         attempted: usize,
         succeeded: usize,
     },
-    /// 三層全部失敗
-    AllFailed,
+    /// 所有允許的策略都失敗，攜帶對外穩定錯誤碼。
+    Failed { code: &'static str },
 }
 
 /// 執行緒 ideal 套用結果分類
@@ -117,6 +95,75 @@ fn mask_from_cores(cores: &[u32]) -> u64 {
     cores
         .iter()
         .fold(0u64, |m, &c| if c < 64 { m | (1u64 << c) } else { m })
+}
+
+/// 正規化核心清單：過濾不支援 LP（>= 64，group 0 上限）、排序、去重。
+/// 期望值與回讀值都先正規化再精確比對（純函式，可測試）。
+fn normalize_cores(cores: &[u32]) -> Vec<u32> {
+    let mut v: Vec<u32> = cores.iter().copied().filter(|&c| c < 64).collect();
+    v.sort_unstable();
+    v.dedup();
+    v
+}
+
+/// 回讀驗證結果分類（純邏輯，可測試）
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Revalidate {
+    /// 實際值與期望值（正規化後）精確相等
+    Match,
+    /// 讀到值但不符
+    Mismatch,
+    /// 回讀失敗（讀不到，狀態未知）
+    ReadFailed,
+}
+
+/// 比對期望核心與回讀值（皆正規化）。None = 回讀失敗。
+fn compare_verified(expected: &[u32], actual: Option<Vec<u32>>) -> Revalidate {
+    match actual {
+        Some(a) if normalize_cores(&a) == normalize_cores(expected) => Revalidate::Match,
+        Some(_) => Revalidate::Mismatch,
+        None => Revalidate::ReadFailed,
+    }
+}
+
+/// CPU Sets 套用後的處置（純邏輯，可測試）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CpuSetsOutcome {
+    /// 已驗證：設定後回讀相符
+    Verified(Vec<u32>),
+    /// 可安全降級到執行緒 ideal：setter 失敗（未寫入）或寫入後已清除為空
+    Fallback,
+    /// 失敗封閉：寫入後未驗證且無法清除為空，不得降級
+    FailClosed,
+}
+
+/// 決定 CPU Sets 套用結果（純函式，可測試）。
+/// `read_after_clear` 只有在 `clear_ok` 為真時才有意義。
+fn decide_cpu_sets(
+    expected: &[u32],
+    set_ok: bool,
+    read_after_set: Option<Vec<u32>>,
+    clear_ok: bool,
+    read_after_clear: Option<Vec<u32>>,
+) -> CpuSetsOutcome {
+    if !set_ok {
+        // setter 失敗：未寫入任何 CPU Sets，可安全降級
+        return CpuSetsOutcome::Fallback;
+    }
+    match read_after_set {
+        Some(actual) if normalize_cores(&actual) == normalize_cores(expected) => {
+            CpuSetsOutcome::Verified(actual)
+        }
+        // 回讀不符或失敗：寫入了未知 CPU Sets，必須清除為空才能降級
+        _ => {
+            let cleared_empty = clear_ok && matches!(&read_after_clear, Some(a) if a.is_empty());
+            if cleared_empty {
+                CpuSetsOutcome::Fallback
+            } else {
+                CpuSetsOutcome::FailClosed
+            }
+        }
+    }
 }
 
 /// 依模式解析目標核心清單（group 0，最多 64 LP）。
@@ -152,91 +199,257 @@ fn all_restore_succeeded(hard_ok: bool, clear_ok: bool) -> bool {
     hard_ok && clear_ok
 }
 
+fn affinity_failure_code(errors: &[ProcessError]) -> &'static str {
+    if errors.iter().any(ProcessError::is_access_denied) {
+        codes::ACCESS_DENIED
+    } else if errors
+        .iter()
+        .any(|e| matches!(e, ProcessError::OpenFailed(_)))
+    {
+        codes::OPEN_FAILED
+    } else {
+        codes::SET_AFFINITY_FAILED
+    }
+}
+
+fn apply_thread_ideal(pid: u32, cores: Vec<u32>, errors: &mut Vec<ProcessError>) -> AffinityResult {
+    let outcome = process::set_threads_ideal(pid, &cores);
+    if let Some(error) = outcome.first_error {
+        errors.push(error);
+    }
+    // 第一個 thread 錯誤未必是 ACCESS_DENIED；只要任一 thread 回 5，
+    // 整體零成功時就必須進入反作弊的無限退避重試。
+    if outcome.access_denied && !errors.iter().any(ProcessError::is_access_denied) {
+        errors.push(ProcessError::AccessDenied);
+    }
+    match classify_thread_ideal(outcome.attempted, outcome.succeeded) {
+        ThreadIdealClass::Full => AffinityResult::SoftOk {
+            cores,
+            attempted: outcome.attempted,
+            succeeded: outcome.succeeded,
+        },
+        ThreadIdealClass::Partial => AffinityResult::SoftPartial {
+            cores,
+            attempted: outcome.attempted,
+            succeeded: outcome.succeeded,
+        },
+        ThreadIdealClass::Zero => AffinityResult::Failed {
+            code: affinity_failure_code(errors),
+        },
+    }
+}
+
 /// 對進程套用 affinity。All 模式 = 還原（硬綁定設回全核心 + 清除 CPU Sets 指派）；
 /// 非 All = 三層降級 硬綁定 → CPU Sets → 執行緒 ideal。
 fn apply_affinity(
     pid: u32,
-    h: Option<HANDLE>,
+    handle: Result<HANDLE, ProcessError>,
     spec: &AffinitySpec,
     topo: &Topology,
 ) -> AffinityResult {
-    let cores = cores_for_mode(spec, topo);
+    if topo.total_lp == 0 {
+        return AffinityResult::Failed {
+            code: codes::TOPOLOGY_FAILED,
+        };
+    }
+    let cores = normalize_cores(&cores_for_mode(spec, topo));
     if cores.is_empty() {
-        return AffinityResult::AllFailed;
+        return AffinityResult::Failed {
+            code: codes::SET_AFFINITY_FAILED,
+        };
+    }
+    let h = handle.ok();
+    let mut errors: Vec<ProcessError> = handle.err().into_iter().collect();
+
+    // Prefer 的公開契約是純偏好：只能設定 thread ideal，不得嘗試硬 mask 或 CPU Sets。
+    if spec.mode == AffinityMode::Prefer {
+        return apply_thread_ideal(pid, cores, &mut errors);
     }
 
     // All 模式：還原必須「硬綁定設回全核心」與「清除 process-default CPU Sets 指派」
     // 兩者都成功，否則不宣告還原完成（進入 retry，不單回報顯示成功）。
     if spec.mode == AffinityMode::All {
-        let hard_ok = h
-            .map(|h| process::set_affinity(h, mask_from_cores(&cores)).is_ok())
-            .unwrap_or(false);
-        let clear_ok = process::clear_cpu_sets(pid).is_ok();
+        let hard_ok = h.is_some_and(
+            |h| match process::set_affinity(h, mask_from_cores(&cores)) {
+                Ok(()) => true,
+                Err(e) => {
+                    errors.push(e);
+                    false
+                }
+            },
+        );
+        let clear_result = match h {
+            Some(h) => process::clear_cpu_sets_by_handle(h),
+            None => process::clear_cpu_sets(pid),
+        };
+        let clear_ok = match clear_result {
+            Ok(()) => true,
+            Err(e) => {
+                errors.push(e);
+                false
+            }
+        };
         if !all_restore_succeeded(hard_ok, clear_ok) {
             log::warn!("All 模式還原不完整 PID {pid}: hard={hard_ok} clear={clear_ok}");
-            return AffinityResult::AllFailed;
+            return AffinityResult::Failed {
+                code: affinity_failure_code(&errors),
+            };
         }
-        // 回讀實際有效硬綁定 mask（不單報告期望值）
+        // 回讀實際有效硬綁定 mask 並精確比對（fail-closed：回讀失敗或不符都不宣告成功）
         if let Some(h) = h {
-            if let Ok(actual) = process::get_affinity(h) {
-                return AffinityResult::HardOk {
-                    cores: topology::mask_to_indices(actual),
-                };
+            match process::get_affinity(h) {
+                Ok(actual) if normalize_cores(&topology::mask_to_indices(actual)) == cores => {
+                    return AffinityResult::HardOk {
+                        cores: topology::mask_to_indices(actual),
+                    };
+                }
+                Ok(actual) => {
+                    log::warn!(
+                        "All 模式還原回讀不符 PID {pid}: 期望 {:?} 實際 {:?}",
+                        cores,
+                        topology::mask_to_indices(actual)
+                    );
+                    return AffinityResult::Failed {
+                        code: codes::SET_AFFINITY_FAILED,
+                    };
+                }
+                Err(e) => {
+                    log::warn!("All 模式還原回讀失敗 PID {pid}: {e}");
+                    errors.push(e);
+                    return AffinityResult::Failed {
+                        code: affinity_failure_code(&errors),
+                    };
+                }
             }
         }
-        return AffinityResult::HardOk { cores };
+        return AffinityResult::Failed {
+            code: affinity_failure_code(&errors),
+        };
     }
 
-    // 非 All：Tier 1 硬綁定（SetProcessAffinityMask）
+    // 非 All：Tier 1 硬綁定（SetProcessAffinityMask），立即回讀驗證
     if let Some(h) = h {
         let mask = mask_from_cores(&cores);
-        if process::set_affinity(h, mask).is_ok() {
-            return AffinityResult::HardOk { cores };
+        match process::set_affinity(h, mask) {
+            Ok(()) => {
+                match process::get_affinity(h) {
+                    Ok(actual) if normalize_cores(&topology::mask_to_indices(actual)) == cores => {
+                        return AffinityResult::HardOk {
+                            cores: topology::mask_to_indices(actual),
+                        };
+                    }
+                    Ok(actual) => {
+                        // fail-closed：硬 mask 狀態未知，不得降級疊加 CPU Sets / ideal
+                        log::warn!(
+                            "硬綁定回讀不符 PID {pid}: 期望 {:?} 實際 {:?}",
+                            cores,
+                            topology::mask_to_indices(actual)
+                        );
+                        return AffinityResult::Failed {
+                            code: codes::SET_AFFINITY_FAILED,
+                        };
+                    }
+                    Err(e) => {
+                        log::warn!("硬綁定回讀失敗 PID {pid}: {e}");
+                        errors.push(e);
+                        return AffinityResult::Failed {
+                            code: affinity_failure_code(&errors),
+                        };
+                    }
+                }
+            }
+            Err(e) => errors.push(e),
         }
         log::info!("硬綁定失敗 PID {pid}，降級到 CPU Sets");
     }
 
-    // Tier 2: CPU Sets（SetProcessDefaultCpuSets）
-    match process::set_cpu_sets(pid, &cores) {
-        Ok(()) => {
-            log::info!("CPU Sets 成功 PID {pid}");
-            return AffinityResult::CpuSetsOk { cores };
+    // Tier 2: CPU Sets（SetProcessDefaultCpuSets），立即回讀驗證。
+    // 寫入後未驗證 → 必須清除為空（並驗證為空）才能降級到執行緒 ideal，否則 fail-closed。
+    let set_result = match h {
+        Some(h) => process::set_cpu_sets_by_handle(h, &cores),
+        None => process::set_cpu_sets(pid, &cores),
+    };
+    let set_ok = match set_result {
+        Ok(()) => true,
+        Err(e) => {
+            errors.push(e);
+            false
         }
-        Err(e) => log::warn!("CPU Sets 失敗 PID {pid}: {e}"),
+    };
+    let read_after_set = if set_ok {
+        let result = match h {
+            Some(h) => process::get_cpu_sets_by_handle(h),
+            None => process::get_cpu_sets(pid),
+        };
+        match result {
+            Ok(actual) => Some(actual),
+            Err(e) => {
+                errors.push(e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let (clear_ok, read_after_clear) = {
+        let needs_clear =
+            set_ok && compare_verified(&cores, read_after_set.clone()) != Revalidate::Match;
+        if needs_clear {
+            let clear_result = match h {
+                Some(h) => process::clear_cpu_sets_by_handle(h),
+                None => process::clear_cpu_sets(pid),
+            };
+            let c = match clear_result {
+                Ok(()) => true,
+                Err(e) => {
+                    errors.push(e);
+                    false
+                }
+            };
+            (
+                c,
+                if c {
+                    let result = match h {
+                        Some(h) => process::get_cpu_sets_by_handle(h),
+                        None => process::get_cpu_sets(pid),
+                    };
+                    match result {
+                        Ok(actual) => Some(actual),
+                        Err(e) => {
+                            errors.push(e);
+                            None
+                        }
+                    }
+                } else {
+                    None
+                },
+            )
+        } else {
+            (false, None)
+        }
+    };
+    match decide_cpu_sets(&cores, set_ok, read_after_set, clear_ok, read_after_clear) {
+        CpuSetsOutcome::Verified(actual) => {
+            log::info!("CPU Sets 驗證成功 PID {pid}");
+            return AffinityResult::CpuSetsOk { cores: actual };
+        }
+        CpuSetsOutcome::Fallback => {
+            if set_ok {
+                log::warn!("CPU Sets 未驗證 PID {pid}，已清除為空並降級到執行緒 ideal");
+            } else {
+                log::warn!("CPU Sets 失敗 PID {pid}，降級到執行緒 ideal");
+            }
+        }
+        CpuSetsOutcome::FailClosed => {
+            log::warn!("CPU Sets 清除失敗或仍非空 PID {pid}，fail-closed");
+            return AffinityResult::Failed {
+                code: affinity_failure_code(&errors),
+            };
+        }
     }
 
     // Tier 3: 執行緒 ideal processor（軟提示）
-    let outcome = process::set_threads_ideal(pid, &cores);
-    match classify_thread_ideal(outcome.attempted, outcome.succeeded) {
-        ThreadIdealClass::Full => {
-            log::info!(
-                "執行緒 ideal 全成功 PID {pid}: {}/{}",
-                outcome.succeeded,
-                outcome.attempted
-            );
-            AffinityResult::SoftOk {
-                cores,
-                attempted: outcome.attempted,
-                succeeded: outcome.succeeded,
-            }
-        }
-        ThreadIdealClass::Partial => {
-            log::info!(
-                "執行緒 ideal 部分成功 PID {pid}: {}/{}",
-                outcome.succeeded,
-                outcome.attempted
-            );
-            AffinityResult::SoftPartial {
-                cores,
-                attempted: outcome.attempted,
-                succeeded: outcome.succeeded,
-            }
-        }
-        ThreadIdealClass::Zero => {
-            log::warn!("執行緒 ideal 失敗 PID {pid}: 0/{}", outcome.attempted);
-            AffinityResult::AllFailed
-        }
-    }
+    apply_thread_ideal(pid, cores, &mut errors)
 }
 
 /// 規則比對（純函式，PLAN §7.6）
@@ -289,6 +502,45 @@ fn fetch_created(state: &Arc<AppState>, pid: u32) -> u64 {
     process::creation_time_by_pid(pid).unwrap_or(0)
 }
 
+/// 回讀來源（純決策，可測試）：有快取 handle 優先走 handle，否則 pid 現開。
+enum ReadbackSource {
+    Cached(HANDLE),
+    FreshOpen,
+}
+
+fn readback_source(cached: Option<HANDLE>) -> ReadbackSource {
+    match cached {
+        Some(h) => ReadbackSource::Cached(h),
+        None => ReadbackSource::FreshOpen,
+    }
+}
+
+/// 週期回讀實際 affinity（revalidation）。優先快取 handle（反作弊保護後仍可用），
+/// 無快取才 pid 現開。回傳 None = 回讀失敗（狀態未知）。
+fn revalidate_affinity(
+    state: &Arc<AppState>,
+    pid: u32,
+    strategy: AffinityStrategy,
+) -> Option<Vec<u32>> {
+    // 先拷貝快取 handle，避免在 Windows API 呼叫期間持有 state.handles 鎖
+    let cached = state.handles.read().unwrap().get(&pid).map(|c| c.handle.0);
+    match strategy {
+        AffinityStrategy::Hard => match readback_source(cached) {
+            ReadbackSource::Cached(h) => {
+                process::get_affinity(h).ok().map(topology::mask_to_indices)
+            }
+            ReadbackSource::FreshOpen => process::get_affinity_by_pid(pid)
+                .ok()
+                .map(topology::mask_to_indices),
+        },
+        AffinityStrategy::CpuSets => match readback_source(cached) {
+            ReadbackSource::Cached(h) => process::get_cpu_sets_by_handle(h).ok(),
+            ReadbackSource::FreshOpen => process::get_cpu_sets(pid).ok(),
+        },
+        _ => None,
+    }
+}
+
 pub fn spawn(app: AppHandle, state: Arc<AppState>) {
     tauri::async_runtime::spawn(async move {
         let mut last_tick = Instant::now();
@@ -311,16 +563,17 @@ pub fn spawn(app: AppHandle, state: Arc<AppState>) {
 /// 快速發現 pass：輕量掃描進程名，命中規則的新 PID 立刻開 handle 並套用。
 /// 無啟用規則時直接返回，閒置零額外負擔。
 fn discovery_pass(app: &AppHandle, state: &Arc<AppState>) {
-    let (rules, interval): (Vec<Rule>, u64) = state
+    let (rules, interval, revision): (Vec<Rule>, u64, u64) = state
         .config
         .read()
         .map(|c| {
             (
                 c.rules.iter().filter(|r| r.enabled).cloned().collect(),
                 c.settings.poll_interval_ms.clamp(200, 60_000),
+                state.config_revision.load(Ordering::Acquire),
             )
         })
-        .unwrap_or_else(|_| (Vec::new(), 1000));
+        .unwrap_or_else(|_| (Vec::new(), 1000, 0));
     if rules.is_empty() {
         return;
     }
@@ -330,7 +583,14 @@ fn discovery_pass(app: &AppHandle, state: &Arc<AppState>) {
         .map(|r| file_name(&r.exe_path).to_lowercase())
         .collect();
 
-    let candidates: Vec<(u32, String)> = process::enumerate_process_names()
+    let names = match process::enumerate_process_names() {
+        Ok(names) => names,
+        Err(e) => {
+            log::warn!("discovery 程序列舉失敗，保留既有狀態: {e}");
+            return;
+        }
+    };
+    let candidates: Vec<(u32, String)> = names
         .into_iter()
         .filter(|(_, name)| wanted.contains(&name.to_lowercase()))
         .collect();
@@ -365,159 +625,241 @@ fn discovery_pass(app: &AppHandle, state: &Arc<AppState>) {
         if let Some(err) = &entry.info.error {
             log::warn!("套用失敗 {} (PID {}): {}", exe_name, pid, err);
         }
-        state.applied.write().unwrap().insert(pid, entry);
-        dirty = true;
+        // 套用期間若規則已變更，不把舊規則的結果寫回 applied；command 會清表，
+        // 下一個 discovery/tick 會依新設定重套。
+        if let Ok(cfg) = state.config.read() {
+            if state.config_revision.load(Ordering::Acquire) == revision {
+                state.applied.write().unwrap().entry(pid).or_insert(entry);
+                dirty = true;
+            } else {
+                log::info!("規則於套用 PID {pid} 期間變更，棄置過期 applied 結果");
+            }
+            drop(cfg);
+        }
     }
     if dirty {
-        commands::emit_applied(app, state);
+        emit_applied(app, state);
     }
 }
 
 fn tick(app: &AppHandle, state: &Arc<AppState>, interval_ms: u64) {
-    let procs = process::enumerate_processes();
-    let rules: Vec<Rule> = state
+    let procs = match process::enumerate_processes() {
+        Ok(procs) => procs,
+        Err(e) => {
+            log::warn!("watcher 程序列舉失敗，跳過本 tick 並保留 applied/handles: {e}");
+            return;
+        }
+    };
+    let (rules, revision): (Vec<Rule>, u64) = state
         .config
         .read()
-        .map(|c| c.rules.clone())
+        .map(|c| {
+            (
+                c.rules.clone(),
+                state.config_revision.load(Ordering::Acquire),
+            )
+        })
         .unwrap_or_default();
     let now = Instant::now();
     let mut dirty = false;
 
+    // 1) 移除已結束的 PID。所有 Win32 查詢均在 applied/handles 鎖外執行。
+    let alive: HashSet<u32> = procs.iter().map(|p| p.pid).collect();
     {
         let mut applied = state.applied.write().unwrap();
-
-        // 1) 移除已結束的 PID（含 handle 快取）
-        let alive: HashSet<u32> = procs.iter().map(|p| p.pid).collect();
         let before = applied.len();
         applied.retain(|pid, _| alive.contains(pid));
         if applied.len() != before {
             dirty = true;
         }
+    }
+
+    let handle_snapshot: Vec<(u32, u64)> = state
+        .handles
+        .read()
+        .unwrap()
+        .iter()
+        .map(|(pid, cached)| (*pid, cached.created))
+        .collect();
+    let stale_handles: HashSet<u32> = handle_snapshot
+        .into_iter()
+        .filter(|(pid, created)| {
+            !alive.contains(pid)
+                || (*created != 0
+                    && process::creation_time_by_pid(*pid)
+                        .map(|actual| actual != *created)
+                        .unwrap_or(false))
+        })
+        .map(|(pid, _)| pid)
+        .collect();
+    if !stale_handles.is_empty() {
+        state
+            .handles
+            .write()
+            .unwrap()
+            .retain(|pid, _| !stale_handles.contains(pid));
+    }
+
+    // 2) PID 重用與失效規則清理。creation time 查詢仍在鎖外。
+    let applied_snapshot: Vec<(u32, String, u64, String)> = state
+        .applied
+        .read()
+        .unwrap()
+        .iter()
+        .map(|(pid, e)| (*pid, e.exe_name.clone(), e.created, e.info.rule_id.clone()))
+        .collect();
+    let stale_applied: HashSet<u32> = applied_snapshot
+        .iter()
+        .filter(|(pid, exe_name, created, rule_id)| {
+            let reused = procs.iter().find(|p| p.pid == *pid).is_some_and(|p| {
+                !p.exe_name.eq_ignore_ascii_case(exe_name)
+                    || is_reused(false, *created, process::creation_time_by_pid(p.pid))
+            });
+            let orphaned = !rules.iter().any(|r| r.id == *rule_id && r.enabled);
+            reused || orphaned
+        })
+        .map(|(pid, _, _, _)| *pid)
+        .collect();
+    if !stale_applied.is_empty() {
+        let mut applied = state.applied.write().unwrap();
+        let before = applied.len();
+        applied.retain(|pid, _| !stale_applied.contains(pid));
+        dirty |= applied.len() != before;
+    }
+
+    // 3) 新進程套用。昂貴 Win32 操作完成後，以 revision gate 避免寫入舊規則結果。
+    for p in &procs {
+        if state.applied.read().unwrap().contains_key(&p.pid)
+            || process::is_blacklisted(p.pid, &p.exe_name, p.exe_path.as_deref())
         {
-            let mut handles = state.handles.write().unwrap();
-            handles.retain(|pid, _| alive.contains(pid));
-            // PID 重用偵測：creation time 不符 → 丟棄舊 handle。
-            // 受保護進程連 QUERY_LIMITED 都可能被剝 → None → 保留快取。
-            // created == 0（未知基線）→ 保守保留，不因後續可查就誤判重用。
-            let stale: Vec<u32> = handles
-                .iter()
-                .filter(|(pid, c)| {
-                    if c.created == 0 {
-                        return false;
-                    }
-                    process::creation_time_by_pid(**pid)
-                        .map(|t| t != c.created)
-                        .unwrap_or(false)
-                })
-                .map(|(pid, _)| *pid)
-                .collect();
-            for pid in stale {
-                handles.remove(&pid);
-            }
+            continue;
         }
-
-        // 2) PID 重用防護：還活著但 exe 變了 或 creation time 變了 → 移除，當新進程重新比對
-        let stale: Vec<u32> = applied
-            .iter()
-            .filter(|(pid, e)| {
-                procs.iter().find(|p| p.pid == **pid).is_some_and(|p| {
-                    if !p.exe_name.eq_ignore_ascii_case(&e.exe_name) {
-                        return true;
-                    }
-                    // exe 同名：比對 creation time（查不到 = 受保護 → 保守保留）
-                    is_reused(false, e.created, process::creation_time_by_pid(p.pid))
-                })
-            })
-            .map(|(pid, _)| *pid)
-            .collect();
-        for pid in stale {
-            applied.remove(&pid);
-            dirty = true;
+        let Some(rule) = find_rule(&rules, &p.exe_name, p.exe_path.as_deref()) else {
+            continue;
+        };
+        log::info!("套用規則「{}」→ {} (PID {})", rule.name, p.exe_name, p.pid);
+        let handle = ensure_handle(state, p.pid);
+        let created = fetch_created(state, p.pid);
+        let entry = apply_and_build(
+            p.pid,
+            &p.exe_name,
+            &rule,
+            &state.topology,
+            now,
+            interval_ms,
+            (handle, created),
+        );
+        if let Some(err) = &entry.info.error {
+            log::warn!("套用失敗 {} (PID {}): {}", p.exe_name, p.pid, err);
         }
-
-        // 3) 規則被刪除或停用 → 移除對應 entry
-        let orphaned: Vec<u32> = applied
-            .iter()
-            .filter(|(_, e)| !rules.iter().any(|r| r.id == e.info.rule_id && r.enabled))
-            .map(|(pid, _)| *pid)
-            .collect();
-        for pid in orphaned {
-            applied.remove(&pid);
-            dirty = true;
-        }
-
-        // 4) 新進程：比對規則並套用（discovery 漏掉的才會走到這，例如 poll 間隔極短）
-        for p in &procs {
-            if applied.contains_key(&p.pid) {
-                continue;
-            }
-            if process::is_blacklisted(p.pid, &p.exe_name, p.exe_path.as_deref()) {
-                continue;
-            }
-            let rule = match find_rule(&rules, &p.exe_name, p.exe_path.as_deref()) {
-                Some(r) => r,
-                None => continue,
-            };
-            log::info!("套用規則「{}」→ {} (PID {})", rule.name, p.exe_name, p.pid);
-            let handle = ensure_handle(state, p.pid);
-            let created = fetch_created(state, p.pid);
-            let entry = apply_and_build(
-                p.pid,
-                &p.exe_name,
-                &rule,
-                &state.topology,
-                now,
-                interval_ms,
-                (handle, created),
-            );
-            if let Some(err) = &entry.info.error {
-                log::warn!("套用失敗 {} (PID {}): {}", p.exe_name, p.pid, err);
-            }
-            applied.insert(p.pid, entry);
-            dirty = true;
-        }
-
-        // 5) 失敗重試
-        let due: Vec<u32> = applied
-            .iter()
-            .filter(|(_, e)| {
-                e.info.error.is_some()
-                    && e.next_retry.map(|t| now >= t).unwrap_or(false)
-                    && (e.access_denied || e.retries_left > 0)
-            })
-            .map(|(pid, _)| *pid)
-            .collect();
-        for pid in due {
-            let (rule, exe_name) = {
-                let entry = &applied[&pid];
-                let rule = rules.iter().find(|r| r.id == entry.info.rule_id).cloned();
-                (rule, entry.exe_name.clone())
-            };
-            if let Some(rule) = rule {
-                log::info!("重試套用「{}」→ PID {}", rule.name, pid);
-                let handle = ensure_handle(state, pid);
-                let created = fetch_created(state, pid);
-                let mut entry = apply_and_build(
-                    pid,
-                    &exe_name,
-                    &rule,
-                    &state.topology,
-                    now,
-                    interval_ms,
-                    (handle, created),
-                );
-                if entry.info.error.is_some() && !entry.access_denied {
-                    let prev = applied.get(&pid).map(|e| e.retries_left).unwrap_or(1);
-                    entry.retries_left = prev.saturating_sub(1);
-                }
-                applied.insert(pid, entry);
+        if let Ok(cfg) = state.config.read() {
+            if state.config_revision.load(Ordering::Acquire) == revision {
+                state.applied.write().unwrap().entry(p.pid).or_insert(entry);
                 dirty = true;
+            }
+            drop(cfg);
+        }
+    }
+
+    // 4) 週期性回讀驗證；只在快照仍相符時更新該 entry。
+    let recheck: Vec<(u32, AffinityStrategy, Vec<u32>)> = state
+        .applied
+        .read()
+        .unwrap()
+        .iter()
+        .filter(|(_, e)| {
+            e.info.error.is_none()
+                && matches!(
+                    e.info.strategy,
+                    AffinityStrategy::Hard | AffinityStrategy::CpuSets
+                )
+        })
+        .map(|(pid, e)| (*pid, e.info.strategy, e.info.current_cores.clone()))
+        .collect();
+    for (pid, strategy, expected) in recheck {
+        let actual = revalidate_affinity(state, pid, strategy);
+        match compare_verified(&expected, actual) {
+            Revalidate::Match => {}
+            // 讀不到 ≠ 不符：反作弊剝 QUERY 權限或暫時性錯誤時狀態未知，
+            // 保留已驗證 entry 原狀，下個 tick 自然再驗，不誤標 SET_AFFINITY_FAILED。
+            Revalidate::ReadFailed => {
+                log::debug!("回讀驗證讀取失敗 PID {pid} (strategy={strategy:?})，保留現狀");
+            }
+            Revalidate::Mismatch => {
+                log::warn!("回讀驗證失敗 PID {pid} (strategy={strategy:?})，排程重套");
+                if let Some(entry) = state.applied.write().unwrap().get_mut(&pid) {
+                    if entry.info.strategy != strategy || entry.info.current_cores != expected {
+                        continue;
+                    }
+                    entry.info.affinity_ok = false;
+                    entry.info.strategy = AffinityStrategy::None;
+                    entry.info.soft_affinity = false;
+                    entry.info.current_cores.clear();
+                    entry.info.error = Some(codes::SET_AFFINITY_FAILED.to_string());
+                    entry.access_denied = false;
+                    entry.retries_left = MAX_RETRIES;
+                    entry.next_retry = Some(now + retry_delay(false, interval_ms));
+                    dirty = true;
+                }
             }
         }
     }
 
+    // 5) 失敗重試。套用時不持 applied 寫鎖，提交前再確認 entry 與設定 revision。
+    let due: Vec<(u32, String, String, u8)> = state
+        .applied
+        .read()
+        .unwrap()
+        .iter()
+        .filter(|(_, e)| {
+            e.info.error.is_some()
+                && e.next_retry.map(|t| now >= t).unwrap_or(false)
+                && (e.access_denied || e.retries_left > 0)
+        })
+        .map(|(pid, e)| {
+            (
+                *pid,
+                e.info.rule_id.clone(),
+                e.exe_name.clone(),
+                e.retries_left,
+            )
+        })
+        .collect();
+    for (pid, rule_id, exe_name, previous_retries) in due {
+        let Some(rule) = rules.iter().find(|r| r.id == rule_id && r.enabled).cloned() else {
+            continue;
+        };
+        log::info!("重試套用「{}」→ PID {}", rule.name, pid);
+        let handle = ensure_handle(state, pid);
+        let created = fetch_created(state, pid);
+        let mut replacement = apply_and_build(
+            pid,
+            &exe_name,
+            &rule,
+            &state.topology,
+            now,
+            interval_ms,
+            (handle, created),
+        );
+        if replacement.info.error.is_some() && !replacement.access_denied {
+            replacement.retries_left = previous_retries.saturating_sub(1);
+        }
+        if let Ok(cfg) = state.config.read() {
+            if state.config_revision.load(Ordering::Acquire) == revision {
+                let mut applied = state.applied.write().unwrap();
+                if applied.get(&pid).is_some_and(|current| {
+                    current.info.rule_id == rule_id && current.info.error.is_some()
+                }) {
+                    applied.insert(pid, replacement);
+                    dirty = true;
+                }
+            }
+            drop(cfg);
+        }
+    }
+
     if dirty {
-        commands::emit_applied(app, state);
+        emit_applied(app, state);
     }
 }
 
@@ -550,24 +892,22 @@ fn apply_and_build(
         soft_affinity: false,
         thread_ideal_attempted: None,
         thread_ideal_succeeded: None,
+        strategy: AffinityStrategy::None,
     };
 
     // Phase A: handle 由呼叫端 ensure_handle 提供（快取早期 handle 或現開）
     // Phase B: affinity（三層降級，handle 為 None 時跳過硬綁定）
-    let aff_result = apply_affinity(
-        pid,
-        handle_result.as_ref().ok().copied(),
-        &rule.affinity,
-        topo,
-    );
+    let aff_result = apply_affinity(pid, handle_result, &rule.affinity, topo);
 
     match aff_result {
         AffinityResult::HardOk { cores } => {
             info.affinity_ok = true;
+            info.strategy = AffinityStrategy::Hard;
             info.current_cores = cores;
         }
         AffinityResult::CpuSetsOk { cores } => {
             info.affinity_ok = true;
+            info.strategy = AffinityStrategy::CpuSets;
             info.current_cores = cores;
             log::info!("CPU Sets fallback PID {pid}");
         }
@@ -578,6 +918,7 @@ fn apply_and_build(
         } => {
             info.affinity_ok = true;
             info.soft_affinity = true;
+            info.strategy = AffinityStrategy::Prefer;
             info.current_cores = cores;
             info.thread_ideal_attempted = Some(attempted);
             info.thread_ideal_succeeded = Some(succeeded);
@@ -590,18 +931,14 @@ fn apply_and_build(
         } => {
             // partial：不設 affinity_ok（不視為完整成功），也不設 error（非失敗需重試）
             info.soft_affinity = true;
+            info.strategy = AffinityStrategy::Prefer;
             info.current_cores = cores;
             info.thread_ideal_attempted = Some(attempted);
             info.thread_ideal_succeeded = Some(succeeded);
             log::info!("執行緒 ideal 部分套用 PID {pid}: {succeeded}/{attempted}");
         }
-        AffinityResult::AllFailed => {
-            // handle 開啟失敗 → ACCESS_DENIED；否則是一般失敗
-            if handle_result.is_err() {
-                info.error = Some(codes::ACCESS_DENIED.to_string());
-            } else {
-                info.error = Some(codes::SET_AFFINITY_FAILED.to_string());
-            }
+        AffinityResult::Failed { code } => {
+            info.error = Some(code.to_string());
         }
     }
 
@@ -630,7 +967,10 @@ fn apply_and_build(
                 info.current_cores = topology::mask_to_indices(mask);
             }
         }
-        info.current_priority = process::get_priority(h).as_str().to_string();
+        match process::get_priority(h) {
+            Ok(priority) => info.current_priority = priority.as_str().to_string(),
+            Err(e) => log::warn!("get_priority 失敗 PID {pid}: {e}"),
+        }
     }
 
     let failed = info.error.is_some();
@@ -724,6 +1064,22 @@ mod tests {
     }
 
     #[test]
+    fn affinity_error_classification_prioritizes_any_access_denied() {
+        assert_eq!(
+            affinity_failure_code(&[ProcessError::OpenFailed(87), ProcessError::AccessDenied]),
+            codes::ACCESS_DENIED
+        );
+        assert_eq!(
+            affinity_failure_code(&[ProcessError::OpenFailed(87), ProcessError::Win32(6)]),
+            codes::OPEN_FAILED
+        );
+        assert_eq!(
+            affinity_failure_code(&[ProcessError::Win32(87)]),
+            codes::SET_AFFINITY_FAILED
+        );
+    }
+
+    #[test]
     fn mask_from_cores_safe_and_no_shift_overflow() {
         assert_eq!(mask_from_cores(&[0, 2, 4]), 0b10101);
         assert_eq!(mask_from_cores(&[63]), 1u64 << 63);
@@ -734,7 +1090,10 @@ mod tests {
     #[test]
     fn cores_all_covers_every_lp() {
         let t = topo(8);
-        assert_eq!(cores_for_mode(&spec(AffinityMode::All, &[]), &t), (0..8).collect::<Vec<u32>>());
+        assert_eq!(
+            cores_for_mode(&spec(AffinityMode::All, &[]), &t),
+            (0..8).collect::<Vec<u32>>()
+        );
     }
 
     #[test]
@@ -791,5 +1150,137 @@ mod tests {
         // 硬綁定還原失敗 → 不算成功
         assert!(!all_restore_succeeded(false, true));
         assert!(!all_restore_succeeded(false, false));
+    }
+
+    #[test]
+    fn normalize_sorts_dedups_filters() {
+        assert_eq!(normalize_cores(&[3, 1, 3, 2, 99, 1]), vec![1, 2, 3]);
+        assert_eq!(normalize_cores(&[]), Vec::<u32>::new());
+        assert_eq!(normalize_cores(&[64]), Vec::<u32>::new());
+        assert_eq!(normalize_cores(&[63, 0]), vec![0, 63]);
+    }
+
+    #[test]
+    fn compare_verified_matches_after_normalize() {
+        // 順序不同但集合相等 → Match（期望值與回讀值都先正規化）
+        assert_eq!(
+            compare_verified(&[1, 2, 3], Some(vec![3, 2, 1])),
+            Revalidate::Match
+        );
+        assert_eq!(
+            compare_verified(&[1, 2], Some(vec![1, 3])),
+            Revalidate::Mismatch
+        );
+        assert_eq!(compare_verified(&[1, 2], None), Revalidate::ReadFailed);
+        assert_eq!(
+            compare_verified(&[1, 2], Some(vec![])),
+            Revalidate::Mismatch
+        );
+    }
+
+    #[test]
+    fn cpu_sets_verified_when_readback_matches() {
+        // 設定成功 + 回讀相符（順序不同仍相等）→ Verified，且不需清除
+        assert_eq!(
+            decide_cpu_sets(&[1, 2], true, Some(vec![2, 1]), false, None),
+            CpuSetsOutcome::Verified(vec![2, 1])
+        );
+    }
+
+    #[test]
+    fn cpu_sets_setter_failure_allows_fallback() {
+        // setter 失敗 = 未寫入任何 CPU Sets → 安全降級（clear 值被忽略）
+        assert_eq!(
+            decide_cpu_sets(&[1, 2], false, None, false, None),
+            CpuSetsOutcome::Fallback
+        );
+    }
+
+    #[test]
+    fn cpu_sets_mismatch_plus_verified_clear_allows_fallback() {
+        // 寫入後回讀不符 + 清除成功且回讀為空 → 允許降級
+        assert_eq!(
+            decide_cpu_sets(&[1, 2], true, Some(vec![9]), true, Some(vec![])),
+            CpuSetsOutcome::Fallback
+        );
+    }
+
+    #[test]
+    fn cpu_sets_readback_failure_plus_verified_clear_allows_fallback() {
+        // 寫入後回讀失敗 + 清除成功且回讀為空 → 允許降級
+        assert_eq!(
+            decide_cpu_sets(&[1, 2], true, None, true, Some(vec![])),
+            CpuSetsOutcome::Fallback
+        );
+    }
+
+    #[test]
+    fn cpu_sets_clear_failure_fails_closed() {
+        // 清除失敗 → 不得降級
+        assert_eq!(
+            decide_cpu_sets(&[1, 2], true, Some(vec![9]), false, None),
+            CpuSetsOutcome::FailClosed
+        );
+    }
+
+    #[test]
+    fn cpu_sets_clear_readback_failure_fails_closed() {
+        // 清除成功但回讀失敗（狀態未知）→ 不得降級
+        assert_eq!(
+            decide_cpu_sets(&[1, 2], true, Some(vec![9]), true, None),
+            CpuSetsOutcome::FailClosed
+        );
+    }
+
+    #[test]
+    fn cpu_sets_clear_nonempty_fails_closed() {
+        // 清除成功但回讀仍非空 → 不得降級
+        assert_eq!(
+            decide_cpu_sets(&[1, 2], true, Some(vec![9]), true, Some(vec![3])),
+            CpuSetsOutcome::FailClosed
+        );
+    }
+
+    fn sample_applied() -> AppliedProcess {
+        AppliedProcess {
+            pid: 1,
+            exe_name: "game.exe".into(),
+            rule_id: "r1".into(),
+            rule_name: "Game".into(),
+            affinity_ok: true,
+            priority_ok: true,
+            io_ok: None,
+            mem_ok: None,
+            error: None,
+            applied_at: "2026-08-16T00:00:00Z".into(),
+            current_cores: vec![0, 1],
+            current_priority: "High".into(),
+            soft_affinity: false,
+            thread_ideal_attempted: None,
+            thread_ideal_succeeded: None,
+            strategy: AffinityStrategy::Hard,
+        }
+    }
+
+    #[test]
+    fn strategy_serializes_pascal_case() {
+        let v = serde_json::to_value(sample_applied()).unwrap();
+        assert_eq!(v["strategy"], "Hard");
+        assert_eq!(v["softAffinity"], false);
+    }
+
+    #[test]
+    fn strategy_default_is_none() {
+        assert_eq!(AffinityStrategy::default(), AffinityStrategy::None);
+    }
+
+    #[test]
+    fn readback_source_prefers_cached_handle() {
+        let h = HANDLE::default();
+        assert!(matches!(
+            readback_source(Some(h)),
+            ReadbackSource::Cached(_)
+        ));
+        assert!(matches!(readback_source(None), ReadbackSource::FreshOpen));
     }
 }

@@ -1,13 +1,14 @@
 //! IPC commands（PLAN §8）。錯誤回傳穩定代碼字串，前端查 i18n 顯示。
 
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use tauri::{AppHandle, Emitter, State};
 
+use crate::applied::{collect_applied, emit_applied, AppliedProcess};
 use crate::model::{Rule, Settings};
 use crate::topology::Topology;
 use crate::update::{self, UpdateState, UpdateStatus};
-use crate::watcher::AppliedProcess;
 use crate::windows_enum::WindowInfo;
 use crate::{autostart, config, process, tray, windows_enum, AppState};
 
@@ -45,12 +46,15 @@ pub fn get_rules(state: State<Arc<AppState>>) -> Vec<Rule> {
 pub fn save_rule(state: State<Arc<AppState>>, app: AppHandle, rule: Rule) -> Result<(), String> {
     {
         let mut cfg = state.config.write().map_err(|e| e.to_string())?;
-        if let Some(existing) = cfg.rules.iter_mut().find(|r| r.id == rule.id) {
+        let mut candidate = cfg.clone();
+        if let Some(existing) = candidate.rules.iter_mut().find(|r| r.id == rule.id) {
             *existing = rule;
         } else {
-            cfg.rules.push(rule);
+            candidate.rules.push(rule);
         }
-        config::save(&cfg)?;
+        config::save(&candidate)?;
+        *cfg = candidate;
+        state.config_revision.fetch_add(1, Ordering::Release);
     }
     // 規則變更 → 清空 applied，watcher 下一輪全部重套（PLAN §8）
     state.applied.write().map_err(|e| e.to_string())?.clear();
@@ -62,8 +66,11 @@ pub fn save_rule(state: State<Arc<AppState>>, app: AppHandle, rule: Rule) -> Res
 pub fn delete_rule(state: State<Arc<AppState>>, app: AppHandle, id: String) -> Result<(), String> {
     {
         let mut cfg = state.config.write().map_err(|e| e.to_string())?;
-        cfg.rules.retain(|r| r.id != id);
-        config::save(&cfg)?;
+        let mut candidate = cfg.clone();
+        candidate.rules.retain(|r| r.id != id);
+        config::save(&candidate)?;
+        *cfg = candidate;
+        state.config_revision.fetch_add(1, Ordering::Release);
     }
     state.applied.write().map_err(|e| e.to_string())?.clear();
     emit_applied(&app, &state);
@@ -91,8 +98,11 @@ pub fn save_settings(
     };
     {
         let mut cfg = state.config.write().map_err(|e| e.to_string())?;
-        cfg.settings = settings;
-        config::save(&cfg)?;
+        let mut candidate = cfg.clone();
+        candidate.settings = settings;
+        config::save(&candidate)?;
+        *cfg = candidate;
+        state.config_revision.fetch_add(1, Ordering::Release);
     }
     if lang_changed {
         tray::rebuild_menu(&app);
@@ -106,11 +116,18 @@ pub fn set_autostart(
     app: AppHandle,
     enable: bool,
 ) -> Result<(), String> {
-    autostart::set_autostart(enable)?;
     {
         let mut cfg = state.config.write().map_err(|e| e.to_string())?;
-        cfg.settings.start_with_windows = enable;
-        config::save(&cfg)?;
+        let previous = cfg.settings.start_with_windows;
+        autostart::set_autostart(enable)?;
+        let mut candidate = cfg.clone();
+        candidate.settings.start_with_windows = enable;
+        if let Err(e) = config::save(&candidate) {
+            let _ = autostart::set_autostart(previous);
+            return Err(e);
+        }
+        *cfg = candidate;
+        state.config_revision.fetch_add(1, Ordering::Release);
     }
     let _ = app; // tray check 由 rebuild/update 處理
     tray::set_autostart_checked(enable);
@@ -144,24 +161,6 @@ pub fn open_data_folder() -> Result<(), String> {
         .spawn()
         .map_err(|e| e.to_string())?;
     Ok(())
-}
-
-/// 收集 applied 清單（依 exe 名排序）
-fn collect_applied(state: &Arc<AppState>) -> Vec<AppliedProcess> {
-    let mut list: Vec<AppliedProcess> = state
-        .applied
-        .read()
-        .map(|a| a.values().map(|e| e.info.clone()).collect())
-        .unwrap_or_default();
-    list.sort_by_key(|a| a.exe_name.to_lowercase());
-    list
-}
-
-/// 對前端廣播 applied 變更 + 更新 tray 計數
-pub fn emit_applied(app: &AppHandle, state: &Arc<AppState>) {
-    let list = collect_applied(state);
-    tray::update_applied_count(app, list.len());
-    let _ = app.emit("applied-update", list);
 }
 
 // ── 更新相關 commands ──

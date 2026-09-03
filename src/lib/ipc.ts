@@ -47,6 +47,10 @@ export const getGpuAffinityPolicy = (instanceId: string) =>
   invoke<AffinityPolicy>('get_gpu_affinity_policy', { instanceId });
 export const applyBestGpuAffinity = (sessionId: string) =>
   invoke<void>('apply_best_gpu_affinity', { sessionId });
+export const validateEquivalentCandidate = (sessionId: string, selectedLp: number) =>
+  invoke<void>('validate_equivalent_candidate', { sessionId, selectedLp });
+export const applyEquivalentGpuAffinity = (sessionId: string, selectedLp: number) =>
+  invoke<void>('apply_equivalent_gpu_affinity', { sessionId, selectedLp });
 export const getBenchmarkApplyStatus = (sessionId: string) =>
   invoke<ApplyStatus>('get_benchmark_apply_status', { sessionId });
 export const listImportableSessions = () => invoke<SessionSummary[]>('list_importable_sessions');

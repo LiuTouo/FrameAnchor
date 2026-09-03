@@ -37,6 +37,8 @@ pub mod codes {
     pub const BENCHMARK_ALREADY_RUNNING: &str = "BENCHMARK_ALREADY_RUNNING";
     pub const BENCHMARK_NOT_ACTIVE: &str = "BENCHMARK_NOT_ACTIVE";
     pub const BENCHMARK_STORAGE_FAILED: &str = "BENCHMARK_STORAGE_FAILED";
+    /// runner 發生未攔截 panic；管理器會清理子程序、還原 GPU 並將 session 寫成 Failed。
+    pub const BENCHMARK_RUNNER_PANIC: &str = "BENCHMARK_RUNNER_PANIC";
     pub const BENCHMARK_INVALID_SESSION_ID: &str = "BENCHMARK_INVALID_SESSION_ID";
     // ── 基準測試 runner（Task 2）──
     pub const BENCHMARK_ASSETS_MISSING: &str = "BENCHMARK_ASSETS_MISSING";
@@ -54,9 +56,35 @@ pub mod codes {
     /// PresentMon 回報 ETW events lost 且無有效 CSV（擷取負載過高，如 overlay/監控/錄影）。
     /// 不可重試、不可繼續後續 LP/round，直接進入 cleanup/restore。
     pub const BENCHMARK_CAPTURE_ETW_LOST: &str = "BENCHMARK_CAPTURE_ETW_LOST";
+    /// PresentMon 回報 overflowed present events（circular buffer 溢位）；重試（加倍 buffer）
+    /// 仍發生即終止 session，不隔離、不接受損壞資料。
+    pub const BENCHMARK_CAPTURE_OVERFLOW: &str = "BENCHMARK_CAPTURE_OVERFLOW";
+    /// 環境不穩定（AC/電池/電池節能/CPU 使用率/時間漂移）在重試上限內仍無法滿足。
+    /// 失敗關閉（fail closed）：終止 session 且無可套用結果。
+    pub const BENCHMARK_ENV_UNSTABLE: &str = "BENCHMARK_ENV_UNSTABLE";
+    // ── Benchmark 視窗配置（強制視窗模式 + compact 視窗/還原）──
+    /// workload 視窗與 FrameAnchor compact 視窗在 rcWork（工作區，排除工作列）內
+    /// 無法不重疊（空間不足）。不自動縮放 workload，立即失敗關閉。
+    pub const BENCHMARK_WINDOW_SPACE_INSUFFICIENT: &str = "BENCHMARK_WINDOW_SPACE_INSUFFICIENT";
+    /// workload 視窗完整性（前景/非最小化/預期位置/topmost/可見/遮擋）在重試上限內
+    /// 仍不滿足；該 capture 不進統計，最終失敗關閉並還原。
+    pub const BENCHMARK_WINDOW_INTEGRITY: &str = "BENCHMARK_WINDOW_INTEGRITY";
+    // ── Equivalent 安全驗證（Task 3）──
+    /// session 非 equivalent-mode（未 Completed / algorithmVersion≠2 / 非 Equivalent）。
+    pub const BENCHMARK_NOT_EQUIVALENT: &str = "BENCHMARK_NOT_EQUIVALENT";
+    /// selected LP 不在 equivalent finalists pair 內。
+    pub const BENCHMARK_EQUIVALENT_LP_INVALID: &str = "BENCHMARK_EQUIVALENT_LP_INVALID";
+    /// 尚未完成 safety validation（或 validation 非 Passed / 與 selected 不一致）。
+    pub const BENCHMARK_EQUIVALENT_VALIDATION_REQUIRED: &str =
+        "BENCHMARK_EQUIVALENT_VALIDATION_REQUIRED";
+    /// live reference policy 與驗證 snapshot 不一致（需重驗）。
+    pub const BENCHMARK_EQUIVALENT_REFERENCE_CHANGED: &str =
+        "BENCHMARK_EQUIVALENT_REFERENCE_CHANGED";
+    /// 目前 GPU policy 無單一鎖定核心（無 reference 可比對）。
+    pub const BENCHMARK_EQUIVALENT_NO_REFERENCE: &str = "BENCHMARK_EQUIVALENT_NO_REFERENCE";
 }
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessError {
     #[error("access denied")]
     AccessDenied,
@@ -64,9 +92,34 @@ pub enum ProcessError {
     OpenFailed(u32),
     #[error("win32 error: {0}")]
     Win32(u32),
+    /// GetPriorityClass 回傳未知 priority class 值（非 Win32 錯誤碼，僅供診斷）
+    #[error("unknown priority class: {0:#x}")]
+    UnknownPriorityClass(u32),
 }
 
 impl ProcessError {
+    /// 將 windows crate 回傳的 HRESULT 或原生 Win32 code 正規化成 raw Win32 code。
+    pub fn normalize_win32(code: u32) -> u32 {
+        if code & 0xFFFF_0000 == 0x8007_0000 {
+            code & 0xFFFF
+        } else {
+            code
+        }
+    }
+
+    pub fn from_win32(code: u32) -> Self {
+        let code = Self::normalize_win32(code);
+        if code == 5 {
+            ProcessError::AccessDenied
+        } else {
+            ProcessError::Win32(code)
+        }
+    }
+
+    pub fn from_windows(error: windows::core::Error) -> Self {
+        Self::from_win32(error.code().0 as u32)
+    }
+
     pub fn from_last_open() -> Self {
         let err = std::io::Error::last_os_error();
         match err.raw_os_error() {
@@ -74,6 +127,10 @@ impl ProcessError {
             Some(code) => ProcessError::OpenFailed(code as u32),
             None => ProcessError::OpenFailed(0),
         }
+    }
+
+    pub fn is_access_denied(&self) -> bool {
+        matches!(self, ProcessError::AccessDenied)
     }
 }
 
@@ -93,7 +150,17 @@ pub enum TopologyError {
 
 #[cfg(test)]
 mod tests {
-    use super::codes;
+    use super::{codes, ProcessError};
+
+    #[test]
+    fn normalizes_hresult_access_denied_to_stable_classification() {
+        assert_eq!(ProcessError::normalize_win32(0x8007_0005), 5);
+        assert_eq!(
+            ProcessError::from_win32(0x8007_0005),
+            ProcessError::AccessDenied
+        );
+        assert_eq!(ProcessError::from_win32(87), ProcessError::Win32(87));
+    }
 
     /// 回歸測試：error.rs 內每個穩定錯誤代碼都必須存在於 en.json 與 zh-TW.json 的
     /// errors.*（前端查 i18n 顯示）。防止新增代碼漏加任一 locale。

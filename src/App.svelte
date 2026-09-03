@@ -27,6 +27,8 @@
 
   // 基準測試執行中 → 鎖定導覽，不能離開 GPU 測試頁
   const benchmarkRunning = $derived($benchmarkState?.status === 'Running');
+  // compact progress 視窗模式（後端 windowLayout=CompactProgress）→ 隱藏側欄/橫幅
+  const compact = $derived($benchmarkState?.windowLayout === 'CompactProgress');
 
   function switchTab(next: Tab) {
     if (benchmarkRunning && next !== 'gpu') return; // 執行中禁止離開
@@ -137,8 +139,9 @@
   ];
 </script>
 
-<div class="shell">
-  <!-- 側欄導覽 -->
+<div class="shell" class:compact>
+  <!-- 側欄導覽（compact progress 模式隱藏） -->
+  {#if !compact}
   <nav class="sidebar" aria-label={$t('nav.settings')}>
     <div class="brand">
       <svg class="brand-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -168,10 +171,11 @@
       <span class="hint version-label">v{$updateState?.currentVersion ?? '0.0.0'}</span>
     </div>
   </nav>
+  {/if}
 
   <!-- 主內容區 -->
   <main class="content">
-    {#if $updateState?.status === 'Available' && !updateBannerDismissed}
+    {#if $updateState?.status === 'Available' && !updateBannerDismissed && !compact}
       <div class="update-banner" role="status">
         <svg class="banner-icon" viewBox="0 0 24 24" aria-hidden="true">
           <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z" fill="currentColor"/>
@@ -225,33 +229,34 @@
 
   /* ── 側欄 ── */
   .sidebar {
-    width: 200px;
+    width: 216px;
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
     background: var(--surface-1);
     border-right: 1px solid var(--border-subtle);
-    padding: var(--space-3) var(--space-2);
-    gap: var(--space-1);
+    padding: var(--space-4) var(--space-3);
+    gap: var(--space-2);
   }
 
   .brand {
     display: flex;
     align-items: center;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-2) var(--space-4);
+    gap: var(--space-3);
+    padding: var(--space-1) var(--space-2) var(--space-5);
   }
 
   .brand-icon {
-    width: 22px;
-    height: 22px;
+    width: 26px;
+    height: 26px;
     color: var(--accent);
     flex-shrink: 0;
   }
 
   .brand-text {
-    font-weight: var(--font-weight-medium);
-    font-size: 15px;
+    font-weight: var(--font-weight-semibold);
+    font-size: 16px;
+    letter-spacing: -0.01em;
   }
 
   .brand-accent {
@@ -262,11 +267,12 @@
   .nav-items {
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 4px;
     flex: 1;
   }
 
   .nav-btn {
+    position: relative;
     display: flex;
     align-items: center;
     gap: var(--space-3);
@@ -274,11 +280,11 @@
     text-align: left;
     background: transparent;
     border: none;
-    border-radius: var(--radius-sm);
-    padding: var(--space-2) var(--space-3);
-    height: 34px;
+    border-radius: var(--radius-md);
+    padding: 0 var(--space-3);
+    height: 40px;
     color: var(--text-secondary);
-    font-size: 13px;
+    font-size: 13.5px;
     cursor: pointer;
     transition: background var(--transition-fast), color var(--transition-fast);
   }
@@ -298,8 +304,15 @@
     font-weight: var(--font-weight-medium);
   }
 
-  .nav-btn.active .nav-icon {
-    color: var(--accent);
+  .nav-btn.active::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 9px;
+    bottom: 9px;
+    width: 3px;
+    border-radius: var(--radius-full);
+    background: var(--accent);
   }
 
   .nav-btn:disabled {
@@ -311,18 +324,19 @@
     width: 18px;
     height: 18px;
     flex-shrink: 0;
-    opacity: 0.7;
+    color: var(--text-muted);
+    transition: color var(--transition-fast);
   }
 
   .nav-btn.active .nav-icon {
-    opacity: 1;
+    color: var(--accent);
   }
 
   /* ── 側欄底部 ── */
   .sidebar-footer {
-    padding: var(--space-2) var(--space-3);
+    padding: var(--space-3) var(--space-2) 0;
     border-top: 1px solid var(--border-subtle);
-    margin-top: var(--space-1);
+    margin-top: var(--space-2);
   }
 
   .version-label {
@@ -335,12 +349,13 @@
     display: flex;
     flex-direction: column;
     overflow: hidden;
+    min-width: 0;
   }
 
   .page {
     flex: 1;
     overflow-y: auto;
-    padding: var(--space-5);
+    padding: var(--space-6);
   }
 
   /* ── 更新橫幅 ── */
@@ -348,9 +363,9 @@
     display: flex;
     align-items: center;
     gap: var(--space-3);
-    padding: var(--space-2) var(--space-4);
+    padding: var(--space-3) var(--space-5);
     background: var(--accent-muted);
-    border-bottom: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+    border-bottom: 1px solid color-mix(in srgb, var(--accent) 32%, transparent);
     font-size: 13px;
     flex-shrink: 0;
   }
@@ -375,4 +390,7 @@
   @media (max-width: 999px) {
     .page { padding: var(--space-4); }
   }
+
+  /* compact progress 模式：無側欄、內距收窄、禁止滾動（內容必須完整放得下） */
+  .shell.compact .page { padding: var(--space-2); overflow: hidden; }
 </style>

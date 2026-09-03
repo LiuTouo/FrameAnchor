@@ -12,7 +12,7 @@ use super::recommend;
 use super::storage;
 use super::{
     cpu_fingerprint_with, detect_cpu_identity, ApplyStatus, BenchmarkConfig, BenchmarkState,
-    SessionDetail, SessionStatus, SessionSummary, StorageInfo,
+    SessionDetail, SessionSummary, StorageInfo,
 };
 
 /// 列舉目前使用的顯示配接器
@@ -82,6 +82,33 @@ pub fn apply_best_gpu_affinity(
     state.benchmark.apply_best(&state.topology, &session_id)
 }
 
+/// 等效安全驗證（single-flight）：目前鎖定核心在 pair 內立即 Passed，否則背景跑
+/// 3 組 AB/BA 後寫回 `EquivalentSafetyValidation`。原 session 保持 Completed。
+#[tauri::command]
+pub fn validate_equivalent_candidate(
+    app: AppHandle,
+    state: State<Arc<AppState>>,
+    session_id: String,
+    selected_lp: u32,
+) -> Result<(), String> {
+    state
+        .benchmark
+        .validate_equivalent_candidate(&app, &state.topology, session_id, selected_lp)
+}
+
+/// 套用等效親和性：驗證 validation Passed / selected 一致 / live reference 未變後
+/// 套用到 selected_lp。
+#[tauri::command]
+pub fn apply_equivalent_gpu_affinity(
+    state: State<Arc<AppState>>,
+    session_id: String,
+    selected_lp: u32,
+) -> Result<(), String> {
+    state
+        .benchmark
+        .apply_equivalent_gpu_affinity(&state.topology, &session_id, selected_lp)
+}
+
 /// 手動套用 GPU 中斷親和性到指定 LP（不經 session；前置驗證 recovery/執行中/LP/GPU/BasicDisplay）
 #[tauri::command]
 pub fn apply_gpu_affinity(
@@ -140,16 +167,13 @@ pub fn start_gpu_benchmark(
     state.benchmark.start(&app, &state.topology, config)
 }
 
-/// 取消正在跑的基準測試
+/// 取消正在跑的基準測試或等效安全驗證（兩者共用同一個 cancel channel；以
+/// reservation 辨識 operation，不把原 session status 改成 Running）。
 #[tauri::command]
 pub fn cancel_benchmark(state: State<Arc<AppState>>) -> Result<(), String> {
-    let running = state
-        .benchmark
-        .state
-        .read()
-        .map(|s| s.status == SessionStatus::Running)
-        .unwrap_or(false);
-    if !running {
+    let running = state.benchmark.is_running();
+    let validating = state.benchmark.validation_running();
+    if !running && !validating {
         return Err(codes::BENCHMARK_NOT_ACTIVE.to_string());
     }
     state.benchmark.request_cancel();

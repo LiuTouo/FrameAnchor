@@ -62,30 +62,32 @@
     };
   });
 
-  // covered = 所選程序目前套用的核心
+  // covered = 所選程序目前「已驗證」套用的核心（Prefer 為偏好提示，不視為實際覆蓋）
   let covered = $derived(
-    selected ? new Set(selected.currentCores) : new Set<number>(),
+    selected && (selected.strategy === 'Hard' || selected.strategy === 'CpuSets')
+      ? new Set(selected.currentCores)
+      : new Set<number>(),
   );
 </script>
 
 <!-- 頁首：執行狀態摘要 -->
 <div class="page-header">
-  <h2>{$t('dashboard.cpuTitle')}</h2>
+  <h2 class="page-title">{$t('dashboard.cpuTitle')}</h2>
   {#if runningCount > 0}
     <div class="summary-strip" role="status" aria-label={$t('dashboard.summaryLabel', { values: { count: runningCount } })}>
-      <span class="summary-badge ok">
-        <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="currentColor"/></svg>
+      <span class="status-chip ok">
+        <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" fill="currentColor"/></svg>
         {$t('dashboard.summaryOk', { values: { count: okCount } })}
       </span>
       {#if partialCount > 0}
-        <span class="summary-badge warn">
-          <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M12 2L2 22h20L12 2zm0 3.99L19.53 20H4.47L12 5.99zM11 16h2v2h-2zm0-6h2v4h-2z" fill="currentColor"/></svg>
+        <span class="status-chip warn">
+          <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M12 2L2 22h20L12 2zm0 3.99L19.53 20H4.47L12 5.99zM11 16h2v2h-2zm0-6h2v4h-2z" fill="currentColor"/></svg>
           {$t('dashboard.summaryPartial', { values: { count: partialCount } })}
         </span>
       {/if}
       {#if failCount > 0}
-        <span class="summary-badge fail">
-          <svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" fill="currentColor"/></svg>
+        <span class="status-chip fail">
+          <svg viewBox="0 0 24 24" width="13" height="13" aria-hidden="true"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z" fill="currentColor"/></svg>
           {$t('dashboard.summaryFail', { values: { count: failCount } })}
         </span>
       {/if}
@@ -93,24 +95,34 @@
   {/if}
 </div>
 
+<!-- 多處理器群組警告：僅支援 group 0（PLAN §15.1） -->
+{#if $topology && $topology.processorGroups > 1}
+  <div class="group-warn" role="alert">
+    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z" fill="currentColor"/></svg>
+    <span>{$t('dashboard.multiGroup', { values: { n: $topology.processorGroups } })}</span>
+  </div>
+{/if}
+
 <!-- CPU 使用率面板 -->
 {#if sortedApplied.length > 0 && $topology}
-  <div class="selector-row">
-    <label for="pid-select" class="selector-label">{$t('dashboard.selectProcess')}</label>
-    <select id="pid-select" bind:value={selectedPid}>
-      {#each sortedApplied as p (p.pid)}
-        <option value={p.pid}>{p.exeName} ({p.pid}) — {p.ruleName}</option>
-      {/each}
-    </select>
-    <span class="hint">{$t('dashboard.systemPerCoreNote')}</span>
-  </div>
-  <TopologyGrid topology={$topology} usage={$usage} {covered} />
-  <div class="legend-row" aria-label={$t('dashboard.coveredLegend')}>
-    <span class="legend-dot covered"></span>
-    <span class="hint">{$t('dashboard.coveredLegend')}</span>
-    <span class="legend-dot smt"></span>
-    <span class="hint">{$t('dashboard.smtLegend')}</span>
-  </div>
+  <section class="panel usage-panel">
+    <div class="selector-row">
+      <label for="pid-select" class="selector-label">{$t('dashboard.selectProcess')}</label>
+      <select id="pid-select" bind:value={selectedPid}>
+        {#each sortedApplied as p (p.pid)}
+          <option value={p.pid}>{p.exeName} ({p.pid}) — {p.ruleName}</option>
+        {/each}
+      </select>
+      <span class="hint">{$t('dashboard.systemPerCoreNote')}</span>
+    </div>
+    <TopologyGrid topology={$topology} usage={$usage} {covered} />
+    <div class="legend-row" aria-label={$t('dashboard.coveredLegend')}>
+      <span class="legend-dot covered"></span>
+      <span class="hint">{$t('dashboard.coveredLegend')}</span>
+      <span class="legend-dot smt"></span>
+      <span class="hint">{$t('dashboard.smtLegend')}</span>
+    </div>
+  </section>
 {:else}
   <div class="panel empty-state">
     <svg viewBox="0 0 24 24" width="32" height="32" aria-hidden="true"><path d="M3 3h18v18H3V3zm2 2v14h14V5H5zm2 2h10v2H7V7zm0 4h6v2H7v-2z" fill="currentColor" opacity="0.3"/></svg>
@@ -119,21 +131,17 @@
 {/if}
 
 <!-- 已套用進程表格 -->
-<h2>{$t('dashboard.appliedTitle')}</h2>
+<h2 class="section-heading">{$t('dashboard.appliedTitle')}</h2>
 <AppliedTable applied={$applied} />
 
 <style>
   .page-header {
     display: flex;
     flex-wrap: wrap;
-    align-items: baseline;
+    align-items: center;
+    justify-content: space-between;
     gap: var(--space-3);
-    margin-bottom: var(--space-4);
-  }
-
-  .page-header h2 {
-    margin: 0;
-    font-size: 15px;
+    margin-bottom: var(--space-5);
   }
 
   .summary-strip {
@@ -142,60 +150,39 @@
     gap: var(--space-2);
   }
 
-  .summary-badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 1px 8px;
-    border-radius: var(--radius-full);
-    font-size: 12px;
-    font-weight: var(--font-weight-medium);
-    line-height: 20px;
-  }
-
-  .summary-badge.ok {
-    background: var(--success-muted);
-    color: var(--success);
-  }
-
-  .summary-badge.warn {
-    background: var(--warning-muted);
-    color: var(--warning);
-  }
-
-  .summary-badge.fail {
-    background: var(--danger-muted);
-    color: var(--danger);
-  }
-
-  h2 {
-    font-size: 14px;
+  .section-heading {
     margin: var(--space-6) 0 var(--space-3);
+    font-size: 14px;
+  }
+
+  .usage-panel {
+    margin-bottom: var(--space-5);
   }
 
   .selector-row {
     display: flex;
     align-items: center;
     gap: var(--space-3);
-    margin-bottom: var(--space-3);
+    margin-bottom: var(--space-4);
     flex-wrap: wrap;
   }
 
   .selector-label {
     color: var(--text-secondary);
     font-size: 12px;
+    font-weight: var(--font-weight-medium);
     white-space: nowrap;
   }
 
   .selector-row select {
-    max-width: 340px;
+    max-width: 360px;
   }
 
   .legend-row {
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    margin-top: var(--space-2);
+    margin-top: var(--space-3);
   }
 
   .legend-dot {
@@ -221,5 +208,14 @@
     align-items: center;
     gap: var(--space-3);
     color: var(--text-secondary);
+  }
+
+  .group-warn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--warning);
+    font-size: 12px;
+    margin-bottom: var(--space-4);
   }
 </style>

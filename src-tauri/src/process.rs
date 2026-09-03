@@ -1,7 +1,9 @@
 //! 進程列舉與操作（PLAN §7.2）：Toolhelp snapshot、affinity、priority。
 
 use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
+use windows::Win32::Foundation::{
+    CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_MORE_FILES, FILETIME, HANDLE,
+};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, Thread32First, Thread32Next,
     PROCESSENTRY32W, TH32CS_SNAPPROCESS, TH32CS_SNAPTHREAD, THREADENTRY32,
@@ -11,13 +13,13 @@ use windows::Win32::System::SystemInformation::{
     CpuSetInformation, GetSystemCpuSetInformation, SYSTEM_CPU_SET_INFORMATION,
 };
 use windows::Win32::System::Threading::{
-    GetPriorityClass, GetProcessAffinityMask, GetProcessTimes, OpenProcess, OpenThread,
-    QueryFullProcessImageNameW, SetPriorityClass, SetProcessAffinityMask, SetProcessDefaultCpuSets,
-    SetThreadIdealProcessorEx, TerminateProcess, ABOVE_NORMAL_PRIORITY_CLASS,
-    BELOW_NORMAL_PRIORITY_CLASS, HIGH_PRIORITY_CLASS, IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS,
-    PROCESS_NAME_FORMAT, PROCESS_QUERY_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_SET_INFORMATION, PROCESS_SET_LIMITED_INFORMATION, PROCESS_TERMINATE, PROCESS_VM_READ,
-    THREAD_SET_INFORMATION,
+    GetPriorityClass, GetProcessAffinityMask, GetProcessDefaultCpuSets, GetProcessTimes,
+    OpenProcess, OpenThread, QueryFullProcessImageNameW, SetPriorityClass, SetProcessAffinityMask,
+    SetProcessDefaultCpuSets, SetThreadIdealProcessorEx, TerminateProcess,
+    ABOVE_NORMAL_PRIORITY_CLASS, BELOW_NORMAL_PRIORITY_CLASS, HIGH_PRIORITY_CLASS,
+    IDLE_PRIORITY_CLASS, NORMAL_PRIORITY_CLASS, PROCESS_NAME_FORMAT, PROCESS_QUERY_INFORMATION,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_INFORMATION, PROCESS_SET_LIMITED_INFORMATION,
+    PROCESS_TERMINATE, PROCESS_VM_READ, REALTIME_PRIORITY_CLASS, THREAD_SET_INFORMATION,
 };
 
 use crate::error::ProcessError;
@@ -31,31 +33,37 @@ pub struct ProcessInfo {
     pub exe_path: Option<String>,
 }
 
-/// 走訪 Toolhelp snapshot 內所有進程（pid, exe 名）
-fn for_each_process(mut f: impl FnMut(u32, String)) {
+/// 走訪 Toolhelp snapshot 內所有進程（pid, exe 名）。
+/// 任一列舉錯誤都回傳 Err，呼叫端不得把失敗誤認為空清單。
+fn for_each_process(mut f: impl FnMut(u32, String)) -> Result<(), ProcessError> {
     unsafe {
-        let snap = match CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
-            Ok(h) => h,
-            Err(_) => return,
-        };
+        let snap =
+            CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).map_err(ProcessError::from_windows)?;
         let mut entry = PROCESSENTRY32W {
             dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
             ..Default::default()
         };
-        if Process32FirstW(snap, &mut entry).is_ok() {
-            loop {
-                f(entry.th32ProcessID, utf16_slice_to_string(&entry.szExeFile));
-                if Process32NextW(snap, &mut entry).is_err() {
-                    break;
-                }
+        if let Err(e) = Process32FirstW(snap, &mut entry) {
+            let _ = CloseHandle(snap);
+            return Err(ProcessError::from_windows(e));
+        }
+        loop {
+            f(entry.th32ProcessID, utf16_slice_to_string(&entry.szExeFile));
+            if let Err(e) = Process32NextW(snap, &mut entry) {
+                let code = ProcessError::normalize_win32(e.code().0 as u32);
+                let _ = CloseHandle(snap);
+                return if code == ERROR_NO_MORE_FILES.0 {
+                    Ok(())
+                } else {
+                    Err(ProcessError::from_win32(code))
+                };
             }
         }
-        let _ = CloseHandle(snap);
     }
 }
 
 /// Toolhelp snapshot 列舉全部進程（逐進程解析路徑，較重；tick 用）
-pub fn enumerate_processes() -> Vec<ProcessInfo> {
+pub fn enumerate_processes() -> Result<Vec<ProcessInfo>, ProcessError> {
     let mut result = Vec::new();
     for_each_process(|pid, exe_name| {
         let exe_path = process_path(pid);
@@ -64,15 +72,15 @@ pub fn enumerate_processes() -> Vec<ProcessInfo> {
             exe_name,
             exe_path,
         });
-    });
-    result
+    })?;
+    Ok(result)
 }
 
 /// 輕量列舉：只有 pid + exe 名，不解析路徑。discovery 高頻掃描用。
-pub fn enumerate_process_names() -> Vec<(u32, String)> {
+pub fn enumerate_process_names() -> Result<Vec<(u32, String)>, ProcessError> {
     let mut result = Vec::new();
-    for_each_process(|pid, name| result.push((pid, name)));
-    result
+    for_each_process(|pid, name| result.push((pid, name)))?;
+    Ok(result)
 }
 
 /// exe 完整路徑；受保護進程回傳 None
@@ -122,7 +130,10 @@ impl Drop for OwnedHandle {
 pub fn open_for_set(pid: u32) -> Result<OwnedHandle, ProcessError> {
     unsafe {
         OpenProcess(
-            PROCESS_SET_INFORMATION | PROCESS_QUERY_INFORMATION,
+            PROCESS_SET_INFORMATION
+                | PROCESS_SET_LIMITED_INFORMATION
+                | PROCESS_QUERY_INFORMATION
+                | PROCESS_QUERY_LIMITED_INFORMATION,
             false,
             pid,
         )
@@ -193,9 +204,7 @@ pub fn enable_debug_privilege() {
 }
 
 pub fn set_affinity(h: HANDLE, mask: u64) -> Result<(), ProcessError> {
-    unsafe {
-        SetProcessAffinityMask(h, mask as usize).map_err(|e| ProcessError::Win32(e.code().0 as u32))
-    }
+    unsafe { SetProcessAffinityMask(h, mask as usize).map_err(ProcessError::from_windows) }
 }
 
 /// 清理孤兒 WebView2 子程序。host（frameanchor.exe）被強殺時，
@@ -333,6 +342,8 @@ pub fn kill_orphan_webviews() {
 pub struct ThreadIdealOutcome {
     pub attempted: usize,
     pub succeeded: usize,
+    pub first_error: Option<ProcessError>,
+    pub access_denied: bool,
 }
 
 /// 軟綁定：進程所有執行緒設 ideal processor（偏好核心，round-robin）。
@@ -341,24 +352,35 @@ pub fn set_threads_ideal(pid: u32, cores: &[u32]) -> ThreadIdealOutcome {
     let zero = ThreadIdealOutcome {
         attempted: 0,
         succeeded: 0,
+        first_error: None,
+        access_denied: false,
     };
     if cores.is_empty() {
         return zero;
     }
     let mut attempted = 0usize;
     let mut succeeded = 0usize;
+    let mut first_error = None;
+    let mut access_denied = false;
     let mut idx = 0usize;
     unsafe {
         let snap = match CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) {
             Ok(h) => h,
-            Err(_) => return zero,
+            Err(e) => {
+                let error = ProcessError::from_windows(e);
+                return ThreadIdealOutcome {
+                    first_error: Some(error),
+                    access_denied: error.is_access_denied(),
+                    ..zero
+                };
+            }
         };
         let mut entry = THREADENTRY32 {
             dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
             ..Default::default()
         };
-        if Thread32First(snap, &mut entry).is_ok() {
-            loop {
+        match Thread32First(snap, &mut entry) {
+            Ok(()) => loop {
                 if entry.th32OwnerProcessID == pid {
                     attempted += 1;
                     let preferred = PROCESSOR_NUMBER {
@@ -366,16 +388,42 @@ pub fn set_threads_ideal(pid: u32, cores: &[u32]) -> ThreadIdealOutcome {
                         Number: cores[idx % cores.len()] as u8,
                         Reserved: 0,
                     };
-                    if let Ok(t) = OpenThread(THREAD_SET_INFORMATION, false, entry.th32ThreadID) {
-                        if SetThreadIdealProcessorEx(t, &preferred, None).is_ok() {
-                            succeeded += 1;
+                    match OpenThread(THREAD_SET_INFORMATION, false, entry.th32ThreadID) {
+                        Ok(t) => {
+                            match SetThreadIdealProcessorEx(t, &preferred, None) {
+                                Ok(_) => succeeded += 1,
+                                Err(e) => {
+                                    let error = ProcessError::from_windows(e);
+                                    first_error.get_or_insert(error);
+                                    access_denied |= error.is_access_denied();
+                                }
+                            }
+                            let _ = CloseHandle(t);
                         }
-                        let _ = CloseHandle(t);
+                        Err(e) => {
+                            let error = ProcessError::from_windows(e);
+                            first_error.get_or_insert(error);
+                            access_denied |= error.is_access_denied();
+                        }
                     }
                     idx += 1;
                 }
-                if Thread32Next(snap, &mut entry).is_err() {
+                if let Err(e) = Thread32Next(snap, &mut entry) {
+                    let code = ProcessError::normalize_win32(e.code().0 as u32);
+                    if code != ERROR_NO_MORE_FILES.0 {
+                        let error = ProcessError::from_win32(code);
+                        first_error.get_or_insert(error);
+                        access_denied |= error.is_access_denied();
+                    }
                     break;
+                }
+            },
+            Err(e) => {
+                let code = ProcessError::normalize_win32(e.code().0 as u32);
+                if code != ERROR_NO_MORE_FILES.0 {
+                    let error = ProcessError::from_win32(code);
+                    first_error.get_or_insert(error);
+                    access_denied |= error.is_access_denied();
                 }
             }
         }
@@ -384,17 +432,30 @@ pub fn set_threads_ideal(pid: u32, cores: &[u32]) -> ThreadIdealOutcome {
     ThreadIdealOutcome {
         attempted,
         succeeded,
+        first_error,
+        access_denied,
     }
 }
 
 // ── CPU Sets API（Windows 10 1703+）──────────────────────────────────────
 
-/// LP index → CPU set ID 映射快取（啟動時列舉一次）
+/// LP index ↔ CPU set ID 雙向映射（啟動時列舉一次）
 struct CpuSetMap {
     lp_to_set_id: Vec<Option<u32>>,
+    /// set ID → LP index 反向映射（回讀用）
+    set_id_to_lp: std::collections::HashMap<u32, u32>,
 }
 
-/// 列舉系統 CPU sets，建立 LP index → set ID 映射
+/// 由 LP→setID 映射建立 setID→LP 反向映射（純函式，可測試）
+fn build_set_id_to_lp(lp_to_set_id: &[Option<u32>]) -> std::collections::HashMap<u32, u32> {
+    lp_to_set_id
+        .iter()
+        .enumerate()
+        .filter_map(|(lp, id)| id.map(|id| (id, lp as u32)))
+        .collect()
+}
+
+/// 列舉系統 CPU sets，建立 LP index ↔ set ID 雙向映射
 fn enumerate_cpu_sets() -> Option<CpuSetMap> {
     unsafe {
         let mut needed: u32 = 0;
@@ -432,14 +493,18 @@ fn enumerate_cpu_sets() -> Option<CpuSetMap> {
                 }
             }
         }
-        Some(CpuSetMap { lp_to_set_id })
+        let set_id_to_lp = build_set_id_to_lp(&lp_to_set_id);
+        Some(CpuSetMap {
+            lp_to_set_id,
+            set_id_to_lp,
+        })
     }
 }
 
 /// 用 CPU Sets API 設定軟性 affinity（PLAN §15 v2 功能）。
 /// 需要 `PROCESS_SET_LIMITED_INFORMATION`，與 `PROCESS_SET_INFORMATION` 不同。
 /// 反作弊 kernel driver 較少攔截此權限，成功率比硬綁定高。
-pub fn set_cpu_sets(pid: u32, cores: &[u32]) -> Result<(), ProcessError> {
+pub fn set_cpu_sets_by_handle(h: HANDLE, cores: &[u32]) -> Result<(), ProcessError> {
     let map = enumerate_cpu_sets().ok_or(ProcessError::OpenFailed(0))?;
     let set_ids: Vec<u32> = cores
         .iter()
@@ -448,38 +513,46 @@ pub fn set_cpu_sets(pid: u32, cores: &[u32]) -> Result<(), ProcessError> {
     if set_ids.is_empty() {
         return Err(ProcessError::OpenFailed(0));
     }
-    // 只要求 PROCESS_SET_LIMITED_INFORMATION（不要求 PROCESS_SET_INFORMATION）
-    let h = unsafe {
-        OpenProcess(PROCESS_SET_LIMITED_INFORMATION, false, pid)
-            .map_err(|_| ProcessError::from_last_open())?
-    };
     let result = unsafe { SetProcessDefaultCpuSets(h, Some(&set_ids)) };
-    let _ = unsafe { CloseHandle(h) };
     if result.as_bool() {
         Ok(())
     } else {
         let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
-        Err(ProcessError::Win32(code))
+        Err(ProcessError::from_win32(code))
     }
+}
+
+pub fn set_cpu_sets(pid: u32, cores: &[u32]) -> Result<(), ProcessError> {
+    let h = unsafe {
+        OpenProcess(PROCESS_SET_LIMITED_INFORMATION, false, pid)
+            .map_err(|_| ProcessError::from_last_open())?
+    };
+    let result = set_cpu_sets_by_handle(h, cores);
+    let _ = unsafe { CloseHandle(h) };
+    result
 }
 
 /// 清除 process-default CPU Sets 指派（All 模式還原用）。
 /// Microsoft 合約：SetProcessDefaultCpuSets 傳 CpuSetIds=NULL、count=0 才清除指派；
 /// 傳入全部列舉 set 是「指派全部」，不等於清除。
-pub fn clear_cpu_sets(pid: u32) -> Result<(), ProcessError> {
-    // 只要求 PROCESS_SET_LIMITED_INFORMATION（與 set_cpu_sets 相同）
-    let h = unsafe {
-        OpenProcess(PROCESS_SET_LIMITED_INFORMATION, false, pid)
-            .map_err(|_| ProcessError::from_last_open())?
-    };
+pub fn clear_cpu_sets_by_handle(h: HANDLE) -> Result<(), ProcessError> {
     let result = unsafe { SetProcessDefaultCpuSets(h, None) };
-    let _ = unsafe { CloseHandle(h) };
     if result.as_bool() {
         Ok(())
     } else {
         let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
-        Err(ProcessError::Win32(code))
+        Err(ProcessError::from_win32(code))
     }
+}
+
+pub fn clear_cpu_sets(pid: u32) -> Result<(), ProcessError> {
+    let h = unsafe {
+        OpenProcess(PROCESS_SET_LIMITED_INFORMATION, false, pid)
+            .map_err(|_| ProcessError::from_last_open())?
+    };
+    let result = clear_cpu_sets_by_handle(h);
+    let _ = unsafe { CloseHandle(h) };
+    result
 }
 
 pub fn get_affinity(h: HANDLE) -> Result<u64, ProcessError> {
@@ -487,9 +560,91 @@ pub fn get_affinity(h: HANDLE) -> Result<u64, ProcessError> {
     let mut system_mask: usize = 0;
     unsafe {
         GetProcessAffinityMask(h, &mut process_mask, &mut system_mask)
-            .map_err(|e| ProcessError::Win32(e.code().0 as u32))?;
+            .map_err(ProcessError::from_windows)?;
     }
     Ok(process_mask as u64)
+}
+
+/// 以 pid 開啟 QUERY_LIMITED handle 回讀硬綁定 mask（revalidation 用，不依賴快取 handle）。
+pub fn get_affinity_by_pid(pid: u32) -> Result<u64, ProcessError> {
+    unsafe {
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            .map_err(|_| ProcessError::from_last_open())?;
+        let result = get_affinity(h);
+        let _ = CloseHandle(h);
+        result
+    }
+}
+
+/// 回讀 process-default CPU Sets（GetProcessDefaultCpuSets），轉回 LP indices（已排序去重）。
+/// 無指派時 API 成功 → 回傳空 Vec（與「指派空集合」區分：後者不存在）。
+/// 接受既有 handle：revalidation 優先用快取 handle（反作弊保護後仍可用），避免重開。
+pub fn get_cpu_sets_by_handle(h: HANDLE) -> Result<Vec<u32>, ProcessError> {
+    let map = enumerate_cpu_sets().ok_or(ProcessError::OpenFailed(0))?;
+    let ids = unsafe { read_cpu_sets_raw(h) }?;
+    let mut lps: Vec<u32> = ids
+        .iter()
+        .filter_map(|&id| map.set_id_to_lp.get(&id).copied())
+        .collect();
+    lps.sort_unstable();
+    lps.dedup();
+    Ok(lps)
+}
+
+/// 以 pid 開啟 QUERY_LIMITED handle 回讀 CPU Sets（無快取 handle 時的 fallback）。
+pub fn get_cpu_sets(pid: u32) -> Result<Vec<u32>, ProcessError> {
+    let h = unsafe {
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+            .map_err(|_| ProcessError::from_last_open())?
+    };
+    let result = get_cpu_sets_by_handle(h);
+    let _ = unsafe { CloseHandle(h) };
+    result
+}
+
+/// 第一段 GetProcessDefaultCpuSets probe 結果分類（純函式，可測試）。
+/// 成功 = 無指派；ERROR_INSUFFICIENT_BUFFER = 需 buffer 走第二段；其他錯誤 = 讀取失敗。
+#[derive(Debug, PartialEq, Eq)]
+enum CpuSetsProbe {
+    /// 成功 → 無指派，空集合
+    Empty,
+    /// ERROR_INSUFFICIENT_BUFFER → 需分配 buffer 進行第二段讀取
+    NeedBuffer { count: u32 },
+    /// 其他錯誤 → 回傳該錯誤（不得誤報為空集合）
+    Error(u32),
+}
+
+fn classify_cpu_sets_probe(ok: bool, required: u32, last_error: u32) -> CpuSetsProbe {
+    if ok {
+        CpuSetsProbe::Empty
+    } else if last_error == ERROR_INSUFFICIENT_BUFFER.0 {
+        CpuSetsProbe::NeedBuffer { count: required }
+    } else {
+        CpuSetsProbe::Error(last_error)
+    }
+}
+
+/// 兩段式讀取 process-default CPU Sets：先 probe 長度，再取 ID 清單。
+/// 第一段 probe 的 BOOL 與 GetLastError 決定語義（詳見 classify_cpu_sets_probe），
+/// 不得把 API 失敗當成「空集合」。
+unsafe fn read_cpu_sets_raw(h: HANDLE) -> Result<Vec<u32>, ProcessError> {
+    let mut required: u32 = 0;
+    let ok = GetProcessDefaultCpuSets(h, None, &mut required).as_bool();
+    let last_error = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
+    match classify_cpu_sets_probe(ok, required, last_error) {
+        CpuSetsProbe::Empty => Ok(Vec::new()),
+        CpuSetsProbe::Error(code) => Err(ProcessError::from_win32(code)),
+        CpuSetsProbe::NeedBuffer { count } => {
+            let mut ids = vec![0u32; count as usize];
+            let ok = GetProcessDefaultCpuSets(h, Some(&mut ids), &mut required);
+            if !ok.as_bool() {
+                let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
+                return Err(ProcessError::from_win32(code));
+            }
+            ids.truncate(required as usize);
+            Ok(ids)
+        }
+    }
 }
 
 pub fn set_priority(h: HANDLE, p: CpuPriority) -> Result<(), ProcessError> {
@@ -501,21 +656,52 @@ pub fn set_priority(h: HANDLE, p: CpuPriority) -> Result<(), ProcessError> {
         CpuPriority::High => HIGH_PRIORITY_CLASS,
         // 刻意不提供 REALTIME_PRIORITY_CLASS：會餓死系統層級執行緒（PLAN §7.2）
     };
-    unsafe { SetPriorityClass(h, class).map_err(|e| ProcessError::Win32(e.code().0 as u32)) }
+    unsafe { SetPriorityClass(h, class).map_err(ProcessError::from_windows) }
 }
 
-pub fn get_priority(h: HANDLE) -> CpuPriority {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActualPriorityClass {
+    Idle,
+    BelowNormal,
+    Normal,
+    AboveNormal,
+    High,
+    Realtime,
+}
+
+impl ActualPriorityClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::BelowNormal => "BelowNormal",
+            Self::Normal => "Normal",
+            Self::AboveNormal => "AboveNormal",
+            Self::High => "High",
+            Self::Realtime => "Realtime",
+        }
+    }
+}
+
+pub fn get_priority(h: HANDLE) -> Result<ActualPriorityClass, ProcessError> {
     let v = unsafe { GetPriorityClass(h) };
-    if v == HIGH_PRIORITY_CLASS.0 {
-        CpuPriority::High
+    if v == 0 {
+        let code = std::io::Error::last_os_error().raw_os_error().unwrap_or(0) as u32;
+        Err(ProcessError::from_win32(code))
+    } else if v == HIGH_PRIORITY_CLASS.0 {
+        Ok(ActualPriorityClass::High)
     } else if v == ABOVE_NORMAL_PRIORITY_CLASS.0 {
-        CpuPriority::AboveNormal
+        Ok(ActualPriorityClass::AboveNormal)
     } else if v == BELOW_NORMAL_PRIORITY_CLASS.0 {
-        CpuPriority::BelowNormal
+        Ok(ActualPriorityClass::BelowNormal)
     } else if v == IDLE_PRIORITY_CLASS.0 {
-        CpuPriority::Idle
+        Ok(ActualPriorityClass::Idle)
+    } else if v == REALTIME_PRIORITY_CLASS.0 {
+        Ok(ActualPriorityClass::Realtime)
+    } else if v == NORMAL_PRIORITY_CLASS.0 {
+        Ok(ActualPriorityClass::Normal)
     } else {
-        CpuPriority::Normal
+        // v 是 priority class 值而非 Win32 錯誤碼，不可包成 Win32(v) 誤導診斷
+        Err(ProcessError::UnknownPriorityClass(v))
     }
 }
 
@@ -615,5 +801,42 @@ mod tests {
             "game.exe",
             Some(r"C:\Games\game.exe")
         ));
+    }
+
+    #[test]
+    fn set_id_to_lp_map_builds_reverse() {
+        // LP 0 → id 100，LP 1 → id 200，LP 2 無對應（parked）
+        let lp_to_set_id = vec![Some(100u32), Some(200u32), None];
+        let rev = build_set_id_to_lp(&lp_to_set_id);
+        assert_eq!(rev.get(&100), Some(&0));
+        assert_eq!(rev.get(&200), Some(&1));
+        assert!(!rev.contains_key(&999));
+    }
+
+    #[test]
+    fn set_id_to_lp_map_empty() {
+        assert!(build_set_id_to_lp(&[]).is_empty());
+        assert!(build_set_id_to_lp(&[None, None]).is_empty());
+    }
+
+    #[test]
+    fn cpu_sets_probe_success_is_empty() {
+        // 成功 = 無指派（required/last_error 此時無意義，分類只看 BOOL）
+        assert_eq!(classify_cpu_sets_probe(true, 0, 0), CpuSetsProbe::Empty);
+        assert_eq!(classify_cpu_sets_probe(true, 7, 999), CpuSetsProbe::Empty);
+    }
+
+    #[test]
+    fn cpu_sets_probe_insufficient_buffer_needs_second_call() {
+        assert_eq!(
+            classify_cpu_sets_probe(false, 3, ERROR_INSUFFICIENT_BUFFER.0),
+            CpuSetsProbe::NeedBuffer { count: 3 }
+        );
+    }
+
+    #[test]
+    fn cpu_sets_probe_failure_is_not_empty() {
+        // 存取失敗（ACCESS_DENIED=5）時 required 仍是 0，但不得誤報為空集合
+        assert_eq!(classify_cpu_sets_probe(false, 0, 5), CpuSetsProbe::Error(5));
     }
 }

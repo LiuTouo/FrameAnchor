@@ -67,6 +67,7 @@
     session: SessionSummary;
     policyLp: number | null;
   } | null>(null);
+  let previewSequence = 0;
 
   // 預設選取最新可匯入 session（list 依 startedAt 降冪）
   $effect(() => {
@@ -78,17 +79,24 @@
   });
 
   async function loadImportPreview(s: SessionSummary) {
-    if (s.bestLp == null) return;
+    const sequence = ++previewSequence;
+    importPreview = null;
+    if (s.bestLp == null) {
+      importBusy = false;
+      return;
+    }
     importBusy = true;
     try {
       const recommended = await ipc.computeRecommendedCores(s.bestLp, s.severeLps ?? []);
       const policy = await ipc.getGpuAffinityPolicy(s.gpuInstanceId).catch(() => null);
       const policyLp = policy ? maskToLp(policy.assignmentSetOverride?.bytes ?? null) : null;
-      importPreview = { recommended, session: s, policyLp };
+      if (sequence === previewSequence && importSel === s.id) {
+        importPreview = { recommended, session: s, policyLp };
+      }
     } catch {
-      importPreview = null;
+      if (sequence === previewSequence) importPreview = null;
     } finally {
-      importBusy = false;
+      if (sequence === previewSequence) importBusy = false;
     }
   }
 
@@ -110,7 +118,7 @@
 
   function doImport() {
     const p = importPreview;
-    if (!p || p.recommended.length === 0) return;
+    if (importBusy || !p || p.session.id !== importSel || p.recommended.length === 0) return;
     draft.affinity = { mode: 'Custom', cores: p.recommended };
     draft.recommendation = {
       sessionId: p.session.id,
@@ -143,6 +151,12 @@
     !!draft.recommendation?.cpuFingerprint &&
       !!currentCpuFingerprint &&
       draft.recommendation.cpuFingerprint !== currentCpuFingerprint,
+  );
+
+  // 自訂/偏好核心集指向超過目前拓撲的核心 → 拓撲已變動，超出範圍部分會被後端靜默忽略
+  const staleCores = $derived(
+    (draft.affinity.mode === 'Custom' || draft.affinity.mode === 'Prefer') &&
+      draft.affinity.cores.some((c) => c >= (topology?.totalLp ?? Number.MAX_SAFE_INTEGER)),
   );
 
   function policyStatusText(p: { policyLp: number | null; session: SessionSummary }): string {
@@ -206,6 +220,9 @@
     <div class="label">{$t('rules.affinity')}</div>
     {#if staleHardware}
       <div class="hint stale-warn">{$t('ruleImport.staleHardware')}</div>
+    {/if}
+    {#if staleCores}
+      <div class="hint stale-warn">{$t('rules.staleCores')}</div>
     {/if}
     <AffinityPicker
       {topology}

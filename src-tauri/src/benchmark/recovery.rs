@@ -209,7 +209,8 @@ mod tests {
     /// 其他 read I/O error（目錄）→ Err，不是當作「無日誌」的 None。
     #[test]
     fn load_from_directory_is_error_not_none() {
-        let dir = std::env::temp_dir().join(format!("frameanchor_recovery_dir_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("frameanchor_recovery_dir_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         assert!(load_from(&dir).is_err());
         let _ = std::fs::remove_dir_all(&dir);

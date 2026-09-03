@@ -40,17 +40,19 @@ features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_SystemInformation",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
     "Win32_UI_Shell",
     "Win32_Storage_FileSystem",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_Devices_DeviceAndDriverInstallation",
     "Win32_System_Registry",
+    "Win32_System_Power",
 ]
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
-panic = "abort"
+panic = "unwind"
 strip = true

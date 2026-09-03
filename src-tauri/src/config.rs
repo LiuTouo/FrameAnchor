@@ -27,23 +27,46 @@ pub fn config_path() -> PathBuf {
     config_dir().join("config.json")
 }
 
-pub fn load() -> Config {
-    load_from(&config_path())
+pub fn load() -> Result<Config, String> {
+    load_with_retries(&config_path(), &[100, 250, 400])
 }
 
-pub fn load_from(path: &Path) -> Config {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => return Config::default(), // 不存在 → 預設值
+#[cfg(test)]
+pub fn load_from(path: &Path) -> Result<Config, String> {
+    load_with_retries(path, &[])
+}
+
+fn load_with_retries(path: &Path, retry_delays_ms: &[u64]) -> Result<Config, String> {
+    let mut retry = retry_delays_ms.iter();
+    let text = loop {
+        match std::fs::read_to_string(path) {
+            Ok(text) => break text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Config::default()),
+            Err(e) => match retry.next() {
+                Some(delay) => {
+                    log::warn!("config 讀取失敗，{delay} ms 後重試: {e}");
+                    std::thread::sleep(std::time::Duration::from_millis(*delay));
+                }
+                None => {
+                    return Err(format!("CONFIG_FAILED: read {}: {e}", path.display()));
+                }
+            },
+        }
     };
     match serde_json::from_str::<Config>(&text) {
-        Ok(cfg) => cfg,
+        Ok(cfg) => Ok(cfg),
         Err(e) => {
             // 壞檔：備份為 config.corrupt.json，用預設值，不覆蓋使用者原檔（PLAN §7.8）
             log::error!("config 解析失敗，備份原檔: {e}");
             let backup = path.with_file_name("config.corrupt.json");
-            let _ = std::fs::copy(path, &backup);
-            Config::default()
+            std::fs::copy(path, &backup).map_err(|backup_error| {
+                format!(
+                    "CONFIG_FAILED: parse {}; backup {}: {backup_error}",
+                    path.display(),
+                    backup.display()
+                )
+            })?;
+            Ok(Config::default())
         }
     }
 }
@@ -90,7 +113,8 @@ pub fn atomic_write(path: &Path, text: &str) -> Result<(), String> {
 fn write_synced(tmp: &Path, text: &str) -> Result<(), String> {
     use std::io::Write;
     let mut f = std::fs::File::create(tmp).map_err(|e| format!("create tmp: {e}"))?;
-    f.write_all(text.as_bytes()).map_err(|e| format!("write tmp: {e}"))?;
+    f.write_all(text.as_bytes())
+        .map_err(|e| format!("write tmp: {e}"))?;
     f.sync_all().map_err(|e| format!("sync tmp: {e}"))?;
     Ok(())
 }
@@ -166,7 +190,7 @@ mod tests {
             .push(Rule::new(r"C:\Games\game.exe".into(), "Game".into()));
 
         save_to(&path, &cfg).unwrap();
-        let loaded = load_from(&path);
+        let loaded = load_from(&path).unwrap();
         assert_eq!(loaded.settings.poll_interval_ms, 2000);
         assert_eq!(loaded.rules.len(), 1);
         assert_eq!(loaded.rules[0].exe_path, r"C:\Games\game.exe");
@@ -177,7 +201,7 @@ mod tests {
     fn corrupt_file_is_backed_up_and_defaulted() {
         let path = temp_path("corrupt.json");
         std::fs::write(&path, "{ not valid json !!!").unwrap();
-        let cfg = load_from(&path);
+        let cfg = load_from(&path).unwrap();
         assert_eq!(cfg.version, 1);
         let backup = path.with_file_name("config.corrupt.json");
         assert!(backup.exists());
@@ -189,15 +213,25 @@ mod tests {
     fn missing_file_gives_default() {
         let path = temp_path("missing.json");
         let _ = std::fs::remove_file(&path);
-        let cfg = load_from(&path);
+        let cfg = load_from(&path).unwrap();
         assert_eq!(cfg.settings.language, "zh-TW");
+    }
+
+    #[test]
+    fn non_not_found_read_error_is_not_defaulted() {
+        let path = temp_path("read_error_dir");
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        let error = load_from(&path).unwrap_err();
+        assert!(error.starts_with("CONFIG_FAILED: read "));
+        let _ = std::fs::remove_dir_all(&path);
     }
 
     #[test]
     fn missing_fields_use_defaults() {
         let path = temp_path("partial.json");
         std::fs::write(&path, r#"{ "version": 1 }"#).unwrap();
-        let cfg = load_from(&path);
+        let cfg = load_from(&path).unwrap();
         assert_eq!(cfg.settings.poll_interval_ms, 1000);
         assert!(cfg.rules.is_empty());
         let _ = std::fs::remove_file(&path);
@@ -224,7 +258,7 @@ mod tests {
             ]
         }"#;
         std::fs::write(&path, json).unwrap();
-        let cfg = load_from(&path);
+        let cfg = load_from(&path).unwrap();
         assert_eq!(cfg.rules.len(), 1);
         assert_eq!(cfg.rules[0].name, "TestGame");
         assert_eq!(
@@ -254,7 +288,7 @@ mod tests {
             }
         }"#;
         std::fs::write(&path, json).unwrap();
-        let cfg = load_from(&path);
+        let cfg = load_from(&path).unwrap();
         assert_eq!(cfg.settings.theme, crate::model::Theme::Dark);
         assert_eq!(cfg.settings.poll_interval_ms, 2000);
         let _ = std::fs::remove_file(&path);
@@ -277,7 +311,10 @@ mod tests {
         std::fs::write(&path, "old").unwrap();
         atomic_write(&path, "new").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
-        let prefix = format!(".frameanchor_test_{}_atomic_replace.json.", std::process::id());
+        let prefix = format!(
+            ".frameanchor_test_{}_atomic_replace.json.",
+            std::process::id()
+        );
         let leftover = std::fs::read_dir(std::env::temp_dir())
             .unwrap()
             .flatten()

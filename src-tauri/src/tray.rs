@@ -1,5 +1,6 @@
 //! 系統匣（PLAN §7.9）：右鍵選單、左鍵開面板、雙語選單重建。
 
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 use tauri::menu::{
@@ -106,7 +107,16 @@ pub fn rebuild_menu(app: &AppHandle) {
             .read()
             .map(|c| c.settings.language.clone())
             .unwrap_or_else(|_| "zh-TW".to_string());
-        let count = state.applied.read().map(|a| a.len()).unwrap_or(0);
+        let count = state
+            .applied
+            .read()
+            .map(|applied| {
+                applied
+                    .values()
+                    .filter(|entry| entry.info.error.is_none())
+                    .count()
+            })
+            .unwrap_or(0);
         (lang, count)
     };
     if let Ok(menu) = build_menu(app, &lang, count) {
@@ -140,15 +150,35 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
     match id {
         ID_SHOW => show_main_window(app),
         ID_AUTOSTART => {
-            let enable = !autostart::is_enabled();
-            if autostart::set_autostart(enable).is_ok() {
-                set_autostart_checked(enable);
-                let state = app.state::<Arc<AppState>>();
-                if let Ok(mut cfg) = state.config.write() {
-                    cfg.settings.start_with_windows = enable;
-                    let _ = config::save(&cfg);
-                };
+            let state = app.state::<Arc<AppState>>();
+            let Ok(mut cfg) = state.config.write() else {
+                log::error!("無法取得設定寫入鎖，取消托盤自啟切換");
+                set_autostart_checked(autostart::is_enabled());
+                return;
+            };
+
+            let previous_enabled = autostart::is_enabled();
+            let enable = !previous_enabled;
+            if let Err(error) = autostart::set_autostart(enable) {
+                log::error!("托盤切換開機自啟失敗: {error}");
+                set_autostart_checked(autostart::is_enabled());
+                return;
             }
+
+            let mut candidate = cfg.clone();
+            candidate.settings.start_with_windows = enable;
+            if let Err(error) = config::save(&candidate) {
+                log::error!("儲存開機自啟設定失敗: {error}");
+                if let Err(rollback_error) = autostart::set_autostart(previous_enabled) {
+                    log::error!("回復開機自啟狀態失敗: {rollback_error}");
+                }
+                set_autostart_checked(autostart::is_enabled());
+                return;
+            }
+
+            *cfg = candidate;
+            state.config_revision.fetch_add(1, Ordering::Release);
+            set_autostart_checked(enable);
         }
         ID_QUIT => {
             let state = app.state::<Arc<AppState>>();

@@ -30,12 +30,24 @@ pub fn set_autostart(enable: bool) -> Result<(), String> {
             Err(codes::AUTOSTART_FAILED.to_string())
         }
     } else {
-        // 工作不存在時 /Delete 會失敗，視為成功（目標狀態已達成）
-        let _ = Command::new("schtasks")
+        // 工作原本就不存在時，目標狀態已達成；若確實存在，刪除失敗不可靜默忽略。
+        if !is_enabled() {
+            return Ok(());
+        }
+        let out = Command::new("schtasks")
             .args(["/Delete", "/TN", TASK_NAME, "/F"])
             .creation_flags(CREATE_NO_WINDOW)
-            .output();
-        Ok(())
+            .output()
+            .map_err(|e| format!("schtasks: {e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            log::error!(
+                "schtasks /Delete 失敗: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            Err(codes::AUTOSTART_FAILED.to_string())
+        }
     }
 }
 

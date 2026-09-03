@@ -84,7 +84,15 @@ pub fn list_at(root: &Path) -> Result<Vec<SessionSummary>, String> {
             out.push(summary);
         }
     }
-    out.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    out.sort_by(|a, b| {
+        let a_time = chrono::DateTime::parse_from_rfc3339(&a.started_at)
+            .ok()
+            .map(|value| value.timestamp_millis());
+        let b_time = chrono::DateTime::parse_from_rfc3339(&b.started_at)
+            .ok()
+            .map(|value| value.timestamp_millis());
+        b_time.cmp(&a_time).then_with(|| a.id.cmp(&b.id))
+    });
     Ok(out)
 }
 
@@ -187,6 +195,7 @@ mod tests {
                 total_bytes: 0,
                 config: BenchmarkConfig::default(),
                 error: None,
+                ..Default::default()
             },
             results: vec![LpResult {
                 lp: 3,
@@ -195,6 +204,7 @@ mod tests {
                 ..Default::default()
             }],
             samples: vec![],
+            ..Default::default()
         }
     }
 
@@ -252,6 +262,25 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, id1); // 較新在前
         assert_eq!(list[1].id, id2);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn list_sorts_rfc3339_by_instant_not_text() {
+        let root = temp_root("list_offsets");
+        let older_id = Uuid::new_v4().to_string();
+        let newer_id = Uuid::new_v4().to_string();
+        let mut older = sample_detail(&older_id);
+        // 字典序較大，但實際為前一天 23:00Z。
+        older.summary.started_at = "2026-08-11T01:00:00+02:00".into();
+        let mut newer = sample_detail(&newer_id);
+        newer.summary.started_at = "2026-08-11T00:30:00Z".into();
+        save_session_at(&root, &older).unwrap();
+        save_session_at(&root, &newer).unwrap();
+
+        let list = list_at(&root).unwrap();
+        assert_eq!(list[0].id, newer_id);
+        assert_eq!(list[1].id, older_id);
         let _ = std::fs::remove_dir_all(&root);
     }
 

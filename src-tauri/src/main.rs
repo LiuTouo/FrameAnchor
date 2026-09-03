@@ -4,6 +4,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod applied;
 mod autostart;
 mod benchmark;
 mod commands;
@@ -21,10 +22,12 @@ mod watcher;
 mod windows_enum;
 
 use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, RwLock};
 
 use tauri::Manager;
+use windows::core::PCWSTR;
+use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
 use model::Config;
 use topology::Topology;
@@ -33,6 +36,8 @@ use watcher::{AppliedEntry, CachedHandle};
 /// 全域共享狀態（PLAN §4）
 pub struct AppState {
     pub config: RwLock<Config>,
+    /// 每次設定成功持久化後遞增，供 watcher 避免提交過期計算結果。
+    pub config_revision: AtomicU64,
     pub topology: Topology,
     pub applied: RwLock<HashMap<u32, AppliedEntry>>,
     /// PID → 早期快取的 process handle（反作弊保護生效前開啟，終生重用）
@@ -80,7 +85,13 @@ fn main() {
         }
     };
 
-    let cfg = config::load();
+    let cfg = match config::load() {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            show_startup_error(&error);
+            std::process::exit(1);
+        }
+    };
     let (usage_tx, _) = tokio::sync::watch::channel(false);
 
     // 基準測試管理者：GPU 控制一律透過注入的 backend（啟動時嘗試 pending 還原）
@@ -90,6 +101,7 @@ fn main() {
 
     let state = Arc::new(AppState {
         config: RwLock::new(cfg),
+        config_revision: AtomicU64::new(0),
         topology,
         applied: RwLock::new(HashMap::new()),
         handles: RwLock::new(HashMap::new()),
@@ -154,6 +166,8 @@ fn main() {
             benchmark::ipc::get_benchmark_storage_info,
             benchmark::ipc::get_gpu_affinity_policy,
             benchmark::ipc::apply_best_gpu_affinity,
+            benchmark::ipc::validate_equivalent_candidate,
+            benchmark::ipc::apply_equivalent_gpu_affinity,
             benchmark::ipc::apply_gpu_affinity,
             benchmark::ipc::get_benchmark_apply_status,
             benchmark::ipc::list_importable_sessions,
@@ -183,4 +197,30 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("error while running FrameAnchor");
+}
+
+fn show_startup_error(error: &str) {
+    use std::os::windows::ffi::OsStrExt;
+
+    let message = format!(
+        "無法讀取 FrameAnchor 設定，程式將結束。\n請確認設定檔未被防毒軟體或同步程式鎖定。\n\nFrameAnchor cannot read its configuration and will exit.\nCheck whether antivirus or sync software has locked the file.\n\n{}\n\n{}",
+        config::config_path().display(),
+        error
+    );
+    let wide = |text: &str| {
+        std::ffi::OsStr::new(text)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>()
+    };
+    let title = wide("FrameAnchor — CONFIG_FAILED");
+    let message = wide(&message);
+    unsafe {
+        let _ = MessageBoxW(
+            None,
+            PCWSTR(message.as_ptr()),
+            PCWSTR(title.as_ptr()),
+            MB_OK | MB_ICONERROR,
+        );
+    }
 }

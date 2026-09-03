@@ -266,11 +266,7 @@ fn fetch_and_parse_checksum(asset: &GhAsset) -> Result<String, String> {
         .map_err(|e| format!("讀取校驗檔失敗: {e}"))?;
 
     // 取第一段空白分隔前的 hex 字串
-    let hex = body
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+    let hex = body.split_whitespace().next().unwrap_or("").to_lowercase();
 
     if hex.len() != 64 {
         return Err(format!(
@@ -817,11 +813,7 @@ mod tests {
     fn parse_checksum_accepts_standard_format() {
         // 標準格式 "<hex>  <filename>"
         let body = "d14f5bcf9f29f5a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6  FrameAnchor_0.2.0_x64-portable.zip\n";
-        let hex = body
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_lowercase();
+        let hex = body.split_whitespace().next().unwrap_or("").to_lowercase();
         assert_eq!(hex.len(), 64);
         assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
     }
@@ -829,11 +821,7 @@ mod tests {
     #[test]
     fn parse_checksum_accepts_hex_only() {
         let body = "d14f5bcf9f29f5a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6\n";
-        let hex = body
-            .split_whitespace()
-            .next()
-            .unwrap_or("")
-            .to_lowercase();
+        let hex = body.split_whitespace().next().unwrap_or("").to_lowercase();
         assert_eq!(hex.len(), 64);
     }
 
@@ -1253,8 +1241,7 @@ mod tests {
             w.start_file(".frameanchor-portable", opts).unwrap();
             w.write_all(b"").unwrap();
             for r in resources {
-                w.start_file(format!("{RESOURCE_PREFIX}{r}"), opts)
-                    .unwrap();
+                w.start_file(format!("{RESOURCE_PREFIX}{r}"), opts).unwrap();
                 w.write_all(format!("fake {r}").as_bytes()).unwrap();
             }
             if let Some(dup) = duplicate {
@@ -1363,8 +1350,7 @@ mod tests {
                 .iter()
                 .filter(|f| **f != "SHA256SUMS")
             {
-                w.start_file(format!("{RESOURCE_PREFIX}{f}"), opts)
-                    .unwrap();
+                w.start_file(format!("{RESOURCE_PREFIX}{f}"), opts).unwrap();
                 w.write_all(b"x").unwrap();
             }
             w.finish().unwrap();
@@ -1389,8 +1375,7 @@ mod tests {
             w.add_directory("resources/", opts).unwrap();
             w.add_directory("resources/benchmark/", opts).unwrap();
             for f in REQUIRED_RESOURCE_FILES {
-                w.start_file(format!("{RESOURCE_PREFIX}{f}"), opts)
-                    .unwrap();
+                w.start_file(format!("{RESOURCE_PREFIX}{f}"), opts).unwrap();
                 w.write_all(b"x").unwrap();
             }
             w.finish().unwrap();
