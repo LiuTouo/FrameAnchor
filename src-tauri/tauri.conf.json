@@ -16,8 +16,8 @@
         "title": "FrameAnchor",
         "width": 1200,
         "height": 720,
-        "minWidth": 900,
-        "minHeight": 600,
+        "minWidth": 1280,
+        "minHeight": 720,
         "visible": false,
         "resizable": true
       }

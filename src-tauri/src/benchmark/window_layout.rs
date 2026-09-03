@@ -18,9 +18,7 @@ use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowPlacement, SetWindowPlacement, WINDOWPLACEMENT,
-};
+use windows::Win32::UI::WindowsAndMessaging::{GetWindowPlacement, WINDOWPLACEMENT};
 
 use crate::error::codes;
 
@@ -40,8 +38,8 @@ pub const COMPACT_MARGIN_BASE_LOGICAL: u32 = 24;
 const COMPACT_MARGIN_REF_DIM_LOGICAL: u32 = 1080;
 /// 主視窗還原用的 min-size（logical px，與 tauri.conf.json `minWidth/minHeight` 一致；
 /// app 從不修改 min size，故還原到此常數即等於原值）。
-pub const MIN_SIZE_DEFAULT_W: f64 = 900.0;
-pub const MIN_SIZE_DEFAULT_H: f64 = 600.0;
+pub const MIN_SIZE_DEFAULT_W: f64 = 1280.0;
+pub const MIN_SIZE_DEFAULT_H: f64 = 720.0;
 
 /// DPI → 縮放因子（96 = 1.0）。
 pub fn scale_from_dpi(dpi: u32) -> f64 {
@@ -250,6 +248,9 @@ impl MainWindowController for RealMainWindowController {
 
     fn apply_compact(&self, rect: Rect) -> Result<(), String> {
         let win = self.main_window()?;
+        if let Ok(hd) = win.hwnd() {
+            log::info!("apply_compact: hwnd=0x{:x}", hd.0 as usize);
+        }
         let _ = win.unmaximize();
         // 解除預設 min-size（900×600 logical）限制，否則無法縮到 compact
         let _ = win.set_min_size(Some(LogicalSize::new(1.0, 1.0)));
@@ -257,24 +258,90 @@ impl MainWindowController for RealMainWindowController {
             .map_err(|e| format!("set_size: {e}"))?;
         win.set_position(PhysicalPosition::new(rect.left, rect.top))
             .map_err(|e| format!("set_position: {e}"))?;
+        log::debug!(
+            "主視窗切 compact: {}x{} at ({},{})",
+            rect.width(),
+            rect.height(),
+            rect.left,
+            rect.top
+        );
         Ok(())
     }
 
     fn restore(&self, snap: &MainWindowSnapshot) -> Result<(), String> {
         let win = self.main_window()?;
-        let _ = win.set_min_size(Some(LogicalSize::new(
-            MIN_SIZE_DEFAULT_W,
-            MIN_SIZE_DEFAULT_H,
-        )));
-        let hwnd = win.hwnd().map_err(|e| format!("hwnd: {e}"))?;
         let mut placement = snap.placement;
         // 一次性旗標：本次 restore 若要求置中則重算 left/top，其餘（含 showCmd）保留。
         if self.center_restore.swap(false, Ordering::SeqCst) {
             center_placement_in(&mut placement, snap.rc_work);
         }
-        unsafe {
-            SetWindowPlacement(hwnd, &placement).map_err(|e| format!("SetWindowPlacement: {e}"))?;
+        let p = placement.rcNormalPosition;
+        let w = (p.right - p.left) as u32;
+        let h = (p.bottom - p.top) as u32;
+        let x = p.left;
+        let y = p.top;
+        let show_max = placement.showCmd == 3u32; // SW_SHOWMAXIMIZED
+        if let Ok(hd) = win.hwnd() {
+            log::info!("restore: hwnd=0x{:x} target {w}x{h} at ({x},{y})", hd.0 as usize);
         }
+        // 主執行緒套用還原；之後 1.5/3/5 秒各重套一次並實測。實測發現 tao 內部
+        // 快取會在 restore 約 2 秒後以舊 compact 幾何蓋回（非本 repo 任何路徑），
+        // 重套可壓回目標幾何；冪等操作，重複無副作用。
+        let app = self.app.clone();
+        for delay_ms in [0u64, 1500, 3000, 5000] {
+            let app = app.clone();
+            std::thread::Builder::new()
+                .name("layout-restore".into())
+                .spawn(move || {
+                    if delay_ms > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    }
+                    let app_inner = app.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        if let Some(win) = app_inner.get_webview_window("main") {
+                            if delay_ms == 0 {
+                                let _ = win.unmaximize();
+                            }
+                            let _ = win.set_min_size(Some(LogicalSize::new(
+                                MIN_SIZE_DEFAULT_W,
+                                MIN_SIZE_DEFAULT_H,
+                            )));
+                            if let Err(e) = win.set_size(PhysicalSize::new(w, h)) {
+                                log::error!("restore set_size 失敗: {e}");
+                            }
+                            if let Err(e) = win.set_position(PhysicalPosition::new(x, y)) {
+                                log::error!("restore set_position 失敗: {e}");
+                            }
+                            if show_max && delay_ms == 0 {
+                                let _ = win.maximize();
+                            }
+                            if let Ok(hd) = win.hwnd() {
+                                let mut rect = Default::default();
+                                if unsafe {
+                                    windows::Win32::UI::WindowsAndMessaging::GetWindowRect(
+                                        hd, &mut rect,
+                                    )
+                                }
+                                .is_ok()
+                                {
+                                    log::info!(
+                                        "restore[{delay_ms}ms] 實測: hwnd=0x{:x} rect {}x{} at ({},{})",
+                                        hd.0 as usize,
+                                        rect.right - rect.left,
+                                        rect.bottom - rect.top,
+                                        rect.left,
+                                        rect.top
+                                    );
+                                }
+                            }
+                        } else {
+                            log::error!("restore: main window not found（主執行緒）");
+                        }
+                    });
+                })
+                .map_err(|e| format!("restore retry spawn: {e}"))?;
+        }
+        log::info!("主視窗已還原: {w}x{h} at ({x},{y}) showCmd={}", placement.showCmd);
         Ok(())
     }
 
