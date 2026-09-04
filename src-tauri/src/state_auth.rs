@@ -55,9 +55,17 @@ fn read_key(path: &Path) -> Result<[u8; KEY_LEN], String> {
     Ok(key)
 }
 
-/// 載入（必要時生成）HMAC key。生成與讀取都限定在 admin-only 目錄；
-/// 生成以「暫存 + rename」寫入，與平行建立者競態時以先落地者為準。
+/// 每 process 只載入/生成一次：平行測試或多執行緒下，若各自生成再用
+/// rename 落地，Windows 的 rename 會覆蓋既有 key，造成已寫入 MAC 用舊 key、
+/// 之後驗證失敗。process 內快取後，初次生成只在單一執行緒發生一次。
+static KEY_CACHE: std::sync::OnceLock<Result<[u8; KEY_LEN], String>> = std::sync::OnceLock::new();
+
+/// 載入（必要時生成）HMAC key。生成與讀取都限定在 admin-only 目錄。
 fn load_or_create_key() -> Result<[u8; KEY_LEN], String> {
+    KEY_CACHE.get_or_init(init_key).clone()
+}
+
+fn init_key() -> Result<[u8; KEY_LEN], String> {
     let dir = key_dir();
     if let Err(e) = crate::syspath::create_admin_only_dir(&dir) {
         // 平行建立者可能剛把目錄建出來（fail-closed 的 ALREADY_EXISTS）— 可續用
@@ -75,20 +83,19 @@ fn load_or_create_key() -> Result<[u8; KEY_LEN], String> {
     key[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
     key[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
 
-    // 暫存檔 + 原子 rename；rename 撞名（對手已落地）→ 以既有 key 為準
-    let tmp = dir.join(format!("{}.tmp", uuid::Uuid::new_v4()));
+    // exclusive create：撞名（他者已落地）→ 以既有 key 為準（不覆蓋）
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
     {
-        use std::io::Write;
-        let mut f = std::fs::File::create(&tmp).map_err(|e| format!("寫入狀態認證 key 失敗: {e}"))?;
-        f.write_all(&key)
-            .map_err(|e| format!("寫入狀態認證 key 失敗: {e}"))?;
-    }
-    match std::fs::rename(&tmp, &path) {
-        Ok(()) => Ok(key),
-        Err(_) => {
-            let _ = std::fs::remove_file(&tmp);
-            read_key(&path)
+        Ok(mut f) => {
+            use std::io::Write;
+            f.write_all(&key)
+                .map_err(|e| format!("寫入狀態認證 key 失敗: {e}"))?;
+            Ok(key)
         }
+        Err(_) => read_key(&path),
     }
 }
 
