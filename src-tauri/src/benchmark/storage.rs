@@ -54,7 +54,8 @@ pub fn save_session_at(root: &Path, detail: &SessionDetail) -> Result<(), String
     let path = dir.join("session.json");
     let text = serde_json::to_string_pretty(detail)
         .map_err(|e| format!("{}: {e}", codes::BENCHMARK_STORAGE_FAILED))?;
-    config::atomic_write(&path, &text)
+    // session 結果會驅動 apply_best（提升權限 GPU mutation）— 以 HMAC 認證寫入
+    crate::state_auth::auth_write(&path, &text)
 }
 
 /// 歷史摘要列表（依 startedAt 降冪）
@@ -106,6 +107,21 @@ pub fn get_at(root: &Path, id: &str) -> Result<SessionDetail, String> {
     let path = dir.join("session.json");
     let text = std::fs::read_to_string(&path)
         .map_err(|_| codes::BENCHMARK_SESSION_NOT_FOUND.to_string())?;
+    let mut detail: SessionDetail = serde_json::from_str(&text)
+        .map_err(|e| format!("{}: {e}", codes::BENCHMARK_STORAGE_FAILED))?;
+    detail.summary.total_bytes = dir_size(&dir);
+    Ok(detail)
+}
+
+/// 供特權消費端（apply_best）讀取：內容必須通過 HMAC 認證。
+/// 未認證的舊 session 或遭竄改檔案一律拒絕（fail closed）。
+pub fn get_at_verified(root: &Path, id: &str) -> Result<SessionDetail, String> {
+    let dir = session_dir_at(root, id)?;
+    let path = dir.join("session.json");
+    if !path.exists() {
+        return Err(codes::BENCHMARK_SESSION_NOT_FOUND.to_string());
+    }
+    let text = crate::state_auth::auth_read(&path)?;
     let mut detail: SessionDetail = serde_json::from_str(&text)
         .map_err(|e| format!("{}: {e}", codes::BENCHMARK_STORAGE_FAILED))?;
     detail.summary.total_bytes = dir_size(&dir);

@@ -155,8 +155,9 @@ pub fn set_usage_streaming(state: State<Arc<AppState>>, active: bool) {
 pub fn open_data_folder() -> Result<(), String> {
     let dir = config::config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    // explorer 即使成功開窗也常回非零結束碼，用 spawn 不等候
-    std::process::Command::new("explorer")
+    // explorer 即使成功開窗也常回非零結束碼，用 spawn 不等候；
+    // 以 %SystemRoot% 絕對路徑啟動，避免依賴 PATH 搜尋
+    std::process::Command::new(crate::syspath::explorer_exe()?)
         .arg(dir)
         .spawn()
         .map_err(|e| e.to_string())?;

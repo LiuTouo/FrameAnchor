@@ -81,11 +81,11 @@ pub fn clear_at(path: &Path) -> Result<(), String> {
 }
 
 pub fn load_from(path: &Path) -> Result<Option<RecoveryJournal>, String> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("讀取還原日誌失敗: {e}")),
-    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    // 日誌位於可寫 APPDATA,卻驅動提升權限還原動作 — 內容必須通過 HMAC 認證
+    let text = crate::state_auth::auth_read(path)?;
     serde_json::from_str(&text)
         .map(Some)
         .map_err(|e| format!("還原日誌解析失敗: {e}"))
@@ -107,7 +107,7 @@ pub fn mark_restore_needed_at(path: &Path, snapshot: &AffinityPolicy) -> Result<
 
 fn save_at(path: &Path, journal: &RecoveryJournal) -> Result<(), String> {
     let text = serde_json::to_string_pretty(journal).map_err(|e| format!("序列化: {e}"))?;
-    config::atomic_write(path, &text)
+    crate::state_auth::auth_write(path, &text)
 }
 
 /// 測試用 fault injection（僅 `#[cfg(test)]`；production 編譯不含）。

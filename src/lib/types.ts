@@ -200,8 +200,6 @@ export interface BenchmarkConfig {
   fpsCapPolicy?: FpsCapPolicy; // 校準策略：Adaptive（預設，忽略 fpsCap，依校準選定）| Fixed（沿用 fpsCap）
   tripleBuffer: boolean;
   vulkanArgs: string[]; // workload=Vulkan 時必須非空
-  workloadExePath: string | null; // 覆寫（測試/除錯）
-  presentmonPath: string | null; // 覆寫（測試/除錯）
   gamePath: string | null; // 相容舊欄位
   windowTitle: string | null;
 }

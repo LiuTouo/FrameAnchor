@@ -346,10 +346,10 @@ fn wait_capture(
     }
 }
 
-/// 是否對內建 Vulkan workload 安裝關閉防護：僅限內建 lava-triangle
-/// （`workload_exe_path` 為 None 才用內建資源）。D3D9 與自訂 exe 不保護。
+/// 是否對 Vulkan workload 安裝關閉防護：僅內建 lava-triangle
+/// （Vulkan workload 一律為內建資源）。D3D9 自行編譯,不保護。
 fn should_guard_close(config: &BenchmarkConfig) -> bool {
-    config.workload == WorkloadKind::Vulkan && config.workload_exe_path.is_none()
+    config.workload == WorkloadKind::Vulkan
 }
 
 /// 以 [`CANCEL_POLL_MS`] 輪詢 `op` 直到它回 `Ok(true)`；`Ok(false)` 表示視窗尚未
@@ -588,7 +588,7 @@ fn capture_step(
     round: u32,
     lp: u32,
     session_dir: &Path,
-    round_csvs: &mut HashMap<u32, HashMap<u32, PathBuf>>,
+    round_csvs: &mut RoundCsvs,
     done: u32,
     total_tests: u32,
     detail: &SessionDetail,
@@ -659,7 +659,7 @@ fn capture_step(
     let csv = session_dir.join(format!("round-{round}-lp-{lp}.csv"));
     let mut capture_attempt: u32 = 0;
     let mut capture_buffer = buffer;
-    let mut capture_result: Result<(), String>;
+    let mut capture_result: Result<CapturedCsv, String>;
     loop {
         // attempt >= 2：完整 GPU restart，讓 retry 建立在新的 display device
         // generation 上（單純重啟 workload 無法修復 driver restart 後卡住的
@@ -796,29 +796,32 @@ fn capture_step(
     if ctx.cancel.is_cancelled() {
         return StepOutcome::Break(TerminalReason::Cancelled);
     }
-    if let Err(e) = capture_result {
-        if e == codes::BENCHMARK_WINDOW_INTEGRITY {
-            report_retries(ctx, Some(e.clone()));
-        }
-        if e == codes::BENCHMARK_CAPTURE_MISSING || e == codes::BENCHMARK_CAPTURE_EMPTY {
-            if round_csvs.is_empty() {
-                // 尚無任何成功 capture：第一個候選 LP 就 MISSING/EMPTY，代表
-                // PresentMon/ETW 環境根本無法建立 CSV。繼續跑剩餘 LP/round 只會
-                // 反覆失敗，立即終止並交由 terminal 統一 cleanup/restore。
-                log::error!(
-                    "capture round-{round}-lp-{lp} 經 {capture_attempt} 次嘗試仍失敗 \
-                     （{e}），且尚無任何成功 capture；中止 session"
-                );
-                return StepOutcome::Break(TerminalReason::Error(e));
+    let captured = match capture_result {
+        Ok(c) => c,
+        Err(e) => {
+            if e == codes::BENCHMARK_WINDOW_INTEGRITY {
+                report_retries(ctx, Some(e.clone()));
             }
-            log::error!(
-                "capture round-{round}-lp-{lp} 經 {capture_attempt} 次嘗試仍失敗；隔離此 LP 並繼續"
-            );
-            return StepOutcome::Isolated(e);
+            if e == codes::BENCHMARK_CAPTURE_MISSING || e == codes::BENCHMARK_CAPTURE_EMPTY {
+                if round_csvs.is_empty() {
+                    // 尚無任何成功 capture：第一個候選 LP 就 MISSING/EMPTY，代表
+                    // PresentMon/ETW 環境根本無法建立 CSV。繼續跑剩餘 LP/round 只會
+                    // 反覆失敗，立即終止並交由 terminal 統一 cleanup/restore。
+                    log::error!(
+                        "capture round-{round}-lp-{lp} 經 {capture_attempt} 次嘗試仍失敗 \
+                         （{e}），且尚無任何成功 capture；中止 session"
+                    );
+                    return StepOutcome::Break(TerminalReason::Error(e));
+                }
+                log::error!(
+                    "capture round-{round}-lp-{lp} 經 {capture_attempt} 次嘗試仍失敗；隔離此 LP 並繼續"
+                );
+                return StepOutcome::Isolated(e);
+            }
+            return StepOutcome::Break(TerminalReason::Error(e));
         }
-        return StepOutcome::Break(TerminalReason::Error(e));
-    }
-    round_csvs.entry(lp).or_default().insert(round, csv);
+    };
+    round_csvs.entry(lp).or_default().insert(round, captured);
     emit(
         ctx,
         detail,
@@ -971,8 +974,8 @@ fn calibration_capture(
     match result {
         Err(e) if e == codes::BENCHMARK_CAPTURE_OVERFLOW => Ok(CalibrationCapture::Overflow),
         Err(e) => Err(e),
-        Ok(()) => {
-            let frames = read_csv_frames(&csv)?;
+        Ok(captured) => {
+            let frames = captured.read()?;
             let res = compute_lp_result(tier, &frames)?;
             match res.avg_fps {
                 Some(fps) if fps.is_finite() && fps > 0.0 => Ok(CalibrationCapture::Clean(fps)),
@@ -984,13 +987,13 @@ fn calibration_capture(
 
 /// 某 round 所有 LP 的 frametime 中位數（漂移偵測用）。
 fn round_median_frametime(
-    round_csvs: &HashMap<u32, HashMap<u32, PathBuf>>,
+    round_csvs: &RoundCsvs,
     round: u32,
 ) -> Option<f64> {
     let mut all: Vec<f64> = Vec::new();
     for rounds in round_csvs.values() {
         if let Some(csv) = rounds.get(&round) {
-            if let Ok(frames) = read_csv_frames(csv) {
+            if let Ok(frames) = csv.read() {
                 all.extend(frames);
             }
         }
@@ -1105,7 +1108,7 @@ pub fn run_benchmark(ctx: &mut RunContext) -> RunResult {
 
     let session_dir = ctx.storage_root.join(&ctx.session_id);
     // LP → round → CSV 路徑（每個 (lp, round) 最多擷取一次）
-    let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+    let mut round_csvs: RoundCsvs = HashMap::new();
 
     // 校準（Adaptive）鎖定 cap + buffer；Fixed 沿用 fps_cap。
     let (fps_cap, buffer) = match calibrate(ctx, &session_dir, &detail) {
@@ -1552,7 +1555,7 @@ fn capture_round_with_drift(
     round: u32,
     lps: &[u32],
     session_dir: &Path,
-    round_csvs: &mut HashMap<u32, HashMap<u32, PathBuf>>,
+    round_csvs: &mut RoundCsvs,
     done: &mut u32,
     total_tests: u32,
     detail: &SessionDetail,
@@ -1788,19 +1791,11 @@ fn workload_command(
 ) -> (PathBuf, Vec<String>) {
     match config.workload {
         WorkloadKind::Vulkan => (
-            config
-                .workload_exe_path
-                .as_ref()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| assets.vulkan_workload.clone()),
+            assets.vulkan_workload.clone(),
             with_fps_cap(&config.vulkan_args, fps_cap),
         ),
         WorkloadKind::D3D9 => (
-            config
-                .workload_exe_path
-                .as_ref()
-                .map(PathBuf::from)
-                .unwrap_or_else(|| assets.d3d9_workload.clone()),
+            assets.d3d9_workload.clone(),
             // D3D9 workload 的 CLI 為 `<0|1>` 布林格式（false 字串會被解析成 true）
             vec![
                 format!("--fullscreen={}", if config.fullscreen { 1 } else { 0 }),
@@ -1884,15 +1879,19 @@ fn run_capture(
     buffer: u32,
     sample_secs: u32,
     expected: Rect,
-) -> Result<(), String> {
+) -> Result<CapturedCsv, String> {
     let started_at = chrono::Local::now().to_rfc3339();
     let pm_session_name = format!("FrameAnchor-{}-{round}-{lp}-{attempt}", ctx.session_id);
     // PresentMon 啟動前確認 workload 是否還活著（第二次 capture 無 CSV 的關鍵判據）
     let wl_alive_before_pm = ctx.processes.is_alive(wl_pid);
-    // 1) stale 輸出清除
+    // 1) stale 輸出清除：刪除失敗 = 可能留下既有 shaped CSV 被當本次 capture → fail closed
     if let Err(e) = std::fs::remove_file(csv) {
         if e.kind() != std::io::ErrorKind::NotFound {
-            log::warn!("capture 前清除舊 CSV 失敗 {}: {e}", csv.display());
+            log::error!(
+                "capture 前清除舊 CSV 失敗 {}（{e}）——可能遭鎖定，拒絕 capture",
+                csv.display()
+            );
+            return Err(codes::BENCHMARK_CAPTURE_MISSING.to_string());
         }
     }
     // 2) 啟動 PresentMon（以 -process_id 配合已 spawn 的 workload PID）
@@ -2022,7 +2021,20 @@ fn run_capture(
                 );
                 (Err(c.clone()), integ.reason.clone())
             }
-            None => (Ok(()), None),
+            None => match pm_exit_code {
+                // PresentMon 非零結束 = capture 生產者未成功；即使 CSV 存在也不採信
+                Some(code) if code != 0 => {
+                    log::error!(
+                        "capture round-{round}-lp-{lp} PresentMon 異常結束（exit={code}），
+                         CSV 內容不予採信"
+                    );
+                    (
+                        Err(codes::BENCHMARK_PRESENTMON_FAILED.to_string()),
+                        Some(format!("presentmon_exit_{code}")),
+                    )
+                }
+                _ => (Ok(()), None),
+            },
         },
     };
     // 6) 記錄診斷（成功與失敗都寫）
@@ -2087,7 +2099,11 @@ fn run_capture(
     ctx.capture_quality.overflowed_present_events += overflowed;
     ctx.capture_quality.etw_events_lost += etw_lost_count;
     persist_capture_diagnostics(csv, round, lp, &diag);
-    result
+    // 成功的 capture 立即讀取/解析並記錄 digest — 之後任何讀取都綁定此刻內容
+    match result {
+        Ok(()) => CapturedCsv::capture(csv),
+        Err(e) => Err(e),
+    }
 }
 
 /// 目標 CSV 的存在與大小（診斷用）
@@ -2338,7 +2354,7 @@ fn eta_secs(config: &BenchmarkConfig, total_tests: u32, done: u32) -> Option<u64
 /// 合併各 round CSV 並計算每 LP 指標。
 /// 任一 LP 的 CSV 缺失/空/無效 → 回傳 (已算出的部分結果, Some(錯誤碼))。
 fn compute_session_results(
-    round_csvs: &HashMap<u32, HashMap<u32, PathBuf>>,
+    round_csvs: &RoundCsvs,
 ) -> (Vec<LpResult>, Option<String>) {
     let mut lps: Vec<u32> = round_csvs.keys().copied().collect();
     lps.sort_unstable();
@@ -2352,13 +2368,13 @@ fn compute_session_results(
     (out, None)
 }
 
-fn compute_lp_all_rounds(lp: u32, rounds: &HashMap<u32, PathBuf>) -> Result<LpResult, String> {
+fn compute_lp_all_rounds(lp: u32, rounds: &HashMap<u32, CapturedCsv>) -> Result<LpResult, String> {
     let mut per_round: Vec<Vec<f64>> = Vec::new();
     let mut round_nums: Vec<u32> = rounds.keys().copied().collect();
     round_nums.sort_unstable();
     for round in round_nums {
         let csv = &rounds[&round];
-        let frames = read_csv_frames(csv)?;
+        let frames = csv.read()?;
         per_round.push(frames);
     }
     let merged = merge_rounds(&per_round);
@@ -2372,7 +2388,7 @@ fn compute_lp_all_rounds(lp: u32, rounds: &HashMap<u32, PathBuf>) -> Result<LpRe
 /// 只納入該範圍內實際存在的 round；無資料的 LP 略過。供 SessionDetail 的
 /// screening/refinement/confirmation 分相結果（證據獨立保存）。
 fn compute_phase_results(
-    round_csvs: &HashMap<u32, HashMap<u32, PathBuf>>,
+    round_csvs: &RoundCsvs,
     start_round: u32,
     end_round: u32,
 ) -> Vec<LpResult> {
@@ -2389,7 +2405,7 @@ fn compute_phase_results(
         round_nums.sort_unstable();
         let mut per_round: Vec<Vec<f64>> = Vec::new();
         for round in round_nums {
-            if let Ok(frames) = read_csv_frames(&rounds[&round]) {
+            if let Ok(frames) = rounds[&round].read() {
                 per_round.push(frames);
             }
         }
@@ -2404,24 +2420,65 @@ fn compute_phase_results(
     out
 }
 
-/// 讀取單一 CSV 並解析 frametime（不可得 → Err；供合併與逐 round 共用）
-fn read_csv_frames(csv: &Path) -> Result<Vec<f64>, String> {
-    let text = match std::fs::read_to_string(csv) {
-        Ok(t) => t,
-        Err(e) => {
-            log::warn!("CSV 讀取失敗 {}: {e}", csv.display());
-            return Err(codes::BENCHMARK_CSV_INVALID.to_string());
-        }
-    };
-    parse_presentmon_csv(&text).map_err(|e| {
-        log::warn!("CSV 解析失敗 {}: {e}", csv.display());
-        codes::BENCHMARK_CSV_INVALID.to_string()
-    })
+/// 已驗證的 capture 產物：路徑 + capture 完成當下的內容 digest。
+/// capture CSV 位於 same-user 可寫的 APPDATA，驗證後仍可能被置換；
+/// 下游每次讀取都重新驗 digest，不一致即 fail closed。
+#[derive(Clone, Debug)]
+struct CapturedCsv {
+    path: PathBuf,
+    sha256: String,
 }
 
+impl CapturedCsv {
+    /// capture 完成當下讀取 + 解析 + 記錄 digest（不可讀/不可解析即 Err）
+    fn capture(path: &Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path).map_err(|e| {
+            log::warn!("capture CSV 讀取失敗 {}: {e}", path.display());
+            codes::BENCHMARK_CSV_INVALID.to_string()
+        })?;
+        parse_presentmon_csv(&text).map_err(|e| {
+            log::warn!("capture CSV 解析失敗 {}: {e}", path.display());
+            codes::BENCHMARK_CSV_INVALID.to_string()
+        })?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            sha256: sha256_hex(text.as_bytes()),
+        })
+    }
+
+    /// 下游讀取：重新讀檔並驗證 digest 與 capture 當下一致
+    fn read(&self) -> Result<Vec<f64>, String> {
+        let text = std::fs::read_to_string(&self.path).map_err(|e| {
+            log::warn!("CSV 讀取失敗 {}: {e}", self.path.display());
+            codes::BENCHMARK_CSV_INVALID.to_string()
+        })?;
+        if sha256_hex(text.as_bytes()) != self.sha256 {
+            log::error!(
+                "capture CSV 內容與 capture 完成時不符（可能遭置換）: {}",
+                self.path.display()
+            );
+            return Err(codes::BENCHMARK_CSV_INVALID.to_string());
+        }
+        parse_presentmon_csv(&text).map_err(|e| {
+            log::warn!("CSV 解析失敗 {}: {e}", self.path.display());
+            codes::BENCHMARK_CSV_INVALID.to_string()
+        })
+    }
+}
+
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(data);
+    format!("{:x}", h.finalize())
+}
+
+/// LP → round → 已驗證 capture 產物
+type RoundCsvs = HashMap<u32, HashMap<u32, CapturedCsv>>;
+
 /// 單一 (round, lp) 的 LpResult（供逐 round 勝者計算；CSV 不可讀 → None）
-fn compute_lp_single_round(lp: u32, csv: &Path) -> Option<LpResult> {
-    read_csv_frames(csv)
+fn compute_lp_single_round(lp: u32, csv: &CapturedCsv) -> Option<LpResult> {
+    csv.read()
         .ok()
         .and_then(|frames| compute_lp_result(lp, &frames).ok())
 }
@@ -2464,7 +2521,7 @@ fn median_of_metric(
 
 /// 逐 LP、逐 round 的 competitive-eligible 單 round 結果（僅納入 rounds 0..round_count）。
 fn build_per_round(
-    round_csvs: &HashMap<u32, HashMap<u32, PathBuf>>,
+    round_csvs: &RoundCsvs,
     round_count: u32,
 ) -> HashMap<u32, HashMap<u32, LpResult>> {
     let mut per_round: HashMap<u32, HashMap<u32, LpResult>> = HashMap::new();
@@ -2485,7 +2542,7 @@ fn build_per_round(
 /// 由 rounds 0..round_count 的完整（competitive-eligible）分數選出前 k 名候選。
 /// 僅納入該 round 數皆完整的 LP；少於 k 個完整候選 → 回傳空（呼叫端跳過後續階段）。
 fn select_top_candidates(
-    round_csvs: &HashMap<u32, HashMap<u32, PathBuf>>,
+    round_csvs: &RoundCsvs,
     round_count: u32,
     k: usize,
 ) -> Vec<u32> {
@@ -2526,7 +2583,7 @@ fn select_top_candidates(
 /// 確認階段逐 round 的 (candidate, runner) 單 round 結果（round 編號由 `base_round`
 /// 起算，前向與反向驗證各自獨立 namespace）。任一 round 缺 CSV/不可算 → None。
 fn confirmation_pairs(
-    round_csvs: &HashMap<u32, HashMap<u32, PathBuf>>,
+    round_csvs: &RoundCsvs,
     candidate: u32,
     runner: u32,
     confirmation_rounds: u32,
@@ -2678,7 +2735,7 @@ type PairEvidence = (Vec<f64>, Option<f64>, Option<f64>, Option<f64>);
 
 /// 任一 round 缺完整 competitive-eligible 分數 → None。
 fn pair_evidence(
-    round_csvs: &HashMap<u32, HashMap<u32, PathBuf>>,
+    round_csvs: &RoundCsvs,
     a: u32,
     b: u32,
     confirmation_rounds: u32,
@@ -2827,7 +2884,7 @@ fn reverse_max_rounds(forward_rounds: u32) -> u32 {
 /// - Equivalent：至少 5 輪且雙方皆未 decisive win，且 raw median 差異落在等效門檻內。
 /// - 其餘 → Continue（續跑至上限後 Inconclusive）。
 fn evaluate_forward(
-    round_csvs: &HashMap<u32, HashMap<u32, PathBuf>>,
+    round_csvs: &RoundCsvs,
     candidate: u32,
     runner: u32,
     confirmation_rounds: u32,
@@ -2882,7 +2939,7 @@ fn evaluate_forward(
 /// `forward_verdict`/reverse 參數記錄前向與反向 phase 的判定與證據（不重用資料）。
 #[allow(clippy::too_many_arguments)]
 fn compute_reliability(
-    round_csvs: &HashMap<u32, HashMap<u32, PathBuf>>,
+    round_csvs: &RoundCsvs,
     results: &[LpResult],
     finalists: &[u32],
     confirmation_rounds: u32,
@@ -3380,7 +3437,7 @@ pub fn run_equivalent_validation(
     // 3 組 AB/BA（獨立 round namespace 400..402）。
     let session_dir = ctx.storage_root.join(&ctx.session_id);
     let lps = [selected_lp, reference_lp];
-    let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+    let mut round_csvs: RoundCsvs = HashMap::new();
     let total_tests = (lps.len() as u32) * EQUIVALENT_VALIDATION_ROUNDS;
     let mut done = 0u32;
     let mut reference_med: Option<f64> = None;
@@ -3957,9 +4014,6 @@ pub mod fake {
         pub fn guard_calls_log(&self) -> Vec<u32> {
             self.guard_calls.lock().unwrap().clone()
         }
-        pub fn position_calls_log(&self) -> Vec<(u32, i32, i32)> {
-            self.position_calls.lock().unwrap().clone()
-        }
         pub fn set_integrity_ok(&self, ok: bool) {
             self.integrity_ok.store(ok, Ordering::SeqCst);
         }
@@ -4097,22 +4151,25 @@ mod tests {
         }
     }
 
-    /// 建立可通過 assets::verify 的暫存資源
+    /// 建立可通過 assets::verify 的暫存資源:從 vendored 資源目錄連結真實檔案。
+    /// verify 以內嵌 digest 比對,偽造內容無法通過;測試不會寫入這些檔,
+    /// hard link 安全（跨磁碟時退回 copy）。
     fn make_assets(dir: &std::path::Path) -> BenchmarkAssets {
         std::fs::create_dir_all(dir).unwrap();
-        let pm = dir.join(assets::PRESENTMON_FILE);
-        std::fs::write(&pm, b"fake-presentmon").unwrap();
-        let vk = dir.join(assets::VULKAN_WORKLOAD_FILE);
-        std::fs::write(&vk, b"fake-lava").unwrap();
-        std::fs::write(dir.join(assets::D3D9_WORKLOAD_FILE), b"fake-d3d9").unwrap();
-        let manifest = format!(
-            "{}  {}\n{}  {}\n",
-            assets::file_sha256(&pm).unwrap(),
+        let vendored =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources/benchmark");
+        for file in [
             assets::PRESENTMON_FILE,
-            assets::file_sha256(&vk).unwrap(),
             assets::VULKAN_WORKLOAD_FILE,
-        );
-        std::fs::write(dir.join(assets::MANIFEST_FILE), manifest).unwrap();
+            assets::D3D9_WORKLOAD_FILE,
+        ] {
+            let dst = dir.join(file);
+            if !dst.exists() {
+                std::fs::hard_link(vendored.join(file), &dst)
+                    .or_else(|_| std::fs::copy(vendored.join(file), &dst).map(|_| ()))
+                    .unwrap();
+            }
+        }
         assets::load(dir)
     }
 
@@ -4471,15 +4528,15 @@ mod tests {
 
     /// 寫出一個 (round, lp) 的 CSV，樣本 frametime 在 `frame_ms` 與 `frame_ms + 0.5`
     /// 交替（越低 FPS 越高）。交替兩值使 MAD > 0，供 log-ratio 確認分數使用。
-    fn write_round_csv(dir: &Path, round: u32, lp: u32, frame_ms: f64) -> PathBuf {
+    fn write_round_csv(dir: &Path, round: u32, lp: u32, frame_ms: f64) -> CapturedCsv {
         let path = dir.join(format!("round-{round}-lp-{lp}.csv"));
         let mut s = String::from("Application,ProcessID,msBetweenPresents\n");
         for i in 0..50 {
             let ft = if i % 2 == 0 { frame_ms } else { frame_ms + 0.5 };
             s.push_str(&format!("\"w (1)\",1,{ft:.3}\n"));
         }
-        std::fs::write(&path, s).unwrap();
-        path
+        std::fs::write(&path, &s).unwrap();
+        captured_csv(&path)
     }
 
     /// 完整（completed）且四項指標齊備的 LpResult fixture
@@ -4504,8 +4561,8 @@ mod tests {
         k: u32,
         c_frame: f64,
         r_frame: f64,
-    ) -> HashMap<u32, HashMap<u32, PathBuf>> {
-        let mut m: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+    ) -> RoundCsvs {
+        let mut m: RoundCsvs = HashMap::new();
         for round in CONFIRMATION_ROUND_BASE..(CONFIRMATION_ROUND_BASE + k) {
             m.entry(candidate)
                 .or_default()
@@ -4524,8 +4581,8 @@ mod tests {
         candidate: u32,
         runner: u32,
         frames: &[(f64, f64)],
-    ) -> HashMap<u32, HashMap<u32, PathBuf>> {
-        let mut m: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+    ) -> RoundCsvs {
+        let mut m: RoundCsvs = HashMap::new();
         for (i, &(cf, rf)) in frames.iter().enumerate() {
             let round = CONFIRMATION_ROUND_BASE + i as u32;
             m.entry(candidate)
@@ -4536,6 +4593,81 @@ mod tests {
                 .insert(round, write_round_csv(dir, round, runner, rf));
         }
         m
+    }
+
+    /// 由既有 CSV 檔建 CapturedCsv（測試用；等同 capture 完成當下的綁定）
+    fn captured_csv(path: &Path) -> CapturedCsv {
+        CapturedCsv::capture(path).expect("測試 CSV 應可讀取解析")
+    }
+
+    /// capture 前的 stale CSV 無法刪除（被鎖定）→ fail closed，不進行 capture
+    #[test]
+    fn run_capture_fails_closed_when_stale_csv_cannot_be_removed() {
+        let root = temp_root("stale_lock");
+        let csv = root.join("out.csv");
+        std::fs::write(&csv, "Application,ProcessID,msBetweenPresents\n\"w\",1,10.0\n").unwrap();
+
+        let backend = Arc::new(FakeBackend::new(vec![device(GPU_A)]));
+        let processes = Arc::new(FakeProcessRunner::new());
+        processes
+            .presentmon_csv
+            .lock()
+            .unwrap()
+            .push_str(&csv_for_lp(0));
+        let mut ctx = build_ctx(
+            &root,
+            backend as Arc<dyn GpuBackend>,
+            processes as Arc<dyn ProcessRunner>,
+            Arc::new(FakeCancel::new()) as Arc<dyn CancelSignal>,
+            Arc::new(NoopSleeper) as Arc<dyn Sleep>,
+            base_config(),
+            &root.join("journal.json"),
+            None,
+        );
+
+        // Windows 上以無 FILE_SHARE_DELETE 的 share mode 開檔即鎖定刪除
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let _lock = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(1) // FILE_SHARE_READ only
+                .open(&csv)
+                .unwrap();
+            assert!(
+                std::fs::remove_file(&csv).is_err(),
+                "測試前提：share_mode(1) 的 handle 應鎖住刪除"
+            );
+            let err = run_capture(&mut ctx, 0, 1, 999, &csv, 1, 0, 8192, 1, Rect::default())
+                .unwrap_err();
+            assert_eq!(
+                err, codes::BENCHMARK_CAPTURE_MISSING,
+                "鎖定的 stale CSV 必須 fail closed"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = &csv;
+            let _ = &mut ctx;
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 驗證後遭置換的 CSV：digest 綁定必須偵測並拒絕
+    #[test]
+    fn captured_csv_detects_post_capture_replacement() {
+        let root = temp_root("csv_bind");
+        let path = root.join("out.csv");
+        std::fs::write(&path, csv_for_lp(0)).unwrap();
+        let captured = captured_csv(&path);
+        assert!(captured.read().is_ok(), "原始內容應可讀取");
+
+        std::fs::write(&path, csv_for_lp(1)).unwrap();
+        assert!(
+            captured.read().is_err(),
+            "capture 後被置換的內容必須被 digest 檢查拒絕"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ── evaluate_forward（effects → verdict）──
@@ -4601,7 +4733,7 @@ mod tests {
     #[test]
     fn evaluate_forward_continues_on_straddle() {
         let dir = temp_root("eval_straddle");
-        let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+        let mut round_csvs: RoundCsvs = HashMap::new();
         let frames = [(10.0, 11.0), (11.0, 10.0), (10.0, 11.0)];
         for (i, &(cf, rf)) in frames.iter().enumerate() {
             let round = CONFIRMATION_ROUND_BASE + i as u32;
@@ -4636,7 +4768,7 @@ mod tests {
     #[test]
     fn evaluate_forward_continues_when_evidence_missing() {
         let dir = temp_root("eval_missing");
-        let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+        let mut round_csvs: RoundCsvs = HashMap::new();
         for round in CONFIRMATION_ROUND_BASE..(CONFIRMATION_ROUND_BASE + 2) {
             round_csvs
                 .entry(0)
@@ -4783,7 +4915,7 @@ mod tests {
     #[test]
     fn evaluate_forward_seven_round_straddle_is_inconclusive() {
         let dir = temp_root("eval_inconclusive");
-        let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+        let mut round_csvs: RoundCsvs = HashMap::new();
         for i in 0..CONFIRMATION_MAX_ROUNDS {
             let round = CONFIRMATION_ROUND_BASE + i;
             let (cf, rf) = if i % 2 == 0 {
@@ -4966,7 +5098,7 @@ mod tests {
     #[test]
     fn compute_reliability_ignores_screening_rounds() {
         let dir = temp_root("rel_no_leak");
-        let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+        let mut round_csvs: RoundCsvs = HashMap::new();
         // 篩選 round（0..SCREENING_ROUNDS）候選較慢；確認 round（base..）候選較快。
         for round in 0..SCREENING_ROUNDS {
             round_csvs
@@ -5010,7 +5142,7 @@ mod tests {
     #[test]
     fn compute_reliability_inconclusive_without_two_finalists() {
         let dir = temp_root("rel_one_lp");
-        let round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+        let round_csvs: RoundCsvs = HashMap::new();
         let results = vec![lp_res(0, 100.0, 100.0, 100.0, 0.0)];
         let rel = compute_reliability(&round_csvs, &results, &[], 0, None, false, false, 0);
         assert_eq!(rel.status, ReliabilityStatus::Inconclusive);
@@ -7099,57 +7231,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// 自訂 visible top-level（general）→ 定位但不可擅自 resize、不安裝關閉防護
-    #[test]
-    fn general_custom_positioned_but_not_resized() {
-        let root = temp_root("general_pos");
-        let journal = root.join("journal.json");
-        let backend = Arc::new(FakeBackend::new(vec![device(GPU_A)]));
-        backend.set_policy(AffinityPolicy {
-            instance_id: GPU_A.to_string(),
-            device_policy: RegistryValueSnapshot::dword(4),
-            assignment_set_override: RegistryValueSnapshot::binary(vec![0x08]),
-        });
-        let processes = Arc::new(FakeProcessRunner::new());
-        processes
-            .presentmon_csv
-            .lock()
-            .unwrap()
-            .push_str(&csv_for_lp(0));
-        let cancel = FakeCancel::new();
-        let window = Arc::new(fake::FakeWindow::new());
-        let mut config = base_config();
-        config.candidate_lps = vec![1];
-        config.workload_exe_path = Some("custom-lava.exe".to_string());
-        config.fullscreen = false;
-
-        let mut ctx = build_ctx(
-            &root,
-            backend.clone() as Arc<dyn GpuBackend>,
-            processes.clone() as Arc<dyn ProcessRunner>,
-            Arc::new(cancel) as Arc<dyn CancelSignal>,
-            Arc::new(NoopSleeper) as Arc<dyn Sleep>,
-            config,
-            &journal,
-            None,
-        );
-        ctx.window = window.clone();
-        let result = run_benchmark(&mut ctx);
-        assert_eq!(result.status, SessionStatus::Completed);
-        // 定位必做
-        assert!(
-            !window.position_calls_log().is_empty(),
-            "自訂 visible top-level 仍須定位"
-        );
-        // 但不可擅自 resize、不安裝關閉防護
-        assert!(window.calls_log().is_empty(), "自訂 exe 不該 resize");
-        assert!(
-            window.guard_calls_log().is_empty(),
-            "自訂 exe 不該安裝關閉防護"
-        );
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
     /// D3D9 → 不安裝關閉防護、不 resize
     #[test]
     fn d3d9_does_not_guard() {
@@ -7189,50 +7270,6 @@ mod tests {
         assert_eq!(result.status, SessionStatus::Completed);
         assert!(window.guard_calls_log().is_empty(), "D3D9 不該安裝關閉防護");
         assert!(window.calls_log().is_empty(), "D3D9 不該 resize");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// 自訂 Vulkan executable（workload_exe_path 覆寫）→ 不安裝關閉防護
-    #[test]
-    fn custom_vulkan_executable_does_not_guard() {
-        let root = temp_root("guard_custom");
-        let journal = root.join("journal.json");
-        let backend = Arc::new(FakeBackend::new(vec![device(GPU_A)]));
-        backend.set_policy(AffinityPolicy {
-            instance_id: GPU_A.to_string(),
-            device_policy: RegistryValueSnapshot::dword(4),
-            assignment_set_override: RegistryValueSnapshot::binary(vec![0x08]),
-        });
-        let processes = Arc::new(FakeProcessRunner::new());
-        processes
-            .presentmon_csv
-            .lock()
-            .unwrap()
-            .push_str(&csv_for_lp(0));
-        let cancel = FakeCancel::new();
-        let window = Arc::new(fake::FakeWindow::new());
-        let mut config = base_config();
-        config.candidate_lps = vec![1];
-        config.workload_exe_path = Some("custom-lava.exe".to_string());
-        config.fullscreen = false;
-
-        let mut ctx = build_ctx(
-            &root,
-            backend.clone() as Arc<dyn GpuBackend>,
-            processes.clone() as Arc<dyn ProcessRunner>,
-            Arc::new(cancel) as Arc<dyn CancelSignal>,
-            Arc::new(NoopSleeper) as Arc<dyn Sleep>,
-            config,
-            &journal,
-            None,
-        );
-        ctx.window = window.clone();
-        let result = run_benchmark(&mut ctx);
-        assert_eq!(result.status, SessionStatus::Completed);
-        assert!(
-            window.guard_calls_log().is_empty(),
-            "自訂 Vulkan exe 不該安裝關閉防護"
-        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -7629,7 +7666,7 @@ mod tests {
     #[test]
     fn select_finalists_deterministic_tie_picks_lower_lps() {
         let dir = temp_root("sel_tie");
-        let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+        let mut round_csvs: RoundCsvs = HashMap::new();
         for lp in 0..3u32 {
             for round in 0..3u32 {
                 round_csvs
@@ -7647,7 +7684,7 @@ mod tests {
     #[test]
     fn select_finalists_empty_when_fewer_than_two_complete() {
         let dir = temp_root("sel_few");
-        let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+        let mut round_csvs: RoundCsvs = HashMap::new();
         // LP0 有三個完整 selection round。
         for round in 0..(SCREENING_ROUNDS + REFINEMENT_ROUNDS) {
             round_csvs
@@ -7673,7 +7710,7 @@ mod tests {
     #[test]
     fn non_finalist_does_not_become_confirmation_winner() {
         let dir = temp_root("rel_adaptive");
-        let mut round_csvs: HashMap<u32, HashMap<u32, PathBuf>> = HashMap::new();
+        let mut round_csvs: RoundCsvs = HashMap::new();
         // finalists 0/1 各 5 確認 round（CONFIRMATION_ROUND_BASE..+5）
         for round in CONFIRMATION_ROUND_BASE..(CONFIRMATION_ROUND_BASE + 5) {
             round_csvs

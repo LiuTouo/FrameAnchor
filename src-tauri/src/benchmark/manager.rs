@@ -30,7 +30,7 @@ use super::{
     cpu_fingerprint_with, detect_cpu_identity, ApplyStatus, BenchmarkConfig, BenchmarkOperation,
     BenchmarkProgress, BenchmarkStage, BenchmarkState, CpuIdentity, EnvironmentStability,
     EquivalentSafetyStatus, EquivalentSafetyValidation, ReliabilityStatus, SessionDetail,
-    SessionStatus, SessionSummary, WindowIntegrity, WindowLayout, WorkloadKind,
+    SessionStatus, SessionSummary, WindowIntegrity, WindowLayout,
 };
 
 /// 一層還原記錄檔：`%APPDATA%\FrameAnchor\gpu-restore.json`。
@@ -89,8 +89,9 @@ pub fn apply_best_affinity(
     restore_path: &Path,
     session_id: &str,
 ) -> Result<(), ApplyError> {
-    // 1) session 存在且已完成、有最佳 LP
-    let detail = storage::get_at(storage_root, session_id)?;
+    // 1) session 存在且已完成、有最佳 LP；內容必須通過 HMAC 認證
+    //（session.json 位於可寫 APPDATA，偽造 Passed/bestLp 會驅動特權 GPU mutation）
+    let detail = storage::get_at_verified(storage_root, session_id)?;
     if detail.summary.status != SessionStatus::Completed {
         return Err(ApplyError::clean(codes::BENCHMARK_SESSION_NOT_COMPLETED));
     }
@@ -374,15 +375,15 @@ fn require_journal(journal_path: &Path) -> Result<RecoveryJournal, String> {
 
 fn write_restore_record(path: &Path, snapshot: &AffinityPolicy) -> Result<(), String> {
     let text = serde_json::to_string_pretty(snapshot).map_err(|e| format!("序列化: {e}"))?;
-    config::atomic_write(path, &text)
+    crate::state_auth::auth_write(path, &text)
 }
 
 fn load_restore_record(path: &Path) -> Result<Option<AffinityPolicy>, String> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("讀取還原記錄失敗: {e}")),
-    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    // 還原記錄驅動提升權限 HKLM 寫回與裝置重啟 — 必須通過 HMAC 認證
+    let text = crate::state_auth::auth_read(path)?;
     serde_json::from_str(&text)
         .map(Some)
         .map_err(|e| format!("還原記錄解析失敗: {e}"))
@@ -753,7 +754,7 @@ impl BenchmarkManager {
                     selected_lp,
                     reference_lp,
                     ref_mask.clone(),
-                    resolve_and_verify_assets(app, &detail.summary.config),
+                    resolve_and_verify_assets(app),
                 )?;
                 self.spawn_equivalent_validation(
                     app,
@@ -949,7 +950,7 @@ impl BenchmarkManager {
         let guard = self.reserve(OP_BENCHMARK)?;
         // 前置驗證（先於標記 Running，讓使用者即時拿到錯誤）
         runner::validate_config(&config, topo)?;
-        let assets = resolve_assets(app, &config)?;
+        let assets = resolve_assets(app)?;
         assets::verify(&assets).map_err(|e| {
             log::error!("基準測試資源驗證失敗: {e}");
             e.code().to_string()
@@ -1486,11 +1487,8 @@ fn equivalent_reference_matches(
 }
 
 /// 解析並驗證內建資源（assets）；任一失敗不寫任何 validation 狀態。
-fn resolve_and_verify_assets(
-    app: &AppHandle,
-    config: &BenchmarkConfig,
-) -> Result<BenchmarkAssets, String> {
-    let assets = resolve_assets(app, config)?;
+fn resolve_and_verify_assets(app: &AppHandle) -> Result<BenchmarkAssets, String> {
+    let assets = resolve_assets(app)?;
     assets::verify(&assets).map_err(|e| e.code().to_string())?;
     Ok(assets)
 }
@@ -1498,29 +1496,14 @@ fn resolve_and_verify_assets(
 /// 由 AppHandle 解析內建資源目錄（tauri.conf.json `bundle.resources`）。
 /// Windows 上 `resource_dir()` 等於 exe 所在目錄，而 `resources/**` 會以完整
 /// 相對路徑（含 `resources/` 前綴）安裝到該目錄 → 實際位置是 `resources/benchmark`。
-fn resolve_assets(app: &AppHandle, config: &BenchmarkConfig) -> Result<BenchmarkAssets, String> {
+/// 不接受 caller 指定 executable 路徑：spawn 一律限縮到內建資源
+/// （digest 內嵌主程式驗證,見 `assets::verify`）。
+fn resolve_assets(app: &AppHandle) -> Result<BenchmarkAssets, String> {
     let dir = app
         .path()
         .resolve("resources/benchmark", tauri::path::BaseDirectory::Resource)
         .map_err(|e| format!("資源目錄解析失敗: {e}"))?;
-    let mut assets = assets::load(&dir);
-    // 覆寫（測試/除錯用）
-    match config.workload {
-        WorkloadKind::Vulkan => {
-            if let Some(p) = &config.workload_exe_path {
-                assets.vulkan_workload = std::path::PathBuf::from(p);
-            }
-        }
-        WorkloadKind::D3D9 => {
-            if let Some(p) = &config.workload_exe_path {
-                assets.d3d9_workload = std::path::PathBuf::from(p);
-            }
-        }
-    }
-    if let Some(p) = &config.presentmon_path {
-        assets.presentmon = std::path::PathBuf::from(p);
-    }
-    Ok(assets)
+    Ok(assets::load(&dir))
 }
 
 /// runner 的 stage 字串 → BenchmarkStage（執行期狀態）
@@ -1947,13 +1930,14 @@ mod tests {
 
     /// 原本策略含非 DWORD 型別：還原必須逐型別、逐位元組還原
     #[test]
-    fn restore_preserves_arbitrary_non_dword_types() {
+    fn restore_rejects_non_dword_device_policy() {
         let dir = temp_dir("non_dword");
         let storage_root = dir.join("benchmarks");
         let journal = dir.join("journal.json");
         let restore = dir.join("restore.json");
         let backend = FakeBackend::new(vec![device(GPU_A)]);
-        // DevicePolicy=REG_SZ（值 1）+ AssignmentSetOverride=REG_BINARY
+        // DevicePolicy=REG_SZ：真實驅動語意只接受 DWORD；非 DWORD 快照一律
+        // fail closed（不得讓任意型別/bytes 進入 HKLM）
         let original = AffinityPolicy {
             instance_id: GPU_A.to_string(),
             device_policy: RegistryValueSnapshot {
@@ -1980,14 +1964,18 @@ mod tests {
             &sid,
         )
         .unwrap();
-        // 套用後 DevicePolicy 是 DWORD
+        // 快照（非 DWORD）寫回還原記錄成功，但 restore 必須在 write 前被語意
+        // 驗證擋下 → 還原失敗，裝置狀態維持在套用後的 DWORD 策略
         assert_eq!(
             backend.current_policy(GPU_A).device_policy.value_type,
             Some(REG_DWORD.0)
         );
-        // 還原 → 型別與位元組都回到原本（含非 DWORD）
-        restore_previous_affinity(&backend, &NoopSleeper, &restore).unwrap();
-        assert_eq!(backend.current_policy(GPU_A), original);
+        assert!(restore_previous_affinity(&backend, &NoopSleeper, &restore).is_err());
+        assert_eq!(
+            backend.current_policy(GPU_A).device_policy.value_type,
+            Some(REG_DWORD.0),
+            "非 DWORD 快照不得被寫入"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3090,11 +3078,15 @@ mod tests {
             load_restore_record(&dir.join("missing.json")).unwrap(),
             None
         );
-        // 有效 JSON → Some
+        // 有效（已認證）JSON → Some
         let good = dir.join("good.json");
         let snap = policy_on(GPU_A, 2, 0b1);
-        std::fs::write(&good, serde_json::to_string(&snap).unwrap()).unwrap();
+        crate::state_auth::auth_write(&good, &serde_json::to_string(&snap).unwrap()).unwrap();
         assert_eq!(load_restore_record(&good).unwrap(), Some(snap.clone()));
+        // 未認證的直接寫入（無 MAC 旁檔）→ Err
+        let unsigned = dir.join("unsigned.json");
+        std::fs::write(&unsigned, serde_json::to_string(&snap).unwrap()).unwrap();
+        assert!(load_restore_record(&unsigned).is_err());
         // 壞 JSON → Err
         let bad = dir.join("bad.json");
         std::fs::write(&bad, "{ not json").unwrap();
@@ -3400,7 +3392,6 @@ mod tests {
             presentmon: PathBuf::from("pm"),
             vulkan_workload: PathBuf::from("vk"),
             d3d9_workload: PathBuf::from("d3d9"),
-            manifest: PathBuf::from("manifest"),
         };
         let out = begin_equivalent_validation(
             &storage_root,

@@ -150,6 +150,10 @@ pub struct PortableRelease {
     pub zip_asset: GhAsset,
     /// 對應的 .sha256 校驗檔資產
     pub checksum_asset: GhAsset,
+    /// publisher 簽章的 metadata 資產（綁 version/asset/sha256）
+    pub metadata_asset: GhAsset,
+    /// metadata 的 minisign 簽章資產
+    pub signature_asset: GhAsset,
 }
 
 /// 建構可攜版 ZIP 資產名稱
@@ -191,6 +195,8 @@ pub fn fetch_portable_release() -> Result<PortableRelease, String> {
 
     let expected_zip = portable_zip_name(&version);
     let expected_checksum = format!("{}.sha256", expected_zip);
+    let expected_metadata = format!("{expected_zip}.update.json");
+    let expected_signature = format!("{expected_zip}.update.json.sig");
 
     // 精確匹配可攜版 zip
     let zip_asset = latest
@@ -213,6 +219,18 @@ pub fn fetch_portable_release() -> Result<PortableRelease, String> {
             )
         })?;
 
+    // publisher 簽章資產（強制；缺簽章的 release 由新 client 拒絕更新）
+    let find_asset = |name: &str| {
+        latest
+            .assets
+            .iter()
+            .find(|a| a.name == name)
+            .cloned()
+            .ok_or_else(|| format!("版本 {} 缺少簽章資產 '{}'", latest.tag_name, name))
+    };
+    let metadata_asset = find_asset(&expected_metadata)?;
+    let signature_asset = find_asset(&expected_signature)?;
+
     // 交叉驗證：tag 必須與資產名稱中的版本一致
     if !expected_zip.contains(version_str) {
         return Err(format!(
@@ -225,6 +243,8 @@ pub fn fetch_portable_release() -> Result<PortableRelease, String> {
         version,
         zip_asset,
         checksum_asset,
+        metadata_asset,
+        signature_asset,
     })
 }
 
@@ -294,7 +314,145 @@ fn verify_checksum(data: &[u8], expected_hex: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ── portable update publisher 簽章 ──
+//
+// 可攜版 ZIP 與 .sha256 由同一 release authority 產生/上傳,checksum 不構成
+// 獨立信任根。改由 updater 簽署 key(與 installed updater 同 keypair)簽署
+// metadata(綁 schema/version/asset/sha256),client 以內嵌 public key 驗證;
+// 缺 metadata 或簽章一律拒絕。semver 比較(client > latest 才更新)同時提供
+// rollback 保護。
+
+/// 簽章標的 metadata
+#[derive(serde::Deserialize, Debug)]
+struct PortableUpdateMetadata {
+    schema: u32,
+    version: String,
+    asset: String,
+    sha256: String,
+}
+
+/// 取 minisign 檔案格式(兩行)的第二行(base64 本體)
+fn minisign_second_line(text: &str, what: &str) -> Result<String, String> {
+    text.lines()
+        .nth(1)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| format!("{what} 格式錯誤:缺少 base64 本體行"))
+}
+
+fn base64_decode(input: &str, what: &str) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(input.trim())
+        .map_err(|e| format!("{what} base64 解碼失敗: {e}"))
+}
+
+/// 內嵌 public key:與 tauri.conf.json 的 updater pubkey 同源(同一 keypair),
+/// 避免第二份常數漂移
+fn updater_pubkey() -> Result<minisign_verify::PublicKey, String> {
+    use minisign_verify::PublicKey;
+    let config = include_str!("../tauri.conf.json");
+    let value: serde_json::Value = serde_json::from_str(config)
+        .map_err(|e| format!("解析 tauri.conf.json 失敗: {e}"))?;
+    let pubkey_b64 = value["plugins"]["updater"]["pubkey"]
+        .as_str()
+        .ok_or_else(|| "tauri.conf.json 缺少 plugins.updater.pubkey".to_string())?;
+    let decoded = base64_decode(pubkey_b64, "updater pubkey")?;
+    let text = String::from_utf8(decoded).map_err(|e| format!("updater pubkey 非合法 UTF-8: {e}"))?;
+    let key_line = minisign_second_line(&text, "updater pubkey")?;
+    PublicKey::from_base64(&key_line).map_err(|e| format!("updater pubkey 解析失敗: {e}"))
+}
+
+fn minisign_signature(sig_bytes: &[u8]) -> Result<minisign_verify::Signature, String> {
+    use minisign_verify::Signature;
+    let text = std::str::from_utf8(sig_bytes).map_err(|e| format!("簽章檔非合法 UTF-8: {e}"))?;
+    // Signature::decode 直接解析兩行式檔案格式
+    Signature::decode(text).map_err(|e| format!("簽章解析失敗: {e}"))
+}
+
+/// 驗證 metadata 內容與下載物/release 的一致性(schema/version/asset/sha256)
+fn validate_portable_metadata(
+    meta_bytes: &[u8],
+    zip: &[u8],
+    want_version: &str,
+    want_asset: &str,
+) -> Result<(), String> {
+    let meta: PortableUpdateMetadata = serde_json::from_slice(meta_bytes)
+        .map_err(|e| format!("portable update metadata 解析失敗: {e}"))?;
+    if meta.schema != 1 {
+        return Err(format!(
+            "portable update metadata schema 不支援: {}（預期 1）",
+            meta.schema
+        ));
+    }
+    if meta.version != want_version {
+        return Err(format!(
+            "portable update metadata 版本 '{}' 與 release '{}' 不一致",
+            meta.version, want_version
+        ));
+    }
+    if meta.asset != want_asset {
+        return Err(format!(
+            "portable update metadata 資產名 '{}' 與下載 '{}' 不一致",
+            meta.asset, want_asset
+        ));
+    }
+    let hash = compute_sha256(zip);
+    if !meta.sha256.eq_ignore_ascii_case(&hash) {
+        return Err(format!(
+            "portable update metadata sha256 與下載內容不符（metadata {},實際 {hash}）",
+            meta.sha256
+        ));
+    }
+    Ok(())
+}
+
+/// 驗證 portable update:簽章 → metadata 綁定(schema/version/asset/sha256)。
+/// 任一失敗即拒絕安裝。
+fn verify_portable_update(
+    zip: &[u8],
+    meta_bytes: &[u8],
+    sig_bytes: &[u8],
+    want_version: &str,
+    want_asset: &str,
+) -> Result<(), String> {
+    let key = updater_pubkey()?;
+    let sig = minisign_signature(sig_bytes)?;
+    key.verify(meta_bytes, &sig, false)
+        .map_err(|_| "portable update 簽章驗證失敗(pubkey 不符或內容遭改)".to_string())?;
+    validate_portable_metadata(meta_bytes, zip, want_version, want_asset)
+}
+
 // ── 下載與解壓縮 ──
+
+/// 下載小型輔助資產（metadata / 簽章檔），加上大小上限避免異常檔案
+fn download_asset_bytes(asset: &GhAsset) -> Result<Vec<u8>, String> {
+    const MAX_AUX_SIZE: u64 = 64 * 1024;
+    if asset.size > MAX_AUX_SIZE {
+        return Err(format!(
+            "輔助資產 '{}' 超出大小上限（{} bytes）",
+            asset.name, asset.size
+        ));
+    }
+    let response = http_client()
+        .get(&asset.browser_download_url)
+        .send()
+        .map_err(|e| map_http_error(e, "下載輔助資產失敗"))?;
+    if !response.status().is_success() {
+        return Err(map_status_code(
+            response.status().as_u16(),
+            "下載輔助資產失敗",
+        ));
+    }
+    let bytes = response
+        .bytes()
+        .map_err(|e| format!("下載輔助資產失敗: {e}"))?
+        .to_vec();
+    if bytes.is_empty() {
+        return Err(format!("輔助資產 '{}' 為空", asset.name));
+    }
+    Ok(bytes)
+}
 
 /// 下載可攜版 zip 並驗證 SHA256，回傳 bytes。
 pub fn download_portable_zip(
@@ -355,7 +513,18 @@ pub fn download_portable_zip(
         return Err("下載的檔案不是有效的 ZIP".to_string());
     }
 
-    // 下載並驗證 SHA256（強制）
+    // 下載 publisher 簽章的 metadata 並驗證（強制；綁 version/asset/sha256）
+    let meta_bytes = download_asset_bytes(&release.metadata_asset)?;
+    let sig_bytes = download_asset_bytes(&release.signature_asset)?;
+    verify_portable_update(
+        &buf,
+        &meta_bytes,
+        &sig_bytes,
+        &release.version.to_string(),
+        &release.zip_asset.name,
+    )?;
+
+    // 下載並驗證 SHA256（縱深防禦；真正信任根是上方的簽章驗證）
     let expected_hex = fetch_and_parse_checksum(&release.checksum_asset)?;
     verify_checksum(&buf, &expected_hex)?;
 
@@ -457,8 +626,7 @@ pub fn extract_portable_exe(zip_data: &[u8]) -> Result<(PathBuf, PathBuf, PathBu
         }
     }
 
-    let tmp_dir = std::env::temp_dir().join("frameanchor_update");
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("建立暫存目錄失敗: {e}"))?;
+    let tmp_dir = create_protected_staging_dir()?;
 
     let tmp_exe = tmp_dir.join("FrameAnchor_new.exe");
     let tmp_marker = tmp_dir.join(PORTABLE_MARKER);
@@ -471,8 +639,7 @@ pub fn extract_portable_exe(zip_data: &[u8]) -> Result<(PathBuf, PathBuf, PathBu
         let mut exe_file = archive
             .by_index(exe_indices[0])
             .map_err(|e| format!("讀取 ZIP 項目失敗: {e}"))?;
-        let mut out =
-            std::fs::File::create(&tmp_exe).map_err(|e| format!("建立暫存執行檔失敗: {e}"))?;
+        let mut out = exclusive_create(&tmp_exe).map_err(|e| format!("建立暫存執行檔失敗: {e}"))?;
         std::io::copy(&mut exe_file, &mut out).map_err(|e| format!("解壓縮執行檔失敗: {e}"))?;
     }
 
@@ -480,8 +647,8 @@ pub fn extract_portable_exe(zip_data: &[u8]) -> Result<(PathBuf, PathBuf, PathBu
     for i in 0..archive.len() {
         if let Ok(mut f) = archive.by_index(i) {
             if f.name() == PORTABLE_MARKER {
-                let mut out = std::fs::File::create(&tmp_marker)
-                    .map_err(|e| format!("建立暫存標記檔失敗: {e}"))?;
+                let mut out =
+                    exclusive_create(&tmp_marker).map_err(|e| format!("建立暫存標記檔失敗: {e}"))?;
                 std::io::copy(&mut f, &mut out).map_err(|e| format!("解壓縮標記檔失敗: {e}"))?;
                 break;
             }
@@ -495,11 +662,47 @@ pub fn extract_portable_exe(zip_data: &[u8]) -> Result<(PathBuf, PathBuf, PathBu
             .map_err(|e| format!("讀取資源項目失敗: {e}"))?;
         let out_path = tmp_resources.join(f.name().strip_prefix(RESOURCE_PREFIX).unwrap());
         let mut out =
-            std::fs::File::create(&out_path).map_err(|e| format!("建立暫存資源檔失敗: {e}"))?;
+            exclusive_create(&out_path).map_err(|e| format!("建立暫存資源檔失敗: {e}"))?;
         std::io::copy(&mut f, &mut out).map_err(|e| format!("解壓縮資源檔失敗: {e}"))?;
     }
 
     Ok((tmp_exe, tmp_marker, tmp_resources))
+}
+
+// ── 暫存 staging 保護 ──
+
+/// 以 create-new 語意開檔,拒絕覆寫既有檔案。
+fn exclusive_create(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+}
+
+/// 建立一次性暫存目錄:隨機名稱 + 僅 Administrators/SYSTEM 可寫的保護型 DACL。
+/// 舊版使用固定名稱 `%TEMP%\frameanchor_update`,同帳戶未提升程序可在 ZIP
+/// 驗證後置換 staged 執行檔或輔助腳本,再由提升權限端依路徑消費
+/// (CWE-367/377)。改為不可預測名稱 + 受保護 DACL,並清除舊版殘留目錄。
+fn create_protected_staging_dir() -> Result<PathBuf, String> {
+    // 舊版固定名稱目錄盡力清除
+    let _ = std::fs::remove_dir_all(std::env::temp_dir().join("frameanchor_update"));
+
+    let dir = std::env::temp_dir().join(format!(
+        "frameanchor_update_{}",
+        uuid::Uuid::new_v4()
+    ));
+    // UUID 撞名殘留時移除重試一次;仍失敗即放棄(fail closed)
+    if dir.exists() && std::fs::remove_dir_all(&dir).is_err() {
+        return Err(format!("無法清除殘留暫存目錄: {}", dir.display()));
+    }
+    create_dir_admin_only(&dir)?;
+    Ok(dir)
+}
+
+/// 以「僅 Administrators 與 SYSTEM」的保護型 DACL 建立目錄。
+/// 同帳戶 medium-integrity 程序不在 DACL 內,無法寫入或置換 staging 內容。
+fn create_dir_admin_only(dir: &Path) -> Result<(), String> {
+    crate::syspath::create_admin_only_dir(dir).map_err(|e| format!("建立保護暫存目錄失敗: {e}"))
 }
 
 // ── 可攜版替換輔助腳本 ──
@@ -644,12 +847,14 @@ try {{
         Start-Process -FilePath $OldExe
         Write-Log "original restart initiated"
     }}
+    Remove-Item -LiteralPath (Split-Path $NewExe -Parent) -Recurse -Force -ErrorAction SilentlyContinue
     exit 1
 }}
 
 # 成功完成：重新啟動
 Write-Log "SUCCESS, restarting $OldExe"
 Start-Process -FilePath $OldExe
+Remove-Item -LiteralPath (Split-Path $NewExe -Parent) -Recurse -Force -ErrorAction SilentlyContinue
 Write-Log "restart initiated"
 "#,
         pid = pid,
@@ -670,8 +875,12 @@ pub fn execute_portable_replacement(
     new_resources: &Path,
     pid: u32,
 ) -> Result<(), String> {
-    let tmp_dir = std::env::temp_dir().join("frameanchor_update");
-    std::fs::create_dir_all(&tmp_dir).map_err(|e| format!("建立暫存目錄失敗: {e}"))?;
+    // staging 目錄由 extract_portable_exe 建立(隨機名稱 + 僅 Administrators 可寫),
+    // 從 staged exe 路徑反推,不再自行建立固定名稱目錄
+    let tmp_dir = new_exe
+        .parent()
+        .ok_or_else(|| "無法取得暫存目錄".to_string())?
+        .to_path_buf();
 
     let script_path = tmp_dir.join("update.ps1");
     let log_path = tmp_dir.join("update.log");
@@ -692,8 +901,9 @@ pub fn execute_portable_replacement(
     file.write_all(script.as_bytes())
         .map_err(|e| format!("寫入更新腳本失敗: {e}"))?;
 
-    // 啟動 PowerShell，使用 CREATE_NO_WINDOW 避免彈出視窗
-    std::process::Command::new("powershell")
+    // 啟動 PowerShell，使用 CREATE_NO_WINDOW 避免彈出視窗；
+    // 以 System32 絕對路徑啟動，避免依賴 PATH 搜尋
+    std::process::Command::new(crate::syspath::powershell_exe()?)
         .args([
             "-WindowStyle",
             "Hidden",
@@ -714,6 +924,120 @@ pub fn execute_portable_replacement(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 產生兩行式 minisign 檔案格式內容(untrusted comment + base64)
+    fn minisign_doc(comment: &str, b64: &str) -> String {
+        format!("untrusted comment: {comment}\n{b64}\n")
+    }
+
+    /// 以測試內生成的 throwaway keypair 驗證 minisign 格式解析與驗章路徑
+    #[test]
+    fn portable_signature_roundtrip_with_test_keypair() {
+        use std::io::Cursor;
+        // dev-dep minisign:測試內生成 keypair,與發布 key 無關
+        let keypair =
+            minisign::KeyPair::generate_unencrypted_keypair().expect("測試 keypair 生成不應失敗");
+        let secret = keypair.sk;
+        let public = minisign::PublicKey::from_secret_key(&secret)
+            .expect("由 secret key 推導公鑰不應失敗");
+        let sig_box = minisign::sign(
+            None,
+            &secret,
+            Cursor::new(b"metadata-bytes".to_vec()),
+            None,
+            None,
+        )
+        .expect("測試簽章不應失敗");
+
+        // 兩行格式解析 + minisign-verify 驗章(與 client 實際路徑同構)
+        let key_line =
+            minisign_second_line(&minisign_doc("pub", &public.to_base64()), "pubkey").unwrap();
+        let key = minisign_verify::PublicKey::from_base64(&key_line).unwrap();
+        let sig = minisign_verify::Signature::decode(&sig_box.to_string()).unwrap();
+        key.verify(b"metadata-bytes", &sig, false)
+            .expect("正確資料應通過");
+        assert!(
+            key.verify(b"tampered", &sig, false).is_err(),
+            "遭改內容必須失敗"
+        );
+    }
+
+    #[test]
+    fn updater_pubkey_resolves_from_config() {
+        // tauri.conf.json 的 updater pubkey 應可解析為合法 minisign public key
+        updater_pubkey().expect("內嵌 updater pubkey 應解析成功");
+    }
+
+    #[test]
+    fn metadata_validation_rejects_version_mismatch() {
+        let zip = b"zip-bytes";
+        let meta = br#"{"schema":1,"version":"1.2.3","asset":"FrameAnchor_1.2.3_x64-portable.zip","sha256":"X"}"#;
+        let err = validate_portable_metadata(meta, zip, "1.2.4", "FrameAnchor_1.2.3_x64-portable.zip")
+            .unwrap_err();
+        assert!(err.contains("版本"), "err={err}");
+    }
+
+    #[test]
+    fn metadata_validation_rejects_asset_mismatch() {
+        let zip = b"zip-bytes";
+        let meta = br#"{"schema":1,"version":"1.2.4","asset":"evil.zip","sha256":"X"}"#;
+        let err = validate_portable_metadata(meta, zip, "1.2.4", "FrameAnchor_1.2.4_x64-portable.zip")
+            .unwrap_err();
+        assert!(err.contains("資產名"), "err={err}");
+    }
+
+    #[test]
+    fn metadata_validation_rejects_hash_mismatch() {
+        let zip = b"zip-bytes";
+        let meta = br#"{"schema":1,"version":"1.2.4","asset":"FrameAnchor_1.2.4_x64-portable.zip","sha256":"0000000000000000000000000000000000000000000000000000000000000000"}"#;
+        let err = validate_portable_metadata(meta, zip, "1.2.4", "FrameAnchor_1.2.4_x64-portable.zip")
+            .unwrap_err();
+        assert!(err.contains("sha256"), "err={err}");
+    }
+
+    #[test]
+    fn metadata_validation_accepts_matching_content() {
+        let zip = b"zip-bytes";
+        let hash = compute_sha256(zip);
+        let meta = format!(
+            r#"{{"schema":1,"version":"1.2.4","asset":"FrameAnchor_1.2.4_x64-portable.zip","sha256":"{hash}"}}"#
+        );
+        validate_portable_metadata(
+            meta.as_bytes(),
+            zip,
+            "1.2.4",
+            "FrameAnchor_1.2.4_x64-portable.zip",
+        )
+        .expect("一致的 metadata 應通過");
+    }
+
+    #[test]
+    fn metadata_validation_rejects_unknown_schema() {
+        let meta = br#"{"schema":99,"version":"1.2.4","asset":"a.zip","sha256":"X"}"#;
+        let err = validate_portable_metadata(meta, b"z", "1.2.4", "a.zip").unwrap_err();
+        assert!(err.contains("schema"), "err={err}");
+    }
+
+    #[test]
+    fn protected_staging_dir_is_random_and_replaces_legacy() {
+        let dir = create_protected_staging_dir().expect("staging 目錄應建立成功");
+        assert!(dir.is_dir());
+        assert!(dir
+            .file_name()
+            .map(|n| n.to_string_lossy().starts_with("frameanchor_update_"))
+            .unwrap_or(false));
+
+        // 隨機名稱:兩次建立不會落在同一目錄
+        let dir2 = create_protected_staging_dir().expect("第二個 staging 目錄應建立成功");
+        assert_ne!(dir, dir2);
+
+        // 舊版固定名稱目錄應在建立流程中被清除
+        assert!(!std::env::temp_dir().join("frameanchor_update").exists());
+
+        // 測試環境未必能刪除僅 Administrators 可寫的目錄,盡力清理
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
 
     // ── 版本檢查 ──
 
@@ -1259,8 +1583,8 @@ mod tests {
     }
 
     /// 六個必要資源全部存在 → 全部被抽出。
-    /// 註：extract 輸出固定到 %TEMP%\frameanchor_update，與其它抽取測試共用；
-    /// 故意不清理，避免並行測試互相刪除彼此的暫存檔。
+    /// 註：extract 輸出到一次性隨機 staging 目錄，各測試互不共用，
+    /// 結束後可安全清理自己的目錄。
     #[test]
     fn extract_accepts_all_six_resources() {
         let zip = build_zip(&REQUIRED_RESOURCE_FILES, None);
@@ -1269,6 +1593,9 @@ mod tests {
         assert!(marker.exists(), "標記應被抽出");
         for f in REQUIRED_RESOURCE_FILES {
             assert!(resources.join(f).exists(), "資源應被抽出: {f}");
+        }
+        if let Some(dir) = exe.parent() {
+            let _ = std::fs::remove_dir_all(dir);
         }
     }
 

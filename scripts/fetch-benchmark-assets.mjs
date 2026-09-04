@@ -45,6 +45,15 @@ const DIR = 'src-tauri/resources/benchmark';
 const TMP = 'scripts/.assets-tmp';
 mkdirSync(TMP, { recursive: true });
 
+// known-good trust root：下載（含 manifest 嵌入後）的最终產物必須與此處
+// 完全一致，script 才會覆寫 vendored 檔案與 SHA256SUMS。此處的 digest 變更
+// 屬於信任根更新，必須獨立 review，不得由下載流程自動產生。
+// 升級上游版本時：人工確認新版本 → 同一 PR 內同時更新此處與重新 vendor。
+const KNOWN_GOOD = {
+  'PresentMon-2.5.1-x64.exe': '9bec3083069f58f911e6a512f4806db51a27bd096103087bc1d05ef54c80a191',
+  'lava-triangle.exe': 'c4beae5889d99682f80d79d143d81123ab5a5e045568c76ad1936194c66ae547',
+};
+
 const PRESENTMON_URL =
   'https://github.com/GameTechDev/PresentMon/releases/download/v2.5.1/PresentMon-2.5.1-x64.exe';
 const PRESENTMON_LICENSE_URL =
@@ -94,6 +103,18 @@ try {
 
   // 嵌入 DPI 感知 manifest（PerMonitorV2），讓全螢幕覆蓋縮放 >100% 的整個桌面
   embedManifest(path.join(DIR, 'lava-triangle.exe'));
+
+  // 驗證最終產物（嵌入 manifest 後）與 known-good 一致；不符即中止，不寫 SHA256SUMS
+  for (const [file, want] of Object.entries(KNOWN_GOOD)) {
+    const got = sha256(path.join(DIR, file));
+    if (got !== want) {
+      throw new Error(
+        `下載的 ${file} 與 known-good digest 不符\n  期望: ${want}\n  實際: ${got}\n` +
+        `上游內容可能已變更；若為刻意升級，請人工確認後在同一 PR 更新 KNOWN_GOOD。`,
+      );
+    }
+    console.log(`[verified] ${file} = ${got}`);
+  }
 
   const manifest = [
     '# FrameAnchor GPU 基準測試內建資源的固定 SHA-256。',

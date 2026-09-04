@@ -1,21 +1,38 @@
-//! 開機啟動（PLAN §7.7）：schtasks CLI 建立 ONLOGON + HIGHEST 工作，登入不跳 UAC。
+//! 開機啟動（PLAN §7.7）：schtasks CLI 建立 ONLOGON 工作，登入不跳 UAC。
 //! 不用 Registry Run key（無法帶最高權限）。
+//! 執行檔位於受保護目錄（Program Files 樹）時用 /RL HIGHEST；
+//! 可寫位置（可攜版等）一律降級 /RL LIMITED——HIGHEST 工作保存的是路徑字串，
+//! 登入時會無 UAC 執行該路徑的內容，可寫位置可被同帳戶未提升程序置換。
 
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 
 use crate::error::codes;
+use crate::syspath;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const TASK_NAME: &str = "FrameAnchor";
 
+/// 以 System32 絕對路徑建構 schtasks(避免 untrusted search path 解析到可寫目錄的同名 PE)。
+fn schtasks_command() -> Result<Command, String> {
+    Ok(Command::new(syspath::system32_tool("schtasks.exe")?))
+}
+
 pub fn set_autostart(enable: bool) -> Result<(), String> {
     if enable {
         let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+        let protected = syspath::in_protected_program_dir();
+        let run_level = if protected { "HIGHEST" } else { "LIMITED" };
+        if !protected {
+            log::warn!(
+                "執行檔位於可寫位置({}),開機自啟降級為 LIMITED,登入時可能出現 UAC 提示",
+                exe.display()
+            );
+        }
         let tr = format!("\"{}\" --minimized", exe.display());
-        let out = Command::new("schtasks")
+        let out = schtasks_command()?
             .args([
-                "/Create", "/TN", TASK_NAME, "/SC", "ONLOGON", "/RL", "HIGHEST", "/TR", &tr, "/F",
+                "/Create", "/TN", TASK_NAME, "/SC", "ONLOGON", "/RL", run_level, "/TR", &tr, "/F",
             ])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
@@ -34,7 +51,7 @@ pub fn set_autostart(enable: bool) -> Result<(), String> {
         if !is_enabled() {
             return Ok(());
         }
-        let out = Command::new("schtasks")
+        let out = schtasks_command()?
             .args(["/Delete", "/TN", TASK_NAME, "/F"])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
@@ -52,8 +69,11 @@ pub fn set_autostart(enable: bool) -> Result<(), String> {
 }
 
 pub fn is_enabled() -> bool {
-    Command::new("schtasks")
-        .args(["/Query", "/TN", TASK_NAME])
+    // 查詢失敗（含 System32 解析失敗）一律視為未啟用，維持 fail-closed 語意
+    let Ok(mut cmd) = schtasks_command() else {
+        return false;
+    };
+    cmd.args(["/Query", "/TN", TASK_NAME])
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map(|o| o.status.success())

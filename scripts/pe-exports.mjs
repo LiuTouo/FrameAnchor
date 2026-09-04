@@ -27,10 +27,15 @@ const rva2off = (rva) => {
   if (!s) throw new Error(`RVA ${rva.toString(16)} not in any section`);
   return s.rawOff + (rva - s.vaddr);
 };
+// 名稱中的控制字元（ESC/CSI/CR/BS 等）先中和成可見轉義，避免 terminal 解讀
+const escapeCtl = (s) =>
+  s.replace(/[\x00-\x1f\x7f]/g, (c) => `\\x${c.charCodeAt(0).toString(16).padStart(2, '0')}`);
+// 以 buffer 為界掃描 C 字串；缺 NUL 或超過上限視為 invalid，
+// 避免 `buf[end]` 越界回 undefined 造成無限迴圈
 const cstr = (o) => {
-  let end = o;
-  while (buf[end] !== 0) end++;
-  return buf.toString('ascii', o, end);
+  const nul = buf.indexOf(0, o);
+  if (nul === -1 || nul - o > 512) return '<invalid-name>';
+  return escapeCtl(buf.toString('ascii', o, nul));
 };
 
 const expOff = rva2off(exportRva);

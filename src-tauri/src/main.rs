@@ -14,6 +14,8 @@ mod gpu;
 mod model;
 mod priority;
 mod process;
+mod state_auth;
+mod syspath;
 mod topology;
 mod tray;
 mod update;

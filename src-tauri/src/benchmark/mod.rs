@@ -114,12 +114,6 @@ pub struct BenchmarkConfig {
     /// Vulkan workload 的額外參數（workload=Vulkan 時必須非空）
     #[serde(default)]
     pub vulkan_args: Vec<String>,
-    /// workload exe 覆寫（測試/除錯用；None = 內建資源）
-    #[serde(default)]
-    pub workload_exe_path: Option<String>,
-    /// PresentMon exe 覆寫（測試/除錯用）
-    #[serde(default)]
-    pub presentmon_path: Option<String>,
     /// 相容舊欄位：遊戲路徑（現由 workload 種類取代）
     #[serde(default)]
     pub game_path: Option<String>,
@@ -160,8 +154,6 @@ impl Default for BenchmarkConfig {
             fps_cap_policy: FpsCapPolicy::default(),
             triple_buffer: false,
             vulkan_args: default_vulkan_args(),
-            workload_exe_path: None,
-            presentmon_path: None,
             game_path: None,
             window_title: None,
         }

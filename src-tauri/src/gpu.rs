@@ -101,6 +101,43 @@ pub fn single_lp_mask_bytes(lp: u32) -> Vec<u8> {
     le[..len].to_vec()
 }
 
+/// 驗證即將寫入/還原的策略快照語意（型別/長度上限）。
+/// 來源可能是磁碟上可被竄改的 JSON；任何 registry write 前必須通過此檢查：
+/// - instance_id 非空且有長度上限
+/// - DevicePolicy 存在時必為 REG_DWORD（4 bytes little-endian）
+/// - AssignmentSetOverride 存在時必為 REG_BINARY 且 ≤ 8 bytes（64-bit mask）
+pub fn validate_policy_snapshot(policy: &AffinityPolicy) -> Result<(), String> {
+    const MAX_INSTANCE_ID_LEN: usize = 256;
+    const REG_BINARY_TYPE: u32 = 3;
+    const MAX_OVERRIDE_BYTES: usize = 8;
+
+    if policy.instance_id.is_empty() || policy.instance_id.len() > MAX_INSTANCE_ID_LEN {
+        return Err("策略快照的 instance_id 為空或超出長度上限".to_string());
+    }
+    if policy.device_policy.present {
+        if policy.device_policy.value_type != Some(REG_DWORD.0) {
+            return Err("DevicePolicy 型別非法（必為 REG_DWORD）".to_string());
+        }
+        if policy.device_policy.bytes.as_ref().map(|b| b.len()) != Some(4) {
+            return Err("DevicePolicy 位元組長度非法（必為 4 bytes）".to_string());
+        }
+    }
+    if policy.assignment_set_override.present {
+        if policy.assignment_set_override.value_type != Some(REG_BINARY_TYPE) {
+            return Err("AssignmentSetOverride 型別非法（必為 REG_BINARY）".to_string());
+        }
+        match policy.assignment_set_override.bytes.as_ref().map(|b| b.len()) {
+            Some(len) if (1..=MAX_OVERRIDE_BYTES).contains(&len) => {}
+            _ => {
+                return Err(format!(
+                    "AssignmentSetOverride 位元組長度非法（1..={MAX_OVERRIDE_BYTES}）"
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 中斷親和性策略（DevicePolicy + AssignmentSetOverride 的成對快照）。
 /// 同時作為「讀取結果」「寫入輸入」「還原輸入」三種用途。
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -284,6 +321,9 @@ impl GpuBackend for RealGpuBackend {
     }
 
     fn write_affinity_policy(&self, policy: &AffinityPolicy) -> Result<(), GpuError> {
+        // 語意檢查（型別/長度）是 registry write 前的最後一道防線：
+        // policy 可能來自磁碟上的狀態檔,不得讓任意 bytes 進入 HKLM
+        validate_policy_snapshot(policy).map_err(GpuError::Registry)?;
         unsafe {
             let path = wide(&affinity_policy_path(&policy.instance_id));
             let mut hkey = HKEY::default();
@@ -572,11 +612,22 @@ pub fn policy_matches(snapshot: &AffinityPolicy, current: &AffinityPolicy) -> bo
 }
 
 /// 寫回快照 + 重啟裝置 + 驗證逐位元組一致。manager 與 runner 共用。
+/// 前置：語意驗證 + 目標必須是**目前存在**的 display adapter —
+/// recovery/restore 的快照來自磁碟,任何 registry write 前先驗證 target。
 pub fn restore_snapshot(
     backend: &dyn GpuBackend,
     sleeper: &dyn Sleep,
     snapshot: &AffinityPolicy,
 ) -> Result<(), String> {
+    validate_policy_snapshot(snapshot).map_err(|_| crate::error::codes::GPU_RESTORE_FAILED)?;
+    let present = backend
+        .enumerate_present_adapters()
+        .map_err(|e| e.code().to_string())?
+        .iter()
+        .any(|d| d.instance_id.eq_ignore_ascii_case(&snapshot.instance_id));
+    if !present {
+        return Err(crate::error::codes::GPU_NOT_FOUND.to_string());
+    }
     backend
         .write_affinity_policy(snapshot)
         .map_err(|e| e.code().to_string())?;

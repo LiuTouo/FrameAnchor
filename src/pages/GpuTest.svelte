@@ -213,7 +213,7 @@
   async function doStart() {
     confirmAction = null; busy = true; cancelSent = false;
     try {
-      await ipc.startGpuBenchmark({ candidateLps: lps, gpuInstanceId: selectedGpu, workload, warmUpSecs, sampleSecs, repetitions: 5, syncWorkloadAffinity: false, fullscreen: false, width, height, fpsCap, fpsCapPolicy, tripleBuffer, vulkanArgs: buildVulkanArgs(), workloadExePath: null, presentmonPath: null, gamePath: null, windowTitle: null });
+      await ipc.startGpuBenchmark({ candidateLps: lps, gpuInstanceId: selectedGpu, workload, warmUpSecs, sampleSecs, repetitions: 5, syncWorkloadAffinity: false, fullscreen: false, width, height, fpsCap, fpsCapPolicy, tripleBuffer, vulkanArgs: buildVulkanArgs(), gamePath: null, windowTitle: null });
       errMsg = null;
     } catch (e) { errMsg = String(e); }
     finally { busy = false; }

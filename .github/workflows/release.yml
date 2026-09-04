@@ -120,7 +120,9 @@ jobs:
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings
 
       - name: 建置 NSIS 安裝程式與 updater artifacts
-        uses: tauri-apps/tauri-action@v1
+        # pin 到完整 commit SHA（v1）— 此 step 接觸 GITHUB_TOKEN 與 updater
+        # signing key，不可使用可移動 tag。升級改 SHA 需人工 review。
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
@@ -204,6 +206,23 @@ jobs:
           "$sha256  $zipName" | Out-File -FilePath "$zipName.sha256" -Encoding utf8NoBOM
           Write-Host "SHA256: $sha256"
 
+          # publisher 簽章：以 updater 簽署 key 簽署 metadata（綁 version/asset/sha256）。
+          # 可攜版 client 以內嵌 public key 驗證，缺簽章即拒絕更新（同一信任根。
+          # TAURI_SIGNING_PRIVATE_KEY 需以 base64 編碼的 key 內容提供）。
+          $meta = [ordered]@{
+            schema  = 1
+            version = $tag.Substring(1)
+            asset   = $zipName
+            sha256  = $sha256
+          } | ConvertTo-Json -Compress
+          [System.IO.File]::WriteAllText("$pwd\$zipName.update.json", $meta)
+          npx tauri signer sign "$zipName.update.json"
+          if (-not (Test-Path "$zipName.update.json.sig")) {
+            Write-Error "portable update metadata 簽章失敗"
+            exit 1
+          }
+          Write-Host "portable update metadata 已簽署"
+
           # 清理暫存
           Remove-Item -Recurse -Force $stagingDir
 
@@ -230,11 +249,17 @@ jobs:
             Write-Error "找不到 $zipName.sha256"
             exit 1
           }
+          if (-not (Test-Path "$zipName.update.json") -or -not (Test-Path "$zipName.update.json.sig")) {
+            Write-Error "找不到 $zipName.update.json(.sig)— 可攜版必須附 publisher 簽章"
+            exit 1
+          }
 
-          gh release upload $tag $zipName "$zipName.sha256" --clobber
-          Write-Host "已上傳可攜版資產：$zipName, $zipName.sha256"
+          gh release upload $tag $zipName "$zipName.sha256" "$zipName.update.json" "$zipName.update.json.sig" --clobber
+          Write-Host "已上傳可攜版資產：$zipName, $zipName.sha256, $zipName.update.json(.sig)"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
 
       - name: 計算 NSIS 安裝程式 SHA256 並上傳穩定命名資產
         shell: pwsh

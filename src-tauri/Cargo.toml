@@ -7,6 +7,10 @@ rust-version = "1.80"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+sha2 = "0.10"
+
+[dev-dependencies]
+minisign = "0.9"
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
@@ -17,6 +21,8 @@ tauri-plugin-process = "2"
 semver = { version = "1", features = ["serde"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sha2 = "0.10"
+minisign-verify = "0.2"
+hmac = "0.12"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -33,8 +39,10 @@ version = "0.61"
 features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_System_Threading",
     "Win32_System_Kernel",
+    "Win32_System_Com",
     "Wdk_System_Threading",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_ToolHelp",
