@@ -1,0 +1,135 @@
+{
+  "documentType": "codex-security.scan-manifest",
+  "scan": {
+    "artifacts": [
+      {
+        "mediaType": "application/json",
+        "path": "findings.json",
+        "sha256": "08d4a81883ff61acd7d46ce0ec7bde73d551f2226bbc6ffe2ae37c0236006252"
+      },
+      {
+        "mediaType": "application/json",
+        "path": "coverage.json",
+        "sha256": "f904e6d925904e4e3d662f9d9bac989a7e0dc35c5448b608933edb0cf1f6d890"
+      }
+    ],
+    "completedAt": "2026-09-04T02:06:48.355619Z",
+    "coverageRef": "coverage.json",
+    "findingsRef": "findings.json",
+    "id": "5368af66-9b97-4b2c-b045-be441c58cc6d",
+    "preservedSources": {
+      "checkpoints/1631373b58f09bdcdcc0153d12ebf0eba0c9f4d0ff367ed8b86052439beaaa44.json": "d94da48f89bcea61f2c11eb4ac88243dff879eb7752629a61b94d1588b955fa0",
+      "checkpoints/16ee2eeb8e8baf3b9d4ff71b5950d738d75d09717bafb1215dcc8d976fc47b32.json": "eaa7edb57fb2be55035b4f8335f8fb3cfc467781c7073f77c70dd26cbcaea1d3",
+      "checkpoints/170c905ad90a73f6cddccdf5fcde039dac72b58520fe00a863f2d7b2f6c80e4d.json": "d46c9cbc5c8e95b720c3948c4946b297ed965d358e41e1c39ab1a308b65bcf3b",
+      "checkpoints/18a5a5f5c412a64da06799b1a4ca3c2836aa89894ddc1a2c8de503b006668a4d.json": "9085562a63c7c0164f9f9e9bdf117172f242279b04a74c3ad4cace14224172b9",
+      "checkpoints/349ebc6b2eb9b7e2c1838d4b5702458a013f0ad0368c07e0e3b27800874629af.json": "c7659225a65ee0fbfbece782ca25828bd283e2f74bd8e920ef92af1f6f3c9daa",
+      "checkpoints/3e8df94c392979b33e7544d4031cb53463dbb26a63e34dca34b5ac296ed82100.json": "a332a77bddb9b17ae1a731213312a871a8563cca19635491a0e06d1f865b0166",
+      "checkpoints/5490c160c4368b15a34695df50a41ff61306a4573806a5626d8f435ed3b45bdf.json": "2abcf4c781adf013b70608192d6ace2ec4cb8d0d92f7cdddb5c93765b9483b12",
+      "checkpoints/5987beb87f8ffd9342b3cbfaabc07e8d41dc14deafa0ff83ed0be9f629d9efae.json": "86d630966495b3260671af180055c433735e88509b92c745a52e1e017d6dcba5",
+      "checkpoints/61ae1049e79288cd03610f795052ba2e5183269b567f532fee6ba85274ce5028.json": "7fc8a8e713ddd9e981facba4d34e2b721176d40ba5ffe87e8513668ef69834c6",
+      "checkpoints/7056a1ab234986a20be0816c51c89dddf0d0e227377c6b271403db09fd3d88e2.json": "4c8daa76d2ecd4e644cbf5effcbd05c214aef70c4873d69cae8b91964ac20da7",
+      "checkpoints/765e5594902f239bf000c60cf39b4f9e6b9eab1bcc0b8ec01f5af628d647d869.json": "42d98788ef8f5d7e1ef83f804cdfe6ed1e11db7e045b99d091b28296275a5b6e",
+      "checkpoints/8289f72b22606375409753b417fef248b39aa96ff66ef5c994b8d339e977b65e.json": "5f916194800d429011c6cce54c373e79be00b073504d99300d166d5aa110e8a6",
+      "checkpoints/a1cff22682c8971b4ce9c83858f99772b680e71961337e0e5c8511f92c000506.json": "ce013d527f7a20856c0716160330f2268e72723f5538c73a206bfca45eaecaf7",
+      "checkpoints/a741e7c12919682a560ab2230abd6e9e6b49156c774938c62f03790e3802fb42.json": "a741e7c12919682a560ab2230abd6e9e6b49156c774938c62f03790e3802fb42",
+      "checkpoints/af2390d1819304421d4f78955d4b38d429169d3f59ea58040ed844eb748625ec.json": "137a8276a11b00944c01733745768aa7bec6578ec31cab73a74d89be63c76acc",
+      "checkpoints/d158b5f19578d6df62a36224d0cc564466189d815cb3fdc538d51a3bc4a71496.json": "30d5eb92ef7e774c55311d15638c9bb739275cc9769a0951af3c98de0a3ff54b",
+      "checkpoints/d44abdbc1efc5136f3fd3e630d2cd4aae1536695f5d3b06cd5f38fde0b70d91b.json": "c6a1ffae378be695836f7f7cffd9c82d187a7af36eaf62239975695c4287fcbf",
+      "checkpoints/d71579cea796e42888f756e9bd54ba8cd51977e3ccb335b6e05fc08e95fb0126.json": "61bf32d4bce76462d55a1e13a2b6bb9540b40aa9f73658cf5e6854d8ed9f0802",
+      "checkpoints/e933e47781095da45712f38eec5ce68e5812fa195eefc211c741abf6ae72a0c8.json": "01a4701ca7bb0052ab35d59a3961d28557107e5c9a49bff8153646a8d5a3c6cb",
+      "checkpoints/ef2fe8e57ffefc5f802ef3e2998a000148f42ed27684d93f0d5e40ca7c3e1230.json": "8a255e9171c91a607939b0711526f15d2e4717ed9e41ef36d83fef184e176017",
+      "checkpoints/f5aa5fb6bca551e27a2f7ff132a12ccd3f1446fc805e3ca541d091de88f388fb.json": "e3dea8a4e8de9236920fc6c0c65720ad6f242344c82aef7568787e6f17d588b6"
+    },
+    "producer": {
+      "name": "codex-security-plugin",
+      "version": "0.1.22"
+    },
+    "scope": {
+      "artifactsReviewed": [
+        "31 Rust source files including the D3D9 sidecar",
+        "23 frontend Svelte/TypeScript/CSS/HTML sources",
+        "11 workflow and maintenance scripts",
+        "application manifests, capability/configuration files and three dependency lockfiles",
+        "README/PLAN deployment and security claims",
+        "bundled benchmark executable hashes, Authenticode metadata and SHA256SUMS"
+      ],
+      "excludePaths": [],
+      "includePaths": [
+        "."
+      ],
+      "limitations": [
+        "GitNexus index was one commit stale; reindex failed because the local FTS extension was unavailable, so GitNexus was used only for bounded navigation and every conclusion was verified from current source.",
+        "TAC status could not be verified because the Codex Security Access connector was not logged in.",
+        "No authoritative dependency vulnerability knowledge base was supplied and network access was intentionally not used; current dependency CVEs were not evaluated.",
+        "Actual Windows DACL/MIC, final NSIS installation path, GitHub tag/environment protections and Tauri dependency internals are deployment/dependency facts not established by repository source.",
+        "Opaque bundled PE internals were not reverse engineered."
+      ],
+      "runtimeStatus": "Read-only offline source review; no application code, exploit payload or external service was executed.",
+      "summary": "Single-pass repository-wide static security audit of all 100 Git-tracked paths at revision 1df767b65b458e6b96938dbd3c6f7228a4df41c2. All application-owned Rust, Svelte/TypeScript, workflow, script and configuration sources were reviewed; non-source and opaque artifacts are explicitly excluded below while their integration/provenance was assessed.",
+      "validationMode": "Independent baseline audit, independent architecture mapping, focused investigations and one parent source validation per deduplicated finding."
+    },
+    "sealedAt": "2026-09-04T02:06:48.355619Z",
+    "startedAt": "2026-09-04T01:20:36.651471Z",
+    "status": "completed",
+    "target": {
+      "displayName": "FrameAnchor",
+      "kind": "git_revision",
+      "revision": "1df767b65b458e6b96938dbd3c6f7228a4df41c2",
+      "targetId": "target_sha256_e59acf8ddf685e0e1dec0ea2fac58620774e56c3b9a95c7ab95327c7c7d1b058"
+    },
+    "threatModel": {
+      "assets": [
+        "Windows \u7ba1\u7406\u54e1 token\u3001SeDebugPrivilege \u8207\u6392\u7a0b\u5de5\u4f5c\u5b8c\u6574\u6027\uff08src-tauri/build.rs:21-49\uff1bsrc-tauri/src/process.rs:170-203\uff1bsrc-tauri/src/autostart.rs:12-27\uff09\u3002",
+        "\u5176\u4ed6\u7a0b\u5e8f\u7684 affinity/priority \u8207 handle authority\uff08src-tauri/src/process.rs:129-207\uff1bsrc-tauri/src/priority.rs:31-85\uff09\u3002",
+        "HKLM GPU interrupt-affinity values \u8207\u986f\u793a\u88dd\u7f6e\u53ef\u7528\u6027\uff08src-tauri/src/gpu.rs:253-375\uff09\u3002",
+        "\u9ad8\u6b0a\u9650 IPC\u3001benchmark child-process execution \u8207 bundled executable integrity\uff08src-tauri/src/main.rs:145-179\uff1bsrc-tauri/src/benchmark/process_win.rs:140-164\uff09\u3002",
+        "config/session/recovery/restore state under config_dir\uff08src-tauri/src/config.rs:14-31\uff1bsrc-tauri/src/benchmark/storage.rs:15-57\uff1bsrc-tauri/src/benchmark/recovery.rs:28-52\uff09\u3002",
+        "installed/portable update integrity\u3001release token \u8207 updater signing key\uff08src-tauri/tauri.conf.json:45-55\uff1bsrc-tauri/src/update.rs:155-228\uff1b.github/workflows/release.yml:80-134\uff09\u3002",
+        "Benchmark capture freshness and ranking evidence in `%APPDATA%\\FrameAnchor\\benchmarks` must remain bound to the successful PresentMon process and immutable through selection (src-tauri/src/benchmark/runner.rs:1888-2030,2338-2426)."
+      ],
+      "assumptions": [
+        "\u7121 user context\u3001\u65e2\u6709 threat model\u3001knowledge base\u6216 SECURITY.md\uff1b\u7bc4\u570d\u70ba\u76ee\u524d repository \u5168\u90e8\u5167\u5bb9\u3002",
+        "\u7522\u54c1\u662f Windows desktop app\uff0c\u4e0d\u5047\u8a2d network service\u3001\u591a\u79df\u6236\u6216remote unauthenticated caller\u3002",
+        "APPDATA\u6b63\u5e38\u6642 effective config root \u70ba %APPDATA%\\FrameAnchor\uff1b\u7f3a\u5931\u6642 code fallback \u81f3 current-exe-dir\u6216\u76f8\u5c0d\u8def\u5f91\uff08src-tauri/src/config.rs:14-27\uff09\u3002",
+        "NSIS installMode=currentUser\u4f46 repository\u672a\u56fa\u5b9a\u7d55\u5c0d\u5b89\u88dd\u8def\u5f91\uff1bportable\u53ef\u5728\u4efb\u610f\u76ee\u9304\u3002",
+        "installed updater\u4f7f\u7528\u914d\u7f6e public key\uff1bportable custom updater\u53ea\u4f7f\u7528\u540crelease checksum\uff0c\u5169\u689d authenticity controls\u4e0d\u540c\u3002",
+        "normal UI\u5c0d benchmark executable override\u50b3 null\uff1bproduction IPC/schema\u4ecd\u63a5\u53d7\u8a72\u6b04\u4f4d\uff0c\u662f\u5426\u53ef\u5229\u7528\u9700renderer compromise\u524d\u63d0\u3002",
+        "GitHub protection\u3001actual Windows ACL/MIC\u3001Tauri/Wry internal IPC/navigation controls\u53caAction ref\u89e3\u6790\u4e0d\u5728 repository source\uff0c\u76f8\u95dc\u7d50\u8ad6\u9700\u660e\u793a\u90e8\u7f72\u524d\u63d0\u3002",
+        "GitNexus FTS index\u66f4\u65b0\u5931\u6557\uff0c\u65e2\u6709\u7d22\u5f15\u53ea\u4f5c\u5c0e\u822a\uff1bfinding evidence\u4ee5\u76ee\u524dsource\u9a57\u8b49\u3002",
+        "All production Rust, Svelte/TypeScript and repository automation/configuration sources were reviewed. Generated Tauri schemas, visual/font assets, licenses and opaque third-party executable internals are explicit exclusions; executable hashes/signatures and provenance paths were still inspected.",
+        "Current third-party dependency CVEs were not queried because the Standard workflow kept source review offline and no authoritative knowledge base was supplied.",
+        "Two watcher questions remain unresolved but not reportable: authorization checks are not bound to the same process handle opened for mutation, and FileName matching can proceed when an executable path is unreadable. No reliable attacker-to-impact path was established from source."
+      ],
+      "attackerCapabilities": [
+        "same-user medium-integrity local process \u53ef\u5efa\u7acb\u7a0b\u5e8f\u3001\u63a7\u5236\u81ea\u8eab executable path/name\uff0c\u4e14\u5728\u5e38\u898b Windows profile \u90e8\u7f72\u4e2d\u53ef\u5beb\u8a72\u5e33\u6236 APPDATA/TEMP\uff1b\u4e0d\u9810\u8a2d\u5df2\u6301\u6709 administrator token\u3002",
+        "renderer compromise actor \u53ef\u7d44\u4efb\u610f\u5df2\u8a3b\u518a IPC payload\uff0c\u4f46\u76ee\u524d source \u672a\u5efa\u7acb\u5916\u90e8 content \u6216 XSS \u5165\u53e3\uff0c\u56e0\u6b64\u6b64\u80fd\u529b\u53ea\u4f5c\u689d\u4ef6\u5f0f scenario\u3002",
+        "network actor \u4e0d\u9810\u8a2d\u80fd\u7a81\u7834 TLS\u6216\u63a7\u5236 GitHub\uff1brelease publisher\u3001Action ref\u8207third-party asset control\u5206\u5225\u4f5c\u4f4e\u6a5f\u7387 supply-chain actor\u3002",
+        "PR author \u5728\u4e00\u822c CI \u53ea\u6709 contents:read\uff0c\u4e0d\u9810\u8a2d\u80fd\u5b58\u53d6 release secrets\uff08.github/workflows/ci.yml:3-8\uff09\u3002",
+        "An author of a PE manually inspected by a developer can control export/import RVAs and name bytes, but does not thereby control the product runtime or an elevated process."
+      ],
+      "securityObjectives": [
+        "\u9ad8\u5b8c\u6574\u6027 execution\u3001scheduled-task targets\u3001temporary helpers\u3001sidecars\u8207update artifacts\u4e0d\u53ef\u7531 medium-integrity actor\u7f6e\u63db\u6216\u7531\u4e0d\u53ef\u4fe1\u641c\u5c0b\u8def\u5f91\u89e3\u6790\u3002",
+        "elevated process\u53ea\u5c0d\u4f7f\u7528\u8005\u660e\u78ba\u898f\u5247\u547d\u4e2d\u7684\u975e\u9ed1\u540d\u55ae\u7a0b\u5e8f\u64cd\u4f5c\uff0c\u4e26\u6301\u7e8c\u9632\u6b62 PID reuse\u8207\u932f\u8aa4 readback\u3002",
+        "GPU mutation\u53ea\u53ef\u91dd\u5c0d\u76ee\u524d\u5b58\u5728 adapter/\u6709\u6548LP\uff0c\u9700BasicDisplay\u3001single-flight\u3001pre-mutation snapshot\u3001readback\u3001rollback\u8207\u53ef\u4fe1 recovery state\u3002",
+        "installed/portable updates\u5fc5\u9808\u7d81\u5b9a\u53ef\u4fe1 publisher identity\u3001\u7248\u672c\u3001source revision\u8207\u5b8c\u6574 payload\uff1bsigning key\u53capublish token\u53ea\u4ea4\u7d66 immutable reviewed code\u3002",
+        "benchmark executable provenance\u5fc5\u9808\u7531\u4e0d\u96a8 executable \u540c\u6642\u53ef\u5beb\u7684 trust root\u9a57\u8b49\uff1bdebug overrides\u4e0d\u53ef\u5b58\u5728\u65bcproduction IPC\u6216\u5fc5\u9808\u53d7 allowlist\u3002",
+        "dangerous update/GPU/benchmark/history actions\u9700\u8981\u6e05\u695a\u76ee\u6a19/\u78ba\u8a8d\uff1brenderer\u4e0d\u662f\u7368\u7acb\u6388\u6b0a\u63a7\u5236\u6642\uff0cbackend\u9700\u91cd\u65b0\u9a57\u8b49\u6240\u6709\u5b89\u5168\u5c6c\u6027\u3002",
+        "Every benchmark capture used for ranking must be fresh, produced by the successful expected process, and consumed as the same immutable evidence; developer binary parsers must bound work and escape terminal controls."
+      ],
+      "summary": "FrameAnchor 0.2.6 \u662f Windows \u5c08\u7528\u3001\u55ae\u4f7f\u7528\u8005\u7684 Tauri \u684c\u9762\u5de5\u5177\u3002Svelte main WebView \u900f\u904e Tauri IPC \u63a7\u5236 requireAdministrator Rust host\uff1b\u6b63\u5e38\u555f\u52d5\u5305\u542b\u624b\u52d5/UAC \u8207 ONLOGON+HIGHEST --minimized\uff0c\u90e8\u7f72\u5305\u542b NSIS currentUser \u8207 portable\u3002\u654f\u611f\u64cd\u4f5c\u5305\u62ec\u4fee\u6539\u5176\u4ed6\u7a0b\u5e8f scheduling\u3001\u5beb HKLM GPU interrupt policy\u3001\u91cd\u555f\u986f\u793a\u88dd\u7f6e\u3001\u4ee5\u9ad8\u6b0a\u9650\u555f\u52d5 benchmark sidecars\u3001\u81ea\u6211\u66f4\u65b0\u53ca release \u7c3d\u7f72/\u767c\u5e03\u3002",
+      "trustBoundaries": [
+        "local main WebView \u5230 elevated Rust invoke_handler\uff1brenderer payload\u53ef\u5230\u9054\u898f\u5247\u3001\u81ea\u555f\u3001\u66f4\u65b0\u3001benchmark\u53caGPU mutation\uff08src-tauri/src/main.rs:145-179\uff1bsrc/lib/ipc.ts:19-65\uff09\u3002",
+        "user-profile APPDATA files \u5230 elevated startup/watcher/GPU manager\uff1bsource \u6709 serde\u8207durability controls\uff0c\u4f46\u6c92\u6709 ACL\u3001owner\u3001reparse\u6216MAC controls\uff08src-tauri/src/config.rs:14-108\uff1bsrc-tauri/src/benchmark/recovery.rs:83-110\uff09\u3002",
+        "rules \u5230\u5176\u4ed6 live processes\uff1bfull path/basename match \u7d93 blacklist/PID reuse/readback controls\u5f8c\u53d6\u5f97 privileged handles\uff08src-tauri/src/watcher.rs:455-502,703-805\uff1bsrc-tauri/src/process.rs:715-755\uff09\u3002",
+        "GPU manager \u5230 HKLM\u8207display device\uff1binteractive apply \u6709 LP/present-adapter/BasicDisplay/single-flight/journal/readback/rollback controls\uff08src-tauri/src/benchmark/manager.rs:149-265,626-687\uff09\u3002",
+        "recovery journal \u5230 startup GPU mutation\uff1bPolicyApplied/DeviceRestarted \u76f4\u63a5\u5beb snapshot \u4e26 restart\uff0c\u6c92\u6709 interactive present-adapter/BasicDisplay checks\uff08src-tauri/src/benchmark/manager.rs:341-365\uff1bsrc-tauri/src/gpu.rs:574-592\uff09\u3002",
+        "benchmark config/resources \u5230 elevated child processes\uff1bnormal assets beside executable\uff0cPresentMon/lava hashes\u7531\u540c\u76ee\u9304 manifest\u6c7a\u5b9a\uff0cD3D9\u53ea\u6aa2\u67e5\u5b58\u5728\uff0cdebug overrides\u53ef\u66f4\u63db executable\uff08src-tauri/src/benchmark/assets.rs:71-96\uff1bsrc-tauri/src/benchmark/manager.rs:1498-1523\uff09\u3002",
+        "GitHub release metadata/assets \u5230 portable replacement\uff1bcustom path\u9a57\u8b49\u7248\u672c/\u540d\u7a31/\u5927\u5c0f/checksum/ZIP structure\u5f8c\u5728\u56fa\u5b9a TEMP staging\u4e26\u4ee5PowerShell\u66ff\u63db\uff08src-tauri/src/update.rs:160-228,299-365,381-707\uff09\u3002",
+        "release workflow/action code \u5230 contents:write token\u8207updater signing key\uff08.github/workflows/release.yml:8-9,80-134\uff09\u3002",
+        "third-party benchmark releases \u5230 vendored executables\uff1brefresh script\u4e0b\u8f09\u5f8c\u624d\u7522\u751f SHA256SUMS\uff08scripts/fetch-benchmark-assets.mjs:44-108\uff09\u3002",
+        "Caller-selected PE files cross into developer diagnostic parsers and terminal output; malformed offsets/strings must remain bounded and displayed names must be inert (scripts/pe-exports.mjs:5-45\uff1bscripts/pe-imports.mjs:5-62)."
+      ]
+    }
+  },
+  "schemaVersion": "1.0"
+}

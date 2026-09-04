@@ -1,0 +1,4080 @@
+{
+  "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json",
+  "runs": [
+    {
+      "automationDetails": {
+        "id": "5368af66-9b97-4b2c-b045-be441c58cc6d"
+      },
+      "properties": {
+        "codexSecuritySchemaVersion": "1.0",
+        "codexSecurityTargetKind": "git_revision"
+      },
+      "results": [
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 500,
+                  "startLine": 460
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 706,
+                  "startLine": 673
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 586,
+                  "startLine": 557
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 652,
+                  "startLine": 650
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/commands.rs"
+                },
+                "region": {
+                  "endLine": 335,
+                  "startLine": 307
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/build.rs"
+                },
+                "region": {
+                  "endLine": 31,
+                  "startLine": 27
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence:temp.stage"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 475,
+                  "startLine": 460
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u56fa\u5b9a\u4f7f\u7528\u8005 TEMP staging \u5141\u8a31\u5728\u9a57\u8b49\u5f8c\u7f6e\u63db\u66f4\u65b0\u8173\u672c\u8207 executable\n\nportable updater \u9a57\u8b49\u8a18\u61b6\u9ad4\u4e2d\u7684 ZIP \u5f8c\uff0c\u628a executable/resources \u8207 `update.ps1` \u5beb\u5230\u56fa\u5b9a `%TEMP%\\frameanchor_update`\uff1belevated helper \u4e4b\u5f8c\u91cd\u65b0\u4f9d\u8def\u5f91\u958b\u555f\u8173\u672c\u4e26\u79fb\u52d5/\u555f\u52d5 staged executable\u3002\u4f4e\u5b8c\u6574\u6027\u540c\u5e33\u6236\u7a0b\u5e8f\u53ef\u7f6e\u63db\u9019\u4e9b\u7269\u4ef6\uff0c\u4f7f\u4efb\u610f script/PE \u4ee5\u7ba1\u7406\u54e1\u6b0a\u9650\u57f7\u884c\u3002\n\nSeverity: high\n\nCategory: Insecure temporary file\n\nWeaknesses: CWE-367, CWE-377\n\nRemediation:\n\u4e0d\u8981\u5f9e\u5171\u4eab user TEMP \u4f9d\u540d\u7a31\u57f7\u884c\u8173\u672c\u3002\u4f7f\u7528\u53d7\u4fdd\u8b77\u3001\u6bcf\u6b21\u4e0d\u53ef\u9810\u6e2c\u7684 high-only staging directory\uff0cexclusive/create-new \u4e14\u62d2\u7d55 reparse point\uff1b\u7528\u6301\u7e8c\u6301\u6709\u7684 handle \u6216 file ID \u628a\u9a57\u8b49\u3001\u7f6e\u63db\u8207\u57f7\u884c\u7d81\u5230\u540c\u4e00\u7269\u4ef6\uff0c\u4e26\u5728\u4ea4\u63db\u524d\u9a57\u8b49 executable signature\u3002\u8f03\u4f73\u65b9\u6848\u662f\u53d7\u4fdd\u8b77\u4e14\u5df2\u7c3d\u7f72\u7684 native updater/helper\u3002\n\nRemediation tests:\n- \u8b93 medium-integrity helper \u6301\u7e8c\u7f6e\u63db fixed staging paths\uff0c\u78ba\u8a8d\u65b0\u7248\u672c\u62d2\u7d55\u6216\u4ecd\u57f7\u884c trusted file ID\u3002\n- \u6e2c\u8a66 precreated directory junction\u3001file symlink/hardlink\u3001rename race\u8207script/PE replacement\u3002\n\nPreventive controls:\n- Secure temporary directory ownership/DACL/MIC\u3002\n- No-reparse exclusive file creation\u3002\n- Verify-to-use file identity binding\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:192b3efb1b950156fc25db07f2a2facfaf7b6d0b077c99e4684b597e221770cb"
+          },
+          "properties": {
+            "candidateId": "investigator-001",
+            "category": "insecure-temporary-file",
+            "confidence": "high",
+            "findingId": "csf_bb965d6251514f12d02577a1",
+            "occurrenceId": "occ_0a7bd330727ba0b4d72f6f66",
+            "severity": "high"
+          },
+          "ruleId": "privilege-escalation.portable-update-staging-race",
+          "ruleIndex": 5
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/release.yml"
+                },
+                "region": {
+                  "endLine": 127,
+                  "startLine": 122
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/release.yml"
+                },
+                "region": {
+                  "endLine": 9,
+                  "startLine": 8
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u53ef\u8b8a GitHub Action ref \u63a5\u89f8 signing key \u8207 release token\n\ntauri-action@v1\u4e0d\u662fimmutable SHA\uff0c\u537b\u76f4\u63a5\u63a5\u6536GITHUB_TOKEN\u8207TAURI signing credentials\uff1bAction compromise\u53ef\u7acakey/\u767c\u5e03signed malicious update\u3002\n\nSeverity: low\n\nCategory: Ci supply chain\n\nWeaknesses: CWE-829\n\nRemediation:\npin full SHAs\uff1b\u9694\u96e2approval-gated signing/upload job\u8207least-privilege credentials\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:1176ad592b796a22d2c27fb95837b662d3f14bd2e22272e4f11eec17ca5d0b74"
+          },
+          "properties": {
+            "candidateId": "baseline-005",
+            "category": "ci-supply-chain",
+            "confidence": "high",
+            "findingId": "csf_b24f3c44672b8c536ad9fd6e",
+            "occurrenceId": "occ_0c1c5709e94df37d7cb52313",
+            "severity": "low"
+          },
+          "ruleId": "supply-chain.mutable-release-action",
+          "ruleIndex": 9
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/pe-exports.mjs"
+                },
+                "region": {
+                  "endLine": 43,
+                  "startLine": 30
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/pe-imports.mjs"
+                },
+                "region": {
+                  "endLine": 59,
+                  "startLine": 36
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "PE \u8a3a\u65b7 parser \u53ef\u56e0\u672a\u7d42\u6b62\u540d\u7a31\u9032\u5165\u7121\u9650\u8ff4\u5708\n\n\u5169\u500b\u624b\u52d5PE\u5de5\u5177\u7684cstr\u4ee5`while (buf[end] !== 0) end++`\u6383\u63cfcaller-selected binary\uff1b\u8d8a\u754cBuffer indexing\u56deundefined\uff0c\u7f3aNUL\u6642\u689d\u4ef6\u6c38\u9060\u6210\u7acb\u4e26\u6d88\u8017CPU\u3002\n\nSeverity: low\n\nCategory: Parser denial of service\n\nWeaknesses: CWE-835\n\nRemediation:\n\u6240\u6709PE offsets/counts\u5148\u505abounds checks\uff1bcstr\u7528bounded indexOf\u4e26\u62d2\u7d55missing NUL/\u8d85\u9577string\uff1b\u9650\u5236section/name/descriptor/thunk counts\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:b6dcdc551cf0fde48c63c56c146aa235fc321231342986500e26319d684071be"
+          },
+          "properties": {
+            "candidateId": "remainder-tools-001",
+            "category": "parser-denial-of-service",
+            "confidence": "high",
+            "findingId": "csf_913ad9a90e160770ab054aab",
+            "occurrenceId": "occ_111a8aa8308bbe4c08f3ac85",
+            "severity": "low"
+          },
+          "ruleId": "parser-dos.pe-unterminated-cstring",
+          "ruleIndex": 2
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/recovery.rs"
+                },
+                "region": {
+                  "endLine": 91,
+                  "startLine": 83
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 365,
+                  "startLine": 341
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 388,
+                  "startLine": 380
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 338,
+                  "startLine": 328
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/gpu.rs"
+                },
+                "region": {
+                  "endLine": 312,
+                  "startLine": 286
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/gpu.rs"
+                },
+                "region": {
+                  "endLine": 539,
+                  "startLine": 513
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/main.rs"
+                },
+                "region": {
+                  "endLine": 100,
+                  "startLine": 97
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence:recovery.write"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/gpu.rs"
+                },
+                "region": {
+                  "endLine": 588,
+                  "startLine": 574
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u53ef\u507d\u9020\u7684 recovery/restore JSON \u9a45\u52d5 elevated HKLM GPU mutation\n\n`benchmark-recovery.json` \u5728\u555f\u52d5\u6642\u81ea\u52d5\u8655\u7406\uff0c`gpu-restore.json` \u53ef\u7531 restore IPC\u8655\u7406\uff1b\u5169\u8005\u90fd\u4f4d\u65bc\u4f7f\u7528\u8005 profile\uff0c\u53ea\u6709 serde parsing\u3002\u653b\u64ca\u8005\u53ef\u63a7\u5236 adapter identity \u8207 registry type/bytes\uff0c\u4f7f\u63d0\u5347\u7a0b\u5e8f\u5beb\u5165\u6216\u522a\u9664\u5169\u500b GPU interrupt-policy values\uff0c\u4e26\u5c0d\u76f8\u7b26\u7684\u986f\u793a\u88dd\u7f6e\u57f7\u884c disable/enable\u3002\n\nSeverity: medium\n\nCategory: External control of system setting\n\nWeaknesses: CWE-15, CWE-345\n\nRemediation:\n\u5c07 recovery/restore state \u5b58\u65bc medium-integrity \u4e0d\u53ef\u5beb\u7684 ACL/MIC \u4f4d\u7f6e\uff0c\u6216\u4ee5 only-elevated key \u5c0d\u5167\u5bb9\u505a MAC\uff1b\u8b80\u53d6\u524d\u9650\u5236\u6a94\u6848\u5927\u5c0f\u3002\u8981\u6c42 journal \u8207 snapshot instance ID \u76f8\u7b49\uff0c\u5728\u4efb\u4f55 registry write \u524d\u9a57\u8b49\u76ee\u524d present display adapter\uff1b\u9650\u5236 DevicePolicy/AssignmentSetOverride type\u3001\u9577\u5ea6\u53ca\u8a9e\u610f\uff0c\u4e26\u628a restore record \u7d81\u5b9a\u6700\u8fd1\u4e00\u6b21\u53ef\u4fe1 mutation\u3002\n\nRemediation tests:\n- \u4ee5medium-integrity\u5efa\u7acbPolicyApplied journal\u8207present GPU fixture\uff0c\u78ba\u8a8d\u65b0\u7248\u672c\u5728\u4efb\u4f55registry write\u524d\u62d2\u7d55\u3002\n- \u6e2c\u8a66oversized bytes\u3001\u975eDWORD DevicePolicy\u3001>8-byte mask\u3001mismatched IDs\u3001unknown adapter\u8207forged gpu-restore.json\u3002\n\nPreventive controls:\n- Authenticate privileged transaction journals\u3002\n- Validate target membership and exact schema before side effects\u3002\n- Bound untrusted persisted data sizes\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:0193a0927df31478b05a5402fc9574c02c7688d4ff9b34de9f959a280457169e"
+          },
+          "properties": {
+            "candidateId": "investigator-009",
+            "category": "external-control-of-system-setting",
+            "confidence": "high",
+            "findingId": "csf_c990bd59d7ff989c9bce59b3",
+            "occurrenceId": "occ_123550b3819b08854a1fa79e",
+            "severity": "medium"
+          },
+          "ruleId": "privileged-state.unauthenticated-gpu-recovery",
+          "ruleIndex": 8
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/pe-exports.mjs"
+                },
+                "region": {
+                  "endLine": 46,
+                  "startLine": 30
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/pe-imports.mjs"
+                },
+                "region": {
+                  "endLine": 61,
+                  "startLine": 36
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence:pe-output.imports"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/pe-imports.mjs"
+                },
+                "region": {
+                  "endLine": 61,
+                  "startLine": 47
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "PE \u8a3a\u65b7\u5de5\u5177\u672a\u4e2d\u548c\u540d\u7a31\u4e2d\u7684 terminal control sequences\n\nexport/import DLL\u8207function names\u7531untrusted PE bytes\u76f4\u63a5ASCII decode\uff0c\u518d\u63d2\u5165`console.log`\u3002ESC\u3001CSI\u3001OSC\u3001CR\u3001backspace\u7b49control bytes\u53ef\u7531terminal\u89e3\u8b80\uff0c\u8b93crafted PE\u507d\u9020/\u62b9\u9664diagnostic output\u6216\u6539\u8b8aterminal title\u3002\n\nSeverity: low\n\nCategory: Terminal output injection\n\nWeaknesses: CWE-150\n\nRemediation:\nEmit structured JSON or a visible escaped representation. Replace C0/C1 controls, DEL, ESC, newline, carriage return, backspace and terminal-sensitive Unicode with `\\xNN`/`\\uNNNN` before display.\n\nRemediation tests:\n- Create names containing ESC, CSI, OSC, CR, LF, backspace, DEL and C1 bytes; assert output contains only escaped printable text.\n- Snapshot JSON output and ensure a terminal cannot interpret embedded controls.\n\nPreventive controls:\n- Escape untrusted terminal output by default.\n- Prefer structured serialization for binary metadata."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:35faf4a82e6f002ca78455c37ec266949313a91195637557c94432d457b99739"
+          },
+          "properties": {
+            "candidateId": "remainder-tools-002",
+            "category": "terminal-output-injection",
+            "confidence": "high",
+            "findingId": "csf_fe0a42a7831e38707e2cb446",
+            "occurrenceId": "occ_17d9246c497106c8a42e07e4",
+            "severity": "low"
+          },
+          "ruleId": "output-injection.pe-terminal-control-sequences",
+          "ruleIndex": 1
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 294,
+                  "startLine": 248
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 364,
+                  "startLine": 299
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/commands.rs"
+                },
+                "region": {
+                  "endLine": 329,
+                  "startLine": 276
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/release.yml"
+                },
+                "region": {
+                  "endLine": 235,
+                  "startLine": 202
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "counter_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/tauri.conf.json"
+                },
+                "region": {
+                  "endLine": 54,
+                  "startLine": 47
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence:portable.checksum"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 360,
+                  "startLine": 358
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "portable update \u7f3a\u5c11\u7368\u7acb publisher signature\n\nportable updater\u5f9e\u540c\u4e00GitHub release\u53d6\u5f97ZIP\u8207`.sha256`\uff0c\u4e00\u81f4\u5373\u5b89\u88dd\uff1b\u80fd\u4fee\u6539release assets\u7684actor\u53ef\u540c\u6642\u4e0a\u50b3\u60e1\u610fZIP\u8207\u914d\u5c0dchecksum\u3002installed updater\u5df2\u914d\u7f6epublic key\uff0c\u4f46custom portable path\u6c92\u6709\u4f7f\u7528\u3002\n\nSeverity: low\n\nCategory: Insufficient update authenticity\n\nWeaknesses: CWE-494\n\nRemediation:\n\u4ee5\u65e2\u6709Tauri signing key\u6216\u5c08\u7528offline key\u5c0dportable ZIP\u8207version metadata\u7c3d\u7ae0\uff0c\u5c07verification public key\u7de8\u5165application\uff1b\u7c3d\u7f72\u5167\u5bb9\u7d81\u5b9aversion\u3001asset name\u3001digest\u53carelease channel\uff0c\u7f3a\u7c3d\u7ae0\u6216rollback\u4e00\u5f8b\u62d2\u7d55\u3002\n\nRemediation tests:\n- \u5efa\u7acb\u6e2c\u8a66release metadata\u542b\u6709\u6548checksum\u4f46\u7121signature\uff0c\u78ba\u8a8dclient\u62d2\u7d55\u3002\n- \u4fee\u6539version/name/digest\u4efb\u4e00\u6b04\u4f4d\uff0c\u78ba\u8a8dsignature binding\u5931\u6557\u3002\n\nPreventive controls:\n- Independent publisher signature for every update channel\u3002\n- Rollback/version binding\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:69bd67848eb575f0aad97c3db8bda957d10ef735b10e66f8cab9af0a9959c4de"
+          },
+          "properties": {
+            "candidateId": "baseline-004",
+            "category": "insufficient-update-authenticity",
+            "confidence": "high",
+            "findingId": "csf_a84f6fe460b6b9a8400212f8",
+            "occurrenceId": "occ_1b1a4a89ca2aa7860b34bf9a",
+            "severity": "low"
+          },
+          "ruleId": "update-integrity.portable-artifact-unsigned",
+          "ruleIndex": 11
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 500,
+                  "startLine": 460
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 706,
+                  "startLine": 673
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 586,
+                  "startLine": 557
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 652,
+                  "startLine": 650
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u56fa\u5b9a\u4f7f\u7528\u8005 TEMP staging \u5141\u8a31\u7f6e\u63db\u66f4\u65b0\u8173\u672c\u8207 executable\n\nportable update\u628aupdate.ps1\u8207staged PE\u5beb\u5165\u56fa\u5b9auser TEMP\uff0c\u518d\u4ee5pathname reopen/move/start\uff1bsame-user attacker\u53ef\u5728\u9a57\u8b49\u5f8c\u7f6e\u63db\u800c\u53d6\u5f97administrator execution\u3002\n\nSeverity: high\n\nCategory: Insecure temporary file\n\nWeaknesses: CWE-367, CWE-377\n\nRemediation:\n\u4f7f\u7528high-only\u96a8\u6a5fstaging\u3001exclusive no-reparse creation\u3001file-ID/handle binding\u8207protected signed helper\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:461a82dc5c48062696c9602f377a53abe8d75e1484d6c3800c96a0a51273051e"
+          },
+          "properties": {
+            "candidateId": "investigator-001",
+            "category": "insecure-temporary-file",
+            "confidence": "high",
+            "findingId": "csf_ff37a21d81a494256e461553",
+            "occurrenceId": "occ_1bd32d816d3f26baf3acd7a0",
+            "severity": "high"
+          },
+          "ruleId": "privilege-escalation.portable-update-staging-race",
+          "ruleIndex": 5
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/autostart.rs"
+                },
+                "region": {
+                  "endLine": 21,
+                  "startLine": 14
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "deployment"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/tauri.conf.json"
+                },
+                "region": {
+                  "endLine": 42,
+                  "startLine": 39
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/build.rs"
+                },
+                "region": {
+                  "endLine": 31,
+                  "startLine": 27
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "README.md"
+                },
+                "region": {
+                  "endLine": 70,
+                  "startLine": 68
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "README.md"
+                },
+                "region": {
+                  "endLine": 97,
+                  "startLine": 92
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u6700\u9ad8\u6b0a\u9650\u6392\u7a0b\u5de5\u4f5c\u6307\u5411\u53ef\u7531\u672a\u63d0\u5347\u7a0b\u5e8f\u7f6e\u63db\u7684 executable\n\n\u555f\u7528\u958b\u6a5f\u81ea\u555f\u5f8c\uff0cONLOGON/HIGHEST \u5de5\u4f5c\u53ea\u4fdd\u5b58\u76ee\u524d executable \u7684\u8def\u5f91\uff1b\u5728 currentUser \u6216\u4f7f\u7528\u8005\u53ef\u5beb\u7684 portable \u90e8\u7f72\u4e2d\uff0c\u540c\u5e33\u6236 medium-integrity \u7a0b\u5e8f\u53ef\u65bc\u7a0b\u5f0f\u9000\u51fa\u5f8c\u7f6e\u63db\u8a72\u6a94\uff0c\u8b93\u4e0b\u6b21\u767b\u5165\u7121 UAC \u57f7\u884c\u653b\u64ca\u8005\u7a0b\u5f0f\u3002\n\nSeverity: high\n\nCategory: Privilege escalation\n\nWeaknesses: CWE-732\n\nRemediation:\n\u4e0d\u5f97\u70ba medium-integrity \u53ef\u5beb\u4f4d\u7f6e\u5efa\u7acb HIGHEST task\u3002\u5c07\u4e3b\u7a0b\u5f0f\u6216\u6700\u5c0f signed launcher \u5b89\u88dd\u5230 machine-wide\u3001Administrators/SYSTEM \u624d\u53ef\u4fee\u6539\u7684\u76ee\u9304\uff1b\u5efa\u7acb\u53ca\u6bcf\u6b21\u66f4\u65b0\u5f8c\u9a57\u8b49\u6240\u6709\u7236\u76ee\u9304\u8207\u6a94\u6848\u7684 DACL\u3001owner\u3001reparse \u72c0\u614b\u53ca\u7c3d\u7ae0\u3002\u82e5\u505a\u4e0d\u5230\uff0c\u5c07 task \u964d\u70ba LIMITED \u6216\u62d2\u7d55\u555f\u7528\u3002\n\nRemediation tests:\n- \u5728\u53ef\u5beb\u6e2c\u8a66\u76ee\u9304\u653e\u7f6e signed benign fixture\u3001\u5efa\u7acb HIGHEST task \u5f8c\u7f6e\u63db\u6a94\u6848\uff0c\u78ba\u8a8d\u65b0\u7248\u672c\u6703\u62d2\u7d55\u5efa\u7acb\u6216\u57f7\u884c\u3002\n- \u4ee5 protected Program Files \u8207 portable writable directory \u5404\u6e2c\u4e00\u6b21\uff0c\u9a57\u8b49 ACL/reparse/signature policy\u3002\n\nPreventive controls:\n- Privileged executable \u5fc5\u9808\u4f4d\u65bc medium-integrity \u4e0d\u53ef\u5beb\u4f4d\u7f6e\u3002\n- \u6392\u7a0b\u5efa\u7acb\u524d\u5f8c\u7d81\u5b9a\u4e26\u9a57\u8b49 executable identity\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:5b686bc5134d619231c01f9c234896257df07a1dd32e86b51a5ac1e24684b9a5"
+          },
+          "properties": {
+            "candidateId": "investigator-004",
+            "category": "privilege-escalation",
+            "confidence": "high",
+            "findingId": "csf_c9391751468bd52e58bbb72f",
+            "occurrenceId": "occ_1ca4bb4e9f52d559cc659ab3",
+            "severity": "high"
+          },
+          "ruleId": "privilege-escalation.writable-scheduled-task-target",
+          "ruleIndex": 7
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/mod.rs"
+                },
+                "region": {
+                  "endLine": 127,
+                  "startLine": 114
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 1523,
+                  "startLine": 1501
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 1816,
+                  "startLine": 1782
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/process_win.rs"
+                },
+                "region": {
+                  "endLine": 149,
+                  "startLine": 140
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "production BenchmarkConfig \u53ef\u9078\u53d6\u672a\u9a57\u8b49 executable\n\nproduction IPC/session\u4e2d\u7684workloadExePath/presentmonPath\u8986\u5beb\u5be6\u969bspawn\u8def\u5f91\uff0cexisting verifier\u4e0d\u7d81\u5b9aoverride\uff1brenderer\u6216forged equivalent-session path\u53ef\u57f7\u884cadministrator PE\u3002\n\nSeverity: medium\n\nCategory: Externally controlled executable\n\nWeaknesses: CWE-73\n\nRemediation:\n\u79fb\u9664production overrides\uff1b\u56fa\u5b9a\u53d7\u4fdd\u8b77\u8def\u5f91\u4e26\u9a57\u8b49\u5be6\u969bfile identity\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:03b98004d8d8fbff301cb90afed01740a1861192935240530ad63dbc76a8bf4c"
+          },
+          "properties": {
+            "candidateId": "investigator-005",
+            "category": "externally-controlled-executable",
+            "confidence": "high",
+            "findingId": "csf_77e4a535052b2c29d01fea77",
+            "occurrenceId": "occ_1dab769115887c18a7b149c8",
+            "severity": "medium"
+          },
+          "ruleId": "privilege-escalation.benchmark-executable-overrides",
+          "ruleIndex": 3
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 500,
+                  "startLine": 460
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 706,
+                  "startLine": 673
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 586,
+                  "startLine": 557
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 652,
+                  "startLine": 650
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/commands.rs"
+                },
+                "region": {
+                  "endLine": 335,
+                  "startLine": 307
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/build.rs"
+                },
+                "region": {
+                  "endLine": 31,
+                  "startLine": 27
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence:temp.stage"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 475,
+                  "startLine": 460
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u56fa\u5b9a\u4f7f\u7528\u8005 TEMP staging \u5141\u8a31\u5728\u9a57\u8b49\u5f8c\u7f6e\u63db\u66f4\u65b0\u8173\u672c\u8207 executable\n\nportable updater \u9a57\u8b49\u8a18\u61b6\u9ad4\u4e2d\u7684 ZIP \u5f8c\uff0c\u628a executable/resources \u8207 `update.ps1` \u5beb\u5230\u56fa\u5b9a `%TEMP%\\frameanchor_update`\uff1belevated helper \u4e4b\u5f8c\u91cd\u65b0\u4f9d\u8def\u5f91\u958b\u555f\u8173\u672c\u4e26\u79fb\u52d5/\u555f\u52d5 staged executable\u3002\u4f4e\u5b8c\u6574\u6027\u540c\u5e33\u6236\u7a0b\u5e8f\u53ef\u7f6e\u63db\u9019\u4e9b\u7269\u4ef6\uff0c\u4f7f\u4efb\u610f script/PE \u4ee5\u7ba1\u7406\u54e1\u6b0a\u9650\u57f7\u884c\u3002\n\nSeverity: high\n\nCategory: Insecure temporary file\n\nWeaknesses: CWE-367, CWE-377\n\nRemediation:\n\u4e0d\u8981\u5f9e\u5171\u4eab user TEMP \u4f9d\u540d\u7a31\u57f7\u884c\u8173\u672c\u3002\u4f7f\u7528\u53d7\u4fdd\u8b77\u3001\u6bcf\u6b21\u4e0d\u53ef\u9810\u6e2c\u7684 high-only staging directory\uff0cexclusive/create-new \u4e14\u62d2\u7d55 reparse point\uff1b\u7528\u6301\u7e8c\u6301\u6709\u7684 handle \u6216 file ID \u628a\u9a57\u8b49\u3001\u7f6e\u63db\u8207\u57f7\u884c\u7d81\u5230\u540c\u4e00\u7269\u4ef6\uff0c\u4e26\u5728\u4ea4\u63db\u524d\u9a57\u8b49 executable signature\u3002\u8f03\u4f73\u65b9\u6848\u662f\u53d7\u4fdd\u8b77\u4e14\u5df2\u7c3d\u7f72\u7684 native updater/helper\u3002\n\nRemediation tests:\n- \u8b93 medium-integrity helper \u6301\u7e8c\u7f6e\u63db fixed staging paths\uff0c\u78ba\u8a8d\u65b0\u7248\u672c\u62d2\u7d55\u6216\u4ecd\u57f7\u884c trusted file ID\u3002\n- \u6e2c\u8a66 precreated directory junction\u3001file symlink/hardlink\u3001rename race\u8207script/PE replacement\u3002\n\nPreventive controls:\n- Secure temporary directory ownership/DACL/MIC\u3002\n- No-reparse exclusive file creation\u3002\n- Verify-to-use file identity binding\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:4741650d6d87120bccd1c85534a2f570606facba1f9847d6f5e21807e1b85b56"
+          },
+          "properties": {
+            "candidateId": "investigator-001",
+            "category": "insecure-temporary-file",
+            "confidence": "high",
+            "findingId": "csf_606c6a5b9ed38ddedcc92045",
+            "occurrenceId": "occ_20b25c731f51ce712a2a6022",
+            "severity": "high"
+          },
+          "ruleId": "privilege-escalation.portable-update-staging-race",
+          "ruleIndex": 5
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 1896,
+                  "startLine": 1893
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 2026,
+                  "startLine": 1958
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/metrics.rs"
+                },
+                "region": {
+                  "endLine": 194,
+                  "startLine": 94
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "benchmark \u63a5\u53d7\u6216\u91cd\u8b80\u672a\u7d81\u5b9a\u672c\u6b21 capture identity \u7684 CSV\n\nstale CSV\u522a\u9664\u5931\u6557\u53ea\u8b66\u544a\uff0cPresentMon exit code\u4e0d\u53c3\u8207success\u5224\u65b7\uff1bexisting shaped CSV\u53ef\u88ab\u7576\u6210\u672c\u6b21capture\u3002\n\nSeverity: medium\n\nCategory: Benchmark evidence integrity\n\nWeaknesses: CWE-345, CWE-367\n\nRemediation:\nstale delete\u5931\u6557\u5373fail closed\uff0c\u8981\u6c42PresentMon\u6210\u529f\uff1b\u6bcf\u6b21capture\u7528high-only\u96a8\u6a5fdirectory\u4e26\u7d81\u5b9a\u65b0file identity/creation\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:8d4a7f068926475e97ffcaba11123c914a69e8eb787b4835360a27a7ce20e99c"
+          },
+          "properties": {
+            "candidateId": "remainder-large-002",
+            "category": "benchmark-evidence-integrity",
+            "confidence": "high",
+            "findingId": "csf_b64b69b0d849b74ed9ae1ad1",
+            "occurrenceId": "occ_24696e7c080980fe724f01a8",
+            "severity": "medium"
+          },
+          "ruleId": "benchmark-integrity.untrusted-capture-files",
+          "ruleIndex": 0
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/fetch-benchmark-assets.mjs"
+                },
+                "region": {
+                  "endLine": 59,
+                  "startLine": 59
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u7b2c\u4e09\u65b9binary\u4e0b\u8f09\u5f8c\u624d\u81ea\u751fdigest\n\nrefresh script\u4e0d\u5148\u9a57\u8b49pretrusted digest/signature\uff0c\u4e0b\u8f09\u5f8c\u624d\u751f\u6210SHA256SUMS\u3002\n\nSeverity: low\n\nCategory: Supply chain\n\nWeaknesses: CWE-494\n\nRemediation:\n\u4e0b\u8f09\u5f8c\u5148\u9a57\u8b49known-good digest/publisher identity\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:f0421f6aa6f36e94432590e77d39bd2fb10dafc9cdacb42374fc1962208aa0f9"
+          },
+          "properties": {
+            "candidateId": "baseline-007",
+            "category": "supply-chain",
+            "confidence": "high",
+            "findingId": "csf_dd2193002dabdfcd3fb55220",
+            "occurrenceId": "occ_2807ebd97d22e67b561f50e7",
+            "severity": "low"
+          },
+          "ruleId": "supply-chain.unverified-benchmark-refresh",
+          "ruleIndex": 10
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/autostart.rs"
+                },
+                "region": {
+                  "endLine": 59,
+                  "startLine": 54
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/tray.rs"
+                },
+                "region": {
+                  "endLine": 90,
+                  "startLine": 79
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 706,
+                  "startLine": 695
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/commands.rs"
+                },
+                "region": {
+                  "endLine": 162,
+                  "startLine": 154
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u672a\u9650\u5b9a\u7cfb\u7d71\u5de5\u5177\u8def\u5f91\u53ef\u5728\u63d0\u5347\u5f8c\u555f\u52d5\u653b\u64ca\u8005 binary\n\nelevated host\u4ee5\u88f8\u540d\u7a31\u555f\u52d5schtasks/powershell/explorer\uff1btray startup\u81ea\u52d5\u5230\u9054schtasks\uff0c\u8f03\u65e9\u53ef\u5beb\u641c\u5c0b\u76ee\u9304\u53ef\u7a2e\u690d\u540c\u540dPE\u3002\n\nSeverity: high\n\nCategory: Untrusted search path\n\nWeaknesses: CWE-426\n\nRemediation:\n\u4f7f\u7528System32\u53ef\u4fe1\u7d55\u5c0d\u8def\u5f91\u8207\u53d7\u4fdd\u8b77child CWD\uff0c\u6216\u76f4\u63a5Windows API\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:92acf105368c8c45362a1b08a43d1a72c9ada6fe070d38410b5eb6ca65fc163d"
+          },
+          "properties": {
+            "candidateId": "investigator-003",
+            "category": "untrusted-search-path",
+            "confidence": "high",
+            "findingId": "csf_786de709998224acac10833a",
+            "occurrenceId": "occ_2dc012d1b5ddcc93cbab25eb",
+            "severity": "high"
+          },
+          "ruleId": "privilege-escalation.untrusted-system-tool-search",
+          "ruleIndex": 6
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/release.yml"
+                },
+                "region": {
+                  "endLine": 127,
+                  "startLine": 122
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/release.yml"
+                },
+                "region": {
+                  "endLine": 9,
+                  "startLine": 8
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/release.yml"
+                },
+                "region": {
+                  "endLine": 25,
+                  "startLine": 23
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u53ef\u8b8a GitHub Action ref \u76f4\u63a5\u63a5\u89f8 updater signing key \u8207 release token\n\n`tauri-apps/tauri-action@v1` \u4e0d\u662fimmutable commit SHA\uff0c\u537b\u5728contents:write job\u4e2d\u76f4\u63a5\u63a5\u6536GITHUB_TOKEN\u3001TAURI_SIGNING_PRIVATE_KEY\u53capassword\uff1bAction ref\u88ab\u4e0a\u6e38\u79fb\u52d5\u6216\u63a7\u5236\u6642\u53ef\u7aca\u53d6key\u4e26\u767c\u5e03\u6709\u6548\u7c3d\u7ae0\u60e1\u610f\u66f4\u65b0\u3002\n\nSeverity: low\n\nCategory: Ci supply chain\n\nWeaknesses: CWE-829\n\nRemediation:\n\u5c07\u6240\u6709Actions\u56fa\u5b9a\u5230\u7d93\u5be9\u6838\u5b8c\u6574commit SHA\u4e26\u7528Dependabot/\u4eba\u5de5review\u66f4\u65b0\uff1b\u628auntrusted build/test\u8207sign/upload\u62c6\u6210jobs\uff0c\u53ea\u6709environment-approved\u6700\u7d42job\u53ef\u53d6\u5f97private key\u8207least-privilege release token\uff1b\u512a\u5148\u4f7f\u7528\u77ed\u671f/\u786c\u9ad4\u6216\u53d7\u63a7signing service\u3002\n\nRemediation tests:\n- \u4ee5policy/linter\u62d2\u7d55\u975e40-hex SHA\u7684uses refs\u3002\n- \u9a57\u8b49build job\u4e0d\u53ef\u8b80signing secrets\uff0c\u53ea\u6709approval-gated signer\u53ef\u8b80\u3002\n\nPreventive controls:\n- Immutable action pinning\u3002\n- Credential isolation and least privilege\u3002\n- Protected release environments\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:9af2caac17911dfe5f252fe464a9c46f942fa98fbe0dcdbe7cc810fb50a09461"
+          },
+          "properties": {
+            "candidateId": "baseline-005",
+            "category": "ci-supply-chain",
+            "confidence": "high",
+            "findingId": "csf_5f5d3d47d122ed3482b61af3",
+            "occurrenceId": "occ_2e8f9101c851747066d996e6",
+            "severity": "low"
+          },
+          "ruleId": "supply-chain.mutable-release-action",
+          "ruleIndex": 9
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/autostart.rs"
+                },
+                "region": {
+                  "endLine": 54,
+                  "startLine": 54
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u672a\u9650\u5b9a\u7cfb\u7d71\u5de5\u5177\u8def\u5f91\u53ef\u555f\u52d5\u653b\u64ca\u8005binary\n\nelevated host\u4ee5\u88f8\u540d\u7a31\u89e3\u6790schtasks/powershell/explorer\uff0ctray startup\u81ea\u52d5\u5230\u9054schtasks\u3002\n\nSeverity: high\n\nCategory: Privilege escalation\n\nWeaknesses: CWE-426\n\nRemediation:\n\u4f7f\u7528System32\u53ef\u4fe1\u7d55\u5c0d\u8def\u5f91\u6216Windows API\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:c5d6651a86023117873ef77a3e1ea1f1774bebf01c8eada06458cf8a5ff05381"
+          },
+          "properties": {
+            "candidateId": "investigator-003",
+            "category": "privilege-escalation",
+            "confidence": "high",
+            "findingId": "csf_c2dc578c1e37a72bddd20f20",
+            "occurrenceId": "occ_345d7acc9f7f9381aa614ead",
+            "severity": "high"
+          },
+          "ruleId": "privilege-escalation.untrusted-system-tool-search",
+          "ruleIndex": 6
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 294,
+                  "startLine": 248
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "portable update\u7f3a\u7368\u7acbpublisher signature\n\nsame-release ZIP/checksum\u53ef\u7531publisher-side actor\u4e00\u8d77\u66ff\u63db\u3002\n\nSeverity: low\n\nCategory: Insufficient update authenticity\n\nWeaknesses: CWE-494\n\nRemediation:\n\u4ee5embedded public key\u9a57\u8b49portable artifact\u8207metadata signature\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:430eae88f6a156152f72982c2132d634ddafb6573eeca86084cdcf60858073c0"
+          },
+          "properties": {
+            "candidateId": "baseline-004",
+            "category": "insufficient-update-authenticity",
+            "confidence": "high",
+            "findingId": "csf_dc4264e19d78d962f7a22895",
+            "occurrenceId": "occ_3519cad6bc06711d1baf8de2",
+            "severity": "low"
+          },
+          "ruleId": "update-integrity.portable-artifact-unsigned",
+          "ruleIndex": 11
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 500,
+                  "startLine": 460
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 706,
+                  "startLine": 673
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u56fa\u5b9aTEMP staging\u5141\u8a31\u7f6e\u63dbupdate script\u8207PE\n\nportable updater\u5728\u56fa\u5b9auser TEMP\u5beb\u5165\u5f8c\u91cd\u65b0\u4f9dpath\u57f7\u884c/\u79fb\u52d5/\u555f\u52d5\uff0c\u672a\u7d81\u5b9a\u9a57\u8b49\u5f8cfile identity\u3002\n\nSeverity: high\n\nCategory: Insecure temporary file\n\nWeaknesses: CWE-367, CWE-377\n\nRemediation:\n\u4f7f\u7528high-only\u96a8\u6a5fno-reparse staging\u8207handle/file-ID binding\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:7e38163af42e8a5f617b09a261aa6db9201308e753e8fd79c99d31e7dcb2de74"
+          },
+          "properties": {
+            "candidateId": "investigator-001",
+            "category": "insecure-temporary-file",
+            "confidence": "high",
+            "findingId": "csf_3cdd30f1c5be25214dc84964",
+            "occurrenceId": "occ_35eb3de203783f1048c19728",
+            "severity": "high"
+          },
+          "ruleId": "privilege-escalation.portable-update-staging-race",
+          "ruleIndex": 5
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/autostart.rs"
+                },
+                "region": {
+                  "endLine": 21,
+                  "startLine": 14
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/tauri.conf.json"
+                },
+                "region": {
+                  "endLine": 42,
+                  "startLine": 39
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/build.rs"
+                },
+                "region": {
+                  "endLine": 31,
+                  "startLine": 27
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u6700\u9ad8\u6b0a\u9650\u6392\u7a0b\u5de5\u4f5c\u6307\u5411\u53ef\u7531\u672a\u63d0\u5347\u7a0b\u5e8f\u7f6e\u63db\u7684 executable\n\nONLOGON/HIGHEST \u5de5\u4f5c\u4fdd\u5b58\u53ef\u5beb current_exe \u8def\u5f91\uff1bsplit-admin same-user attacker \u53ef\u5728\u7a0b\u5f0f\u9000\u51fa\u5f8c\u7f6e\u63db\u4e26\u65bc\u767b\u5165\u7372\u5f97\u7121 UAC administrator execution\u3002\n\nSeverity: high\n\nCategory: Privilege escalation\n\nWeaknesses: CWE-732\n\nRemediation:\n\u53ea\u5141\u8a31\u53d7\u4fdd\u8b77\u3001\u5df2\u9a57\u8b49\u7684 machine-wide executable/stub \u4f5c\u70ba HIGHEST task target\uff1b\u9a57\u8b49\u5b8c\u6574\u8def\u5f91 DACL/owner/reparse/signature\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:f28b5cbdaefbd4f921dd33f7770a19ba0adefe2aa0e42309a03bf240fa9bb2fe"
+          },
+          "properties": {
+            "candidateId": "investigator-004",
+            "category": "privilege-escalation",
+            "confidence": "high",
+            "findingId": "csf_e36f252f8eb8255f0dcfa65f",
+            "occurrenceId": "occ_369152d4c3a5dcf9e3214abc",
+            "severity": "high"
+          },
+          "ruleId": "privilege-escalation.writable-scheduled-task-target",
+          "ruleIndex": 7
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/fetch-benchmark-assets.mjs"
+                },
+                "region": {
+                  "endLine": 64,
+                  "startLine": 59
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/fetch-benchmark-assets.mjs"
+                },
+                "region": {
+                  "endLine": 108,
+                  "startLine": 67
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u7b2c\u4e09\u65b9 benchmark executable \u4e0b\u8f09\u5f8c\u624d\u5f9e\u81ea\u8eab\u7522\u751f digest\n\nrefresh script\u4e0d\u5148\u9a57\u8b49known-good digest/signature\uff0c\u4e0b\u8f09\u5f8c\u624d\u751f\u6210SHA256SUMS\uff1bupstream replacement\u53ef\u5728manual refresh\u5f8c\u9032\u5165elevated runtime\u3002\n\nSeverity: low\n\nCategory: Build supply chain\n\nWeaknesses: CWE-494\n\nRemediation:\n\u4e0b\u8f09\u5f8c\u5148\u5c0dpretrusted digest\u6216publisher identity\u9a57\u8b49\uff1bdigest\u66f4\u65b0\u7368\u7acbreview\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:d69abd531a0b9480313df99e18e11cba1542d719e1a8797332feb02561163355"
+          },
+          "properties": {
+            "candidateId": "baseline-007",
+            "category": "build-supply-chain",
+            "confidence": "high",
+            "findingId": "csf_a5660cb1b561fd4b7bf5225b",
+            "occurrenceId": "occ_3aa9f0b008bbb6895a22d8e5",
+            "severity": "low"
+          },
+          "ruleId": "supply-chain.unverified-benchmark-refresh",
+          "ruleIndex": 10
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/assets.rs"
+                },
+                "region": {
+                  "endLine": 96,
+                  "startLine": 71
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/process_win.rs"
+                },
+                "region": {
+                  "endLine": 149,
+                  "startLine": 140
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u53ef\u5bebmanifest\u8207D3D9 exists-only\u7121\u6cd5\u4fdd\u8b77elevated sidecars\n\nmanifest\u8207sidecars\u5171\u7f6e\u53ef\u5beb\uff0cD3D9\u53eaexists\uff0cbenchmark\u53ef\u57f7\u884cattacker PE\u3002\n\nSeverity: medium\n\nCategory: Missing executable integrity\n\nWeaknesses: CWE-353\n\nRemediation:\n\u5d4c\u5165trust root\u3001\u9a57\u8b49\u56fa\u5b9a\u4e09\u500bsidecars\u4e26\u4fdd\u8b77resource tree\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:7ecf19556ec340cdbc3d562e026aaf1e40f06e22879e402a9e60051314b45700"
+          },
+          "properties": {
+            "candidateId": "investigator-007",
+            "category": "missing-executable-integrity",
+            "confidence": "high",
+            "findingId": "csf_69a29cdc2a8b8890016ee6aa",
+            "occurrenceId": "occ_3f6d7d64431be36aa258bda4",
+            "severity": "medium"
+          },
+          "ruleId": "privilege-escalation.mutable-benchmark-sidecars",
+          "ruleIndex": 4
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/assets.rs"
+                },
+                "region": {
+                  "endLine": 96,
+                  "startLine": 71
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/assets.rs"
+                },
+                "region": {
+                  "endLine": 128,
+                  "startLine": 99
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/resources/benchmark/SHA256SUMS"
+                },
+                "region": {
+                  "endLine": 7,
+                  "startLine": 1
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 1816,
+                  "startLine": 1782
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 1902,
+                  "startLine": 1898
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/process_win.rs"
+                },
+                "region": {
+                  "endLine": 149,
+                  "startLine": 140
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "deployment"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/tauri.conf.json"
+                },
+                "region": {
+                  "endLine": 42,
+                  "startLine": 39
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u53ef\u4fee\u6539\u7684\u540c\u76ee\u9304 manifest \u8207\u672a\u9a57\u8b49 D3D9 \u7121\u6cd5\u4fdd\u8b77 elevated benchmark sidecars\n\nPresentMon/lava\u7684SHA256SUMS\u8207binaries\u5171\u7f6e\uff0cparser\u4e0d\u5f37\u5236\u56fa\u5b9aentries\uff1b\u540c\u6642\u53ef\u5beb\u5169\u8005\u7684attacker\u53ef\u6539manifest\u6216\u8b93\u5b83\u53ea\u9a57\u8b49\u7121\u95dc\u6a94\u3002D3D9\u66f4\u53ea\u505aexists\u6aa2\u67e5\u3002benchmark\u4e4b\u5f8c\u76f4\u63a5\u4ee5administrator token\u57f7\u884c\u9078\u5b9asidecars\u3002\n\nSeverity: medium\n\nCategory: Missing executable integrity\n\nWeaknesses: CWE-353\n\nRemediation:\n\u628a\u6bcf\u500b\u6b63\u5f0fsidecar\u7684digest\u6216verification public key\u5d4c\u5165\u53d7\u4fe1\u4efbmain executable\uff0c\u660e\u78ba\u8981\u6c42\u4e26\u9a57\u8b49\u56fa\u5b9a\u4e09\u500b\u540d\u7a31\u3001protected absolute paths\u53ca\u540c\u4e00file identity\uff1b\u70baD3D9\u7522\u751fper-build digest/signature\u3002\u5c07app/resources\u5b89\u88dd\u5230medium-integrity\u4e0d\u53ef\u5beb\u4f4d\u7f6e\uff0c\u62d2\u7d55reparse points\u4e26\u5728spawn\u524d\u6700\u5f8c\u9a57\u8b49\u3002\n\nRemediation tests:\n- \u540c\u6642\u66ff\u63dbPresentMon\u8207SHA256SUMS\uff0c\u78ba\u8a8d\u65b0\u7248\u672c\u4ecd\u4ee5embedded trust root\u62d2\u7d55\u3002\n- \u5c07manifest\u6539\u70ba\u53ea\u5217\u7121\u95dc\u6a94\u6848\uff0c\u78ba\u8a8d\u62d2\u7d55\u3002\n- \u66ff\u63dbD3D9\u5f8c\u78ba\u8a8ddigest/signature failure\u4e14\u7121child\u3002\n\nPreventive controls:\n- Separate the trust root from writable sidecars\u3002\n- Require exact executable set and exact file identities\u3002\n- Protect resource tree ACL/MIC\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:a6ed6972506860390bbbb46ae1ffac6e978cf57f079f6fded45c6c5e2914981e"
+          },
+          "properties": {
+            "candidateId": "investigator-007",
+            "category": "missing-executable-integrity",
+            "confidence": "high",
+            "findingId": "csf_4efce49f5f7d5a3f4191482d",
+            "occurrenceId": "occ_42bcdd02b63edf08e7bfccbd",
+            "severity": "medium"
+          },
+          "ruleId": "privilege-escalation.mutable-benchmark-sidecars",
+          "ruleIndex": 4
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/autostart.rs"
+                },
+                "region": {
+                  "endLine": 59,
+                  "startLine": 54
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/tray.rs"
+                },
+                "region": {
+                  "endLine": 90,
+                  "startLine": 79
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 706,
+                  "startLine": 695
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/commands.rs"
+                },
+                "region": {
+                  "endLine": 162,
+                  "startLine": 154
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/build.rs"
+                },
+                "region": {
+                  "endLine": 31,
+                  "startLine": 27
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u672a\u9650\u5b9a\u7cfb\u7d71\u5de5\u5177\u8def\u5f91\u53ef\u5728\u63d0\u5347\u5f8c\u555f\u52d5\u653b\u64ca\u8005 binary\n\n\u63d0\u5347\u6b0a\u9650\u7684 host \u4ee5\u88f8\u540d\u7a31\u555f\u52d5 schtasks\u3001powershell \u8207 explorer\uff1btray \u521d\u59cb\u5316\u6703\u7121\u689d\u4ef6\u67e5\u8a62 schtasks\u3002\u82e5 application/current/search directory \u53ef\u5beb\uff0c\u653b\u64ca\u8005\u653e\u7f6e\u7684\u540c\u540d executable \u53ef\u5148\u65bc\u771f\u6b63\u7cfb\u7d71\u5de5\u5177\u88ab\u89e3\u6790\u4e26\u7e7c\u627f administrator token\u3002\n\nSeverity: high\n\nCategory: Untrusted search path\n\nWeaknesses: CWE-426\n\nRemediation:\n\u4ee5 GetSystemDirectoryW \u7b49\u53ef\u4fe1 API \u7d44\u51fa `%SystemRoot%\\System32\\schtasks.exe`\u3001`explorer.exe` \u8207 Windows PowerShell \u7684\u7d55\u5c0d\u8def\u5f91\uff0c\u56fa\u5b9a child current directory \u5230\u53d7\u4fdd\u8b77\u4f4d\u7f6e\uff1b\u53ef\u884c\u6642\u6539\u7528 Windows API\uff0c\u4e0d\u4f9d\u8cf4 PATH/PATHEXT/application/current directory\u3002\n\nRemediation tests:\n- \u5728\u6e2c\u8a66 PATH/current/application directory \u653e\u7f6e\u540c\u540d fixture\uff0c\u78ba\u8a8d\u65b0\u7248\u672c\u4ecd\u53ea\u57f7\u884c\u89e3\u6790\u5f8c\u7684 System32 file ID\u3002\n- \u6e2c\u8a66 WOW64/System32 \u8def\u5f91\u89e3\u6790\u8207\u4e0d\u5b58\u5728\u6642 fail closed\u3002\n\nPreventive controls:\n- \u6240\u6709 privileged child selectors \u4f7f\u7528 validated absolute paths\u3002\n- \u4e0d\u8981\u7e7c\u627f\u4e0d\u53ef\u4fe1 child CWD/PATH\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:67d83eeb7357f57cb1b12862657f451fa55a3207e80c05ae84d6c9f14f82bd81"
+          },
+          "properties": {
+            "candidateId": "investigator-003",
+            "category": "untrusted-search-path",
+            "confidence": "high",
+            "findingId": "csf_3b8b7618758dd3a186308b0a",
+            "occurrenceId": "occ_519dd58ffb168795bd6a00a6",
+            "severity": "high"
+          },
+          "ruleId": "privilege-escalation.untrusted-system-tool-search",
+          "ruleIndex": 6
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 460,
+                  "startLine": 460
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u56fa\u5b9aTEMP staging\u5141\u8a31\u7f6e\u63dbupdate script\u8207PE\n\nportable updater\u5728\u56fa\u5b9auser TEMP\u5beb\u5165\u5f8c\u91cd\u65b0\u4f9dpath\u57f7\u884c/\u79fb\u52d5/\u555f\u52d5\uff0c\u672a\u7d81\u5b9a\u9a57\u8b49\u5f8cfile identity\u3002\n\nSeverity: high\n\nCategory: Privilege escalation\n\nWeaknesses: CWE-367, CWE-377\n\nRemediation:\n\u4f7f\u7528high-only\u96a8\u6a5fno-reparse staging\u8207handle/file-ID binding\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:8fa288c7554606da019e55130a1cfb53c77bc22b9f387f63779a7c5b211b2d13"
+          },
+          "properties": {
+            "candidateId": "investigator-001",
+            "category": "privilege-escalation",
+            "confidence": "high",
+            "findingId": "csf_48e1f53a8f6bd4b756ccac2b",
+            "occurrenceId": "occ_528a6c60d9f76f19235e7f45",
+            "severity": "high"
+          },
+          "ruleId": "privilege-escalation.portable-update-staging-race",
+          "ruleIndex": 5
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/fetch-benchmark-assets.mjs"
+                },
+                "region": {
+                  "endLine": 108,
+                  "startLine": 59
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u7b2c\u4e09\u65b9binary\u4e0b\u8f09\u5f8c\u624d\u81ea\u751fdigest\n\nrefresh script\u4e0d\u5148\u9a57\u8b49pretrusted digest/signature\uff0c\u4e0b\u8f09\u5f8c\u624d\u751f\u6210SHA256SUMS\u3002\n\nSeverity: low\n\nCategory: Build supply chain\n\nWeaknesses: CWE-494\n\nRemediation:\n\u4e0b\u8f09\u5f8c\u5148\u9a57\u8b49known-good digest/publisher identity\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:b8c83ce8faffa6e1115baa1374dcf4b8fc1ed6009f68dc2638e5914883ab7ed1"
+          },
+          "properties": {
+            "candidateId": "baseline-007",
+            "category": "build-supply-chain",
+            "confidence": "high",
+            "findingId": "csf_a9a70cefc2c060bcb6b814f2",
+            "occurrenceId": "occ_5cac7e4405751dab255f395f",
+            "severity": "low"
+          },
+          "ruleId": "supply-chain.unverified-benchmark-refresh",
+          "ruleIndex": 10
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/assets.rs"
+                },
+                "region": {
+                  "endLine": 71,
+                  "startLine": 71
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u53ef\u5bebmanifest\u8207D3D9 exists-only\u7121\u6cd5\u4fdd\u8b77elevated sidecars\n\nmanifest\u8207sidecars\u5171\u7f6e\u53ef\u5beb\uff0cD3D9\u53eaexists\uff0c\u4f7f\u7528\u8005benchmark\u53ef\u57f7\u884cattacker PE\u3002\n\nSeverity: medium\n\nCategory: Privilege escalation\n\nWeaknesses: CWE-353\n\nRemediation:\n\u5d4c\u5165trust root\u3001\u9a57\u8b49\u56fa\u5b9a\u4e09\u500bsidecars\u4e26\u4fdd\u8b77resource tree\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:cf7c021d8529ac794a8628156a8e1239f6702bb7f5b42c7342a54280108d41bd"
+          },
+          "properties": {
+            "candidateId": "investigator-007",
+            "category": "privilege-escalation",
+            "confidence": "high",
+            "findingId": "csf_86c5eac3a98339b51609e964",
+            "occurrenceId": "occ_5d9296798f5e76b9f5edae98",
+            "severity": "medium"
+          },
+          "ruleId": "privilege-escalation.mutable-benchmark-sidecars",
+          "ruleIndex": 4
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/mod.rs"
+                },
+                "region": {
+                  "endLine": 127,
+                  "startLine": 114
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/ipc.rs"
+                },
+                "region": {
+                  "endLine": 168,
+                  "startLine": 160
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 768,
+                  "startLine": 703
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 1523,
+                  "startLine": 1501
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 1816,
+                  "startLine": 1782
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 1902,
+                  "startLine": 1898
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/process_win.rs"
+                },
+                "region": {
+                  "endLine": 149,
+                  "startLine": 140
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "production BenchmarkConfig \u53ef\u9078\u53d6\u672a\u9a57\u8b49 executable \u4f9b elevated runner \u57f7\u884c\n\n`workloadExePath` \u8207 `presentmonPath` \u662f production IPC\u53casession schema\u6b04\u4f4d\uff1bresolver\u76f4\u63a5\u8986\u5beb\u8981\u57f7\u884c\u7684paths\uff0c\u800c verifier\u6c92\u6709\u9a57\u8b49\u5be6\u969b override\u3002renderer code\u53ef\u76f4\u63a5\u6307\u5b9a\uff0csame-user attacker\u4e5f\u53ef\u507d\u9020\u7b26\u5408Equivalent\u5951\u7d04\u7684session\u4e26\u7b49\u5f85\u4f7f\u7528\u8005\u555f\u52d5\u5b89\u5168\u9a57\u8b49\u3002\n\nSeverity: medium\n\nCategory: Externally controlled executable\n\nWeaknesses: CWE-73\n\nRemediation:\n\u5f9e production IPC\u8207persisted schema\u79fb\u9664 executable override\uff0c\u50c5\u7528 `cfg(test)`/test dependency injection\u3002\u5f8c\u7aef\u56fa\u5b9a\u89e3\u6790\u53d7\u4fdd\u8b77root\u4e0b\u7684sidecars\uff0c\u4e26\u5c0drunner\u5be6\u969b\u8981spawn\u7684\u540c\u4e00file identity\u9a57\u8b49 embedded digest/signature\u3002\u82e5\u7522\u54c1\u78ba\u9700custom workload\uff0c\u4e0d\u5f97\u4ee5host administrator token\u57f7\u884c\u3002\n\nRemediation tests:\n- \u5411release build IPC\u50b3\u975enull override\uff0c\u78ba\u8a8d\u5f8c\u7aef\u62d2\u7d55\u4e14\u6c92\u6709\u5efa\u7acbchild\u3002\n- \u7ac4\u6539session config\u5169\u6b04\u5f8c\u89f8\u767cEquivalent validation\uff0c\u78ba\u8a8d\u5728spawn\u524dfail closed\u3002\n\nPreventive controls:\n- Test-only dependency injection must not cross production IPC\u3002\n- Integrity checks must bind to the exact executed file identity\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:df18bf2d238ea6fd572586a3927c6ab9b1c6fe59d7b18cf0d4a0962874869e4a"
+          },
+          "properties": {
+            "candidateId": "investigator-005",
+            "category": "externally-controlled-executable",
+            "confidence": "high",
+            "findingId": "csf_be3bd72914be0064d3c66d6f",
+            "occurrenceId": "occ_5ea74d0d141bdf5471791e0c",
+            "severity": "medium"
+          },
+          "ruleId": "privilege-escalation.benchmark-executable-overrides",
+          "ruleIndex": 3
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/autostart.rs"
+                },
+                "region": {
+                  "endLine": 21,
+                  "startLine": 14
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "deployment"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/tauri.conf.json"
+                },
+                "region": {
+                  "endLine": 42,
+                  "startLine": 39
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u6700\u9ad8\u6b0a\u9650\u6392\u7a0b\u5de5\u4f5c\u6307\u5411\u53ef\u7f6e\u63db executable\n\nONLOGON/HIGHEST task\u4fdd\u5b58\u53ef\u5bebcurrent_exe pathname\uff1bsplit-admin same-user attacker\u53ef\u7f6e\u63db\u5f8c\u65bc\u767b\u5165\u53d6\u5f97administrator execution\u3002\n\nSeverity: high\n\nCategory: Privilege escalation\n\nWeaknesses: CWE-732\n\nRemediation:\n\u4f7f\u7528\u53d7\u4fdd\u8b77signed machine-wide target\u4e26\u9a57\u8b49\u5b8c\u6574path ACL/owner/reparse\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:2446abc577185bb0e6ef73e29014d74c308d4eb55bdce525a50837d55c81c298"
+          },
+          "properties": {
+            "candidateId": "investigator-004",
+            "category": "privilege-escalation",
+            "confidence": "high",
+            "findingId": "csf_d6e57338f1994b6835d71851",
+            "occurrenceId": "occ_641db41b3d4af60f18dc0000",
+            "severity": "high"
+          },
+          "ruleId": "privilege-escalation.writable-scheduled-task-target",
+          "ruleIndex": 7
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/assets.rs"
+                },
+                "region": {
+                  "endLine": 96,
+                  "startLine": 71
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/assets.rs"
+                },
+                "region": {
+                  "endLine": 128,
+                  "startLine": 99
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/resources/benchmark/SHA256SUMS"
+                },
+                "region": {
+                  "endLine": 7,
+                  "startLine": 1
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 1816,
+                  "startLine": 1782
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 1902,
+                  "startLine": 1898
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/process_win.rs"
+                },
+                "region": {
+                  "endLine": 149,
+                  "startLine": 140
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "deployment"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/tauri.conf.json"
+                },
+                "region": {
+                  "endLine": 42,
+                  "startLine": 39
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u53ef\u4fee\u6539\u7684\u540c\u76ee\u9304 manifest \u8207\u672a\u9a57\u8b49 D3D9 \u7121\u6cd5\u4fdd\u8b77 elevated benchmark sidecars\n\nPresentMon/lava\u7684SHA256SUMS\u8207binaries\u5171\u7f6e\uff0cparser\u4e0d\u5f37\u5236\u56fa\u5b9aentries\uff1b\u540c\u6642\u53ef\u5beb\u5169\u8005\u7684attacker\u53ef\u6539manifest\u6216\u8b93\u5b83\u53ea\u9a57\u8b49\u7121\u95dc\u6a94\u3002D3D9\u66f4\u53ea\u505aexists\u6aa2\u67e5\u3002benchmark\u4e4b\u5f8c\u76f4\u63a5\u4ee5administrator token\u57f7\u884c\u9078\u5b9asidecars\u3002\n\nSeverity: medium\n\nCategory: Missing executable integrity\n\nWeaknesses: CWE-353\n\nRemediation:\n\u628a\u6bcf\u500b\u6b63\u5f0fsidecar\u7684digest\u6216verification public key\u5d4c\u5165\u53d7\u4fe1\u4efbmain executable\uff0c\u660e\u78ba\u8981\u6c42\u4e26\u9a57\u8b49\u56fa\u5b9a\u4e09\u500b\u540d\u7a31\u3001protected absolute paths\u53ca\u540c\u4e00file identity\uff1b\u70baD3D9\u7522\u751fper-build digest/signature\u3002\u5c07app/resources\u5b89\u88dd\u5230medium-integrity\u4e0d\u53ef\u5beb\u4f4d\u7f6e\uff0c\u62d2\u7d55reparse points\u4e26\u5728spawn\u524d\u6700\u5f8c\u9a57\u8b49\u3002\n\nRemediation tests:\n- \u540c\u6642\u66ff\u63dbPresentMon\u8207SHA256SUMS\uff0c\u78ba\u8a8d\u65b0\u7248\u672c\u4ecd\u4ee5embedded trust root\u62d2\u7d55\u3002\n- \u5c07manifest\u6539\u70ba\u53ea\u5217\u7121\u95dc\u6a94\u6848\uff0c\u78ba\u8a8d\u62d2\u7d55\u3002\n- \u66ff\u63dbD3D9\u5f8c\u78ba\u8a8ddigest/signature failure\u4e14\u7121child\u3002\n\nPreventive controls:\n- Separate the trust root from writable sidecars\u3002\n- Require exact executable set and exact file identities\u3002\n- Protect resource tree ACL/MIC\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:99aeef16da55fdf50973f405f5952c3f8721c619289ebc63bfa4eb3f61dda289"
+          },
+          "properties": {
+            "candidateId": "investigator-007",
+            "category": "missing-executable-integrity",
+            "confidence": "high",
+            "findingId": "csf_fb5906889252e77e7fb1a1cb",
+            "occurrenceId": "occ_664afee7a3b3c2d139ea50a7",
+            "severity": "medium"
+          },
+          "ruleId": "privilege-escalation.mutable-benchmark-sidecars",
+          "ruleIndex": 4
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/release.yml"
+                },
+                "region": {
+                  "endLine": 127,
+                  "startLine": 122
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/release.yml"
+                },
+                "region": {
+                  "endLine": 9,
+                  "startLine": 8
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/release.yml"
+                },
+                "region": {
+                  "endLine": 25,
+                  "startLine": 23
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u53ef\u8b8a GitHub Action ref \u76f4\u63a5\u63a5\u89f8 updater signing key \u8207 release token\n\n`tauri-apps/tauri-action@v1` \u4e0d\u662fimmutable commit SHA\uff0c\u537b\u5728contents:write job\u4e2d\u76f4\u63a5\u63a5\u6536GITHUB_TOKEN\u3001TAURI_SIGNING_PRIVATE_KEY\u53capassword\uff1bAction ref\u88ab\u4e0a\u6e38\u79fb\u52d5\u6216\u63a7\u5236\u6642\u53ef\u7aca\u53d6key\u4e26\u767c\u5e03\u6709\u6548\u7c3d\u7ae0\u60e1\u610f\u66f4\u65b0\u3002\n\nSeverity: low\n\nCategory: Ci supply chain\n\nWeaknesses: CWE-829\n\nRemediation:\n\u5c07\u6240\u6709Actions\u56fa\u5b9a\u5230\u7d93\u5be9\u6838\u5b8c\u6574commit SHA\u4e26\u7528Dependabot/\u4eba\u5de5review\u66f4\u65b0\uff1b\u628auntrusted build/test\u8207sign/upload\u62c6\u6210jobs\uff0c\u53ea\u6709environment-approved\u6700\u7d42job\u53ef\u53d6\u5f97private key\u8207least-privilege release token\uff1b\u512a\u5148\u4f7f\u7528\u77ed\u671f/\u786c\u9ad4\u6216\u53d7\u63a7signing service\u3002\n\nRemediation tests:\n- \u4ee5policy/linter\u62d2\u7d55\u975e40-hex SHA\u7684uses refs\u3002\n- \u9a57\u8b49build job\u4e0d\u53ef\u8b80signing secrets\uff0c\u53ea\u6709approval-gated signer\u53ef\u8b80\u3002\n\nPreventive controls:\n- Immutable action pinning\u3002\n- Credential isolation and least privilege\u3002\n- Protected release environments\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:eea137eee52d90c5ac865ad26578834c1df3bc5ff0443327383e6120d041bf3a"
+          },
+          "properties": {
+            "candidateId": "baseline-005",
+            "category": "ci-supply-chain",
+            "confidence": "high",
+            "findingId": "csf_e8e0389fcae16c307387a329",
+            "occurrenceId": "occ_6ed0de9e1374294f0103a382",
+            "severity": "low"
+          },
+          "ruleId": "supply-chain.mutable-release-action",
+          "ruleIndex": 9
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/recovery.rs"
+                },
+                "region": {
+                  "endLine": 91,
+                  "startLine": 83
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 365,
+                  "startLine": 341
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 388,
+                  "startLine": 380
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/gpu.rs"
+                },
+                "region": {
+                  "endLine": 312,
+                  "startLine": 286
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u53ef\u507d\u9020 recovery/restore JSON \u9a45\u52d5 elevated HKLM GPU mutation\n\nuser-writable recovery/restore JSON\u53ea\u6709serde\u9a57\u8b49\uff1bstartup/manual restore\u628aattacker-shapedpolicy\u5beb\u5165HKLM\u5169\u500bGPU policy values\u4e26restart adapter\u3002\n\nSeverity: medium\n\nCategory: External control of system setting\n\nWeaknesses: CWE-15, CWE-345\n\nRemediation:\n\u4ee5high-only storage\u6216MAC\u4fdd\u8b77\uff1b\u9650\u5236size/type/length\uff0c\u9a57\u8b49ID\u4e00\u81f4\u53capresent adapter\u5f8c\u624d\u5beb\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:2aac5f5c66819c31f727e72cca122c899095ff05c87f9a8a0b200c293b4d1100"
+          },
+          "properties": {
+            "candidateId": "investigator-009",
+            "category": "external-control-of-system-setting",
+            "confidence": "high",
+            "findingId": "csf_f11d8c1bf5564eea1c831d2e",
+            "occurrenceId": "occ_71002a353549dbc016a88bf4",
+            "severity": "medium"
+          },
+          "ruleId": "privileged-state.unauthenticated-gpu-recovery",
+          "ruleIndex": 8
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/mod.rs"
+                },
+                "region": {
+                  "endLine": 127,
+                  "startLine": 114
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/ipc.rs"
+                },
+                "region": {
+                  "endLine": 168,
+                  "startLine": 160
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 768,
+                  "startLine": 703
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 1523,
+                  "startLine": 1501
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 1816,
+                  "startLine": 1782
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 1902,
+                  "startLine": 1898
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/process_win.rs"
+                },
+                "region": {
+                  "endLine": 149,
+                  "startLine": 140
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "production BenchmarkConfig \u53ef\u9078\u53d6\u672a\u9a57\u8b49 executable \u4f9b elevated runner \u57f7\u884c\n\n`workloadExePath` \u8207 `presentmonPath` \u662f production IPC\u53casession schema\u6b04\u4f4d\uff1bresolver\u76f4\u63a5\u8986\u5beb\u8981\u57f7\u884c\u7684paths\uff0c\u800c verifier\u6c92\u6709\u9a57\u8b49\u5be6\u969b override\u3002renderer code\u53ef\u76f4\u63a5\u6307\u5b9a\uff0csame-user attacker\u4e5f\u53ef\u507d\u9020\u7b26\u5408Equivalent\u5951\u7d04\u7684session\u4e26\u7b49\u5f85\u4f7f\u7528\u8005\u555f\u52d5\u5b89\u5168\u9a57\u8b49\u3002\n\nSeverity: medium\n\nCategory: Externally controlled executable\n\nWeaknesses: CWE-73\n\nRemediation:\n\u5f9e production IPC\u8207persisted schema\u79fb\u9664 executable override\uff0c\u50c5\u7528 `cfg(test)`/test dependency injection\u3002\u5f8c\u7aef\u56fa\u5b9a\u89e3\u6790\u53d7\u4fdd\u8b77root\u4e0b\u7684sidecars\uff0c\u4e26\u5c0drunner\u5be6\u969b\u8981spawn\u7684\u540c\u4e00file identity\u9a57\u8b49 embedded digest/signature\u3002\u82e5\u7522\u54c1\u78ba\u9700custom workload\uff0c\u4e0d\u5f97\u4ee5host administrator token\u57f7\u884c\u3002\n\nRemediation tests:\n- \u5411release build IPC\u50b3\u975enull override\uff0c\u78ba\u8a8d\u5f8c\u7aef\u62d2\u7d55\u4e14\u6c92\u6709\u5efa\u7acbchild\u3002\n- \u7ac4\u6539session config\u5169\u6b04\u5f8c\u89f8\u767cEquivalent validation\uff0c\u78ba\u8a8d\u5728spawn\u524dfail closed\u3002\n\nPreventive controls:\n- Test-only dependency injection must not cross production IPC\u3002\n- Integrity checks must bind to the exact executed file identity\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:8ceaa9345f6defe917533d2c6b94b9356423c536bca4b16fe2f230bf47b90e69"
+          },
+          "properties": {
+            "candidateId": "investigator-005",
+            "category": "externally-controlled-executable",
+            "confidence": "high",
+            "findingId": "csf_4c237588623d939b4ddabbbc",
+            "occurrenceId": "occ_78fd155c758bf032e1635ee1",
+            "severity": "medium"
+          },
+          "ruleId": "privilege-escalation.benchmark-executable-overrides",
+          "ruleIndex": 3
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/recovery.rs"
+                },
+                "region": {
+                  "endLine": 91,
+                  "startLine": 83
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 365,
+                  "startLine": 341
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/storage.rs"
+                },
+                "region": {
+                  "endLine": 112,
+                  "startLine": 99
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 141,
+                  "startLine": 82
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u53ef\u507d\u9020\u7684 APPDATA state \u9a45\u52d5 elevated GPU mutation\n\nrecovery/restore JSON\u53ef\u63a7\u5236HKLM GPU policy\uff1bunsigned session.json\u7684Passed/bestLp\u4e5f\u6703\u5728\u8a9e\u610f\u6aa2\u67e5\u5f8c\u9a45\u52d5apply_best\u3002\u6240\u6709\u8cc7\u6599\u4f4d\u65bcsame-user\u53ef\u5bebAPPDATA\u4e14\u7f3a\u5c11MAC/high-only storage\u3002\n\nSeverity: medium\n\nCategory: External control of system setting\n\nWeaknesses: CWE-15, CWE-345\n\nRemediation:\n\u4ee5high-only storage\u6216MAC\u4fdd\u8b77\u5b8c\u6574recovery/restore/session payload\uff1b\u9650\u5236schema\uff0c\u4e26\u5728\u540c\u4e00\u9a57\u8b49snapshot\u4e0a\u57f7\u884ctarget checks\u8207mutation\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:3080c6bf29eb1e57ccf48e1131cc8d4377e62508bc71c641e59f4fcd32a76a55"
+          },
+          "properties": {
+            "candidateId": "investigator-009",
+            "category": "external-control-of-system-setting",
+            "confidence": "high",
+            "findingId": "csf_c34d121c93a0e767795e6801",
+            "occurrenceId": "occ_7ba51eb693f96c3a87dc2771",
+            "severity": "medium"
+          },
+          "ruleId": "privileged-state.unauthenticated-gpu-recovery",
+          "ruleIndex": 8
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/pe-exports.mjs"
+                },
+                "region": {
+                  "endLine": 43,
+                  "startLine": 30
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/pe-imports.mjs"
+                },
+                "region": {
+                  "endLine": 59,
+                  "startLine": 36
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "PE \u8a3a\u65b7 parser \u53ef\u56e0\u672a\u7d42\u6b62\u540d\u7a31\u9032\u5165\u7121\u9650\u8ff4\u5708\n\n\u5169\u500b\u624b\u52d5 PE \u5de5\u5177\u7684 `cstr` \u4ee5 `while (buf[end] !== 0) end++` \u6383\u63cf caller-selected binary\uff0c\u6c92\u6709buffer bound\u3002\u82e5RVA\u6307\u5411EOF\u524d\u6c92\u6709NUL\u7684\u540d\u7a31\uff0cNode Buffer\u8d8a\u754c\u7d22\u5f15\u70ba`undefined`\uff0c\u689d\u4ef6\u6c38\u9060\u70batrue\u4e26\u6301\u7e8c\u8017\u7528CPU\u3002\n\nSeverity: low\n\nCategory: Parser denial of service\n\nWeaknesses: CWE-835\n\nRemediation:\nValidate DOS/PE/optional-header/section/RVA/raw-file bounds before every read. Implement cstr with bounded `buf.indexOf(0, offset)` and reject missing terminators or excessive length. Cap section, export-name, import-descriptor and thunk counts.\n\nRemediation tests:\n- Provide export/import names with no NUL before EOF and assert bounded rejection within a fixed time.\n- Fuzz every table offset/count and assert no unbounded loop or out-of-range read.\n\nPreventive controls:\n- Bound every attacker-derived parse offset/count.\n- Parser-wide work budget and maximum string length."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:78f4ea6f985c8d0830f9e1d64cb53dfb9e4f5aae8f933da95cb8932b5ecf0982"
+          },
+          "properties": {
+            "candidateId": "remainder-tools-001",
+            "category": "parser-denial-of-service",
+            "confidence": "high",
+            "findingId": "csf_f2ebfb8844d79805f2a66d29",
+            "occurrenceId": "occ_7c7f5f7715c6c116aff85cff",
+            "severity": "low"
+          },
+          "ruleId": "parser-dos.pe-unterminated-cstring",
+          "ruleIndex": 2
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/fetch-benchmark-assets.mjs"
+                },
+                "region": {
+                  "endLine": 64,
+                  "startLine": 59
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/fetch-benchmark-assets.mjs"
+                },
+                "region": {
+                  "endLine": 108,
+                  "startLine": 67
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "package.json"
+                },
+                "region": {
+                  "endLine": 16,
+                  "startLine": 13
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "downstream_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/assets.rs"
+                },
+                "region": {
+                  "endLine": 96,
+                  "startLine": 71
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence:vendor.digest"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/fetch-benchmark-assets.mjs"
+                },
+                "region": {
+                  "endLine": 108,
+                  "startLine": 98
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u7b2c\u4e09\u65b9 benchmark executable \u4e0b\u8f09\u5f8c\u624d\u5f9e\u81ea\u8eab\u7522\u751f\u4fe1\u4efb digest\n\n`fetch:benchmark-assets` \u5f9eversioned URLs\u4e0b\u8f09PresentMon\u8207AutoGpuAffinity\uff0c\u50c5\u6aa2\u67e5curl\u6210\u529f/\u6a94\u6848\u5b58\u5728\uff1b\u63a5\u8457\u5c0d\u672a\u9a57\u8b49bytes\u8a08\u7b97SHA256\u4e26\u8986\u5bebmanifest\u3002\u4e0a\u6e38asset\u88ab\u66ff\u63db\u6642\uff0c\u5f8c\u7e8cbuild/runtime\u6aa2\u67e5\u53ea\u8b49\u660e\u60e1\u610fbinary\u8207\u81ea\u751fmanifest\u4e00\u81f4\u3002\n\nSeverity: low\n\nCategory: Build supply chain\n\nWeaknesses: CWE-494\n\nRemediation:\n\u5728repository\u6216\u7368\u7acb\u53d7\u5be9\u6838metadata\u4e2d\u56fa\u5b9aknown-good SHA256\u6216publisher signer identity\uff1b\u4e0b\u8f09\u5f8c\u5148\u9a57\u8b49\u518dcopy/modify\u3002digest\u66f4\u65b0\u5fc5\u9808\u7368\u7acbreview\uff0c\u4e0d\u53ef\u7531\u4e0b\u8f09script\u81ea\u52d5\u628a\u525b\u53d6\u5f97bytes\u5347\u683c\u70batrust root\uff1b\u53ef\u52a0Sigstore/Authenticode verification\u8207provenance attestation\u3002\n\nRemediation tests:\n- \u7528\u88ab\u66ff\u63db\u4f46matching\u65b0digest\u7684fixture\u6a21\u64ecupstream\uff0c\u78ba\u8a8drefresh\u5728known-good verification\u968e\u6bb5\u62d2\u7d55\u3002\n- \u9a57\u8b49\u66f4\u65b0known-good digest\u9700\u8981\u7368\u7acbreview/approval\u3002\n\nPreventive controls:\n- Pretrusted digest or signer verification before vendoring\u3002\n- Reproducible/provenance-attested third-party binaries\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:4996c7e94667a47ef760ed1398f388bd5ecf3ecb70165e7d0bfbee9a390d45e1"
+          },
+          "properties": {
+            "candidateId": "baseline-007",
+            "category": "build-supply-chain",
+            "confidence": "high",
+            "findingId": "csf_7c8b97147a0c1cbc7b52eb4c",
+            "occurrenceId": "occ_8557a66c2b84d907f8915713",
+            "severity": "low"
+          },
+          "ruleId": "supply-chain.unverified-benchmark-refresh",
+          "ruleIndex": 10
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 294,
+                  "startLine": 248
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 364,
+                  "startLine": 299
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/release.yml"
+                },
+                "region": {
+                  "endLine": 235,
+                  "startLine": 202
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "portable update \u7f3a\u5c11\u7368\u7acb publisher signature\n\nportable ZIP\u8207checksum\u7531\u540c\u4e00release authority\u63a7\u5236\uff1bpublisher-side compromise\u53ef\u63d0\u4f9bmatching pair\u4e26\u6563\u5e03administrator update\u3002\n\nSeverity: low\n\nCategory: Insufficient update authenticity\n\nWeaknesses: CWE-494\n\nRemediation:\n\u4ee5embedded public key\u9a57\u8b49portable artifact\u53caversion metadata signature\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:7bab27c3e774ee1c33994c7933e8c955fa7511a343a449ab4c98a0490d144c76"
+          },
+          "properties": {
+            "candidateId": "baseline-004",
+            "category": "insufficient-update-authenticity",
+            "confidence": "high",
+            "findingId": "csf_db49472da5cc3cb83407f0f0",
+            "occurrenceId": "occ_96b1aaa1fafd3698eb856dc0",
+            "severity": "low"
+          },
+          "ruleId": "update-integrity.portable-artifact-unsigned",
+          "ruleIndex": 11
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/autostart.rs"
+                },
+                "region": {
+                  "endLine": 59,
+                  "startLine": 54
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/tray.rs"
+                },
+                "region": {
+                  "endLine": 90,
+                  "startLine": 79
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u672a\u9650\u5b9a\u7cfb\u7d71\u5de5\u5177\u8def\u5f91\u53ef\u555f\u52d5\u653b\u64ca\u8005binary\n\nelevated host\u4ee5\u88f8\u540d\u7a31\u89e3\u6790schtasks/powershell/explorer\uff0ctray startup\u81ea\u52d5\u5230\u9054schtasks\u3002\n\nSeverity: high\n\nCategory: Untrusted search path\n\nWeaknesses: CWE-426\n\nRemediation:\n\u4f7f\u7528System32\u53ef\u4fe1\u7d55\u5c0d\u8def\u5f91\u6216Windows API\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:85d511b47c605e4ee20b33fffca30a7574ea5341cc63be879e89861f507309e1"
+          },
+          "properties": {
+            "candidateId": "investigator-003",
+            "category": "untrusted-search-path",
+            "confidence": "high",
+            "findingId": "csf_85372c0504cba7c274520892",
+            "occurrenceId": "occ_9bfe3d2a7050e03907a7da24",
+            "severity": "high"
+          },
+          "ruleId": "privilege-escalation.untrusted-system-tool-search",
+          "ruleIndex": 6
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/autostart.rs"
+                },
+                "region": {
+                  "endLine": 21,
+                  "startLine": 14
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "deployment"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/tauri.conf.json"
+                },
+                "region": {
+                  "endLine": 42,
+                  "startLine": 39
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/build.rs"
+                },
+                "region": {
+                  "endLine": 31,
+                  "startLine": 27
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "README.md"
+                },
+                "region": {
+                  "endLine": 70,
+                  "startLine": 68
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "README.md"
+                },
+                "region": {
+                  "endLine": 97,
+                  "startLine": 92
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u6700\u9ad8\u6b0a\u9650\u6392\u7a0b\u5de5\u4f5c\u6307\u5411\u53ef\u7531\u672a\u63d0\u5347\u7a0b\u5e8f\u7f6e\u63db\u7684 executable\n\n\u555f\u7528\u958b\u6a5f\u81ea\u555f\u5f8c\uff0cONLOGON/HIGHEST \u5de5\u4f5c\u53ea\u4fdd\u5b58\u76ee\u524d executable \u7684\u8def\u5f91\uff1b\u5728 currentUser \u6216\u4f7f\u7528\u8005\u53ef\u5beb\u7684 portable \u90e8\u7f72\u4e2d\uff0c\u540c\u5e33\u6236 medium-integrity \u7a0b\u5e8f\u53ef\u65bc\u7a0b\u5f0f\u9000\u51fa\u5f8c\u7f6e\u63db\u8a72\u6a94\uff0c\u8b93\u4e0b\u6b21\u767b\u5165\u7121 UAC \u57f7\u884c\u653b\u64ca\u8005\u7a0b\u5f0f\u3002\n\nSeverity: high\n\nCategory: Privilege escalation\n\nWeaknesses: CWE-732\n\nRemediation:\n\u4e0d\u5f97\u70ba medium-integrity \u53ef\u5beb\u4f4d\u7f6e\u5efa\u7acb HIGHEST task\u3002\u5c07\u4e3b\u7a0b\u5f0f\u6216\u6700\u5c0f signed launcher \u5b89\u88dd\u5230 machine-wide\u3001Administrators/SYSTEM \u624d\u53ef\u4fee\u6539\u7684\u76ee\u9304\uff1b\u5efa\u7acb\u53ca\u6bcf\u6b21\u66f4\u65b0\u5f8c\u9a57\u8b49\u6240\u6709\u7236\u76ee\u9304\u8207\u6a94\u6848\u7684 DACL\u3001owner\u3001reparse \u72c0\u614b\u53ca\u7c3d\u7ae0\u3002\u82e5\u505a\u4e0d\u5230\uff0c\u5c07 task \u964d\u70ba LIMITED \u6216\u62d2\u7d55\u555f\u7528\u3002\n\nRemediation tests:\n- \u5728\u53ef\u5beb\u6e2c\u8a66\u76ee\u9304\u653e\u7f6e signed benign fixture\u3001\u5efa\u7acb HIGHEST task \u5f8c\u7f6e\u63db\u6a94\u6848\uff0c\u78ba\u8a8d\u65b0\u7248\u672c\u6703\u62d2\u7d55\u5efa\u7acb\u6216\u57f7\u884c\u3002\n- \u4ee5 protected Program Files \u8207 portable writable directory \u5404\u6e2c\u4e00\u6b21\uff0c\u9a57\u8b49 ACL/reparse/signature policy\u3002\n\nPreventive controls:\n- Privileged executable \u5fc5\u9808\u4f4d\u65bc medium-integrity \u4e0d\u53ef\u5beb\u4f4d\u7f6e\u3002\n- \u6392\u7a0b\u5efa\u7acb\u524d\u5f8c\u7d81\u5b9a\u4e26\u9a57\u8b49 executable identity\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:efbf6683ca053dec907a74c519ce2972c09e4ddf5b55f0e7a2595a2a80d96174"
+          },
+          "properties": {
+            "candidateId": "investigator-004",
+            "category": "privilege-escalation",
+            "confidence": "high",
+            "findingId": "csf_f28e9f8a859f3958c325b629",
+            "occurrenceId": "occ_9ebb3a11a9328f9064466a66",
+            "severity": "high"
+          },
+          "ruleId": "privilege-escalation.writable-scheduled-task-target",
+          "ruleIndex": 7
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/release.yml"
+                },
+                "region": {
+                  "endLine": 127,
+                  "startLine": 122
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "mutable Action ref\u63a5\u89f8signing key\n\ntauri-action@v1\u76f4\u63a5\u63a5\u6536release token\u8207updater signing credentials\u3002\n\nSeverity: low\n\nCategory: Ci supply chain\n\nWeaknesses: CWE-829\n\nRemediation:\npin\u5b8c\u6574SHA\u4e26\u9694\u96e2approval-gated signing/upload\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:5ff2cb5118e3b7ac31c613a6c689484854fb7d93ce444845ea386d72755d888d"
+          },
+          "properties": {
+            "candidateId": "baseline-005",
+            "category": "ci-supply-chain",
+            "confidence": "high",
+            "findingId": "csf_0714f6c7a3d615dc78a52991",
+            "occurrenceId": "occ_aac75f328e91d72b9c174003",
+            "severity": "low"
+          },
+          "ruleId": "supply-chain.mutable-release-action",
+          "ruleIndex": 9
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 1896,
+                  "startLine": 1893
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 2026,
+                  "startLine": 1958
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 822,
+                  "startLine": 819
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 2426,
+                  "startLine": 2338
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 2524,
+                  "startLine": 2485
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/metrics.rs"
+                },
+                "region": {
+                  "endLine": 194,
+                  "startLine": 94
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "benchmark \u63a5\u53d7\u6216\u91cd\u8b80\u672a\u7d81\u5b9a\u672c\u6b21 capture identity \u7684 CSV\n\nstale CSV\u522a\u9664\u5931\u6557\u53ea\u8b66\u544a\u4e14PresentMon exit code\u4e0d\u53c3\u8207success\uff1b\u901a\u904e\u521d\u59cb\u6aa2\u67e5\u5f8crunner\u53ea\u4fdd\u5b58PathBuf\uff0cranking/confirmation/final stats\u518d\u6b21\u5f9esame-user\u53ef\u5bebAPPDATA\u958b\u6a94\u3002\u653b\u64ca\u8005\u53ef\u9810\u7f6e\u6216\u5728\u9a57\u8b49\u5f8c\u66ff\u63dbvalid CSV\uff0c\u64cd\u63a7winner\u8207Passed reliability\u3002\n\nSeverity: medium\n\nCategory: Benchmark evidence integrity\n\nWeaknesses: CWE-345, CWE-367\n\nRemediation:\nstale delete\u5931\u6557\u5373fail closed\uff0c\u8981\u6c42PresentMon\u6210\u529f\uff1b\u5f9e\u53d7\u4fdd\u8b77handle\u53ea\u89e3\u6790\u4e00\u6b21\u4e26\u5728\u8a18\u61b6\u9ad4\u4fdd\u5b58immutable results\uff0c\u6216\u4fdd\u5b58/\u9a57\u8b49file ID\u8207digest\uff1b\u4f7f\u7528high-only\u96a8\u6a5fcapture directory\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:c3e92b613e8395132f79195428dc658f13c548ef2d38898801a703495a78fdd0"
+          },
+          "properties": {
+            "candidateId": "remainder-large-002",
+            "category": "benchmark-evidence-integrity",
+            "confidence": "high",
+            "findingId": "csf_349e4b9deca50f866fdc082a",
+            "occurrenceId": "occ_b0540ff8dbb42c0196a27eda",
+            "severity": "medium"
+          },
+          "ruleId": "benchmark-integrity.untrusted-capture-files",
+          "ruleIndex": 0
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/autostart.rs"
+                },
+                "region": {
+                  "endLine": 14,
+                  "startLine": 14
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u6700\u9ad8\u6b0a\u9650\u6392\u7a0b\u5de5\u4f5c\u6307\u5411\u53ef\u7f6e\u63db executable\n\nONLOGON/HIGHEST task\u4fdd\u5b58\u53ef\u5bebcurrent_exe pathname\uff1bsplit-admin same-user attacker\u53ef\u7f6e\u63db\u5f8c\u65bc\u767b\u5165\u53d6\u5f97administrator execution\u3002\n\nSeverity: high\n\nCategory: Privilege escalation\n\nWeaknesses: CWE-732\n\nRemediation:\n\u4f7f\u7528\u53d7\u4fdd\u8b77signed machine-wide target\u4e26\u9a57\u8b49\u5b8c\u6574path ACL/owner/reparse\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:9790a046dbf711bbd53d48630d51bdf388a20226119412874423ba1424f06895"
+          },
+          "properties": {
+            "candidateId": "investigator-004",
+            "category": "privilege-escalation",
+            "confidence": "high",
+            "findingId": "csf_43f8629e62168e49605d6123",
+            "occurrenceId": "occ_b0baf3fe49775176de77d363",
+            "severity": "high"
+          },
+          "ruleId": "privilege-escalation.writable-scheduled-task-target",
+          "ruleIndex": 7
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/pe-exports.mjs"
+                },
+                "region": {
+                  "endLine": 46,
+                  "startLine": 30
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/pe-imports.mjs"
+                },
+                "region": {
+                  "endLine": 61,
+                  "startLine": 36
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "PE \u8a3a\u65b7\u5de5\u5177\u672a\u4e2d\u548c\u540d\u7a31\u4e2d\u7684 terminal control sequences\n\nexport/import DLL\u8207function names\u7531untrusted PE bytes\u76f4\u63a5ASCII decode\u5f8cconsole.log\uff1bESC/CSI/OSC/CR/backspace\u7b49\u53ef\u88abterminal\u89e3\u8b80\uff0c\u9020\u6210\u8f38\u51fa\u8207title spoofing\u3002\n\nSeverity: low\n\nCategory: Terminal output injection\n\nWeaknesses: CWE-150\n\nRemediation:\n\u5c07untrusted names\u8f38\u51fa\u70baJSON\u6216visible escaped representation\uff1b\u628aC0/C1/DEL/ESC/newline/CR\u53caterminal-sensitive Unicode\u8f49\u70ba\\xNN/\\uNNNN\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:4ef35a60878ebf90ee3ec6c8354991ba0f9f6888fa5eb432a3e38d86e0664190"
+          },
+          "properties": {
+            "candidateId": "remainder-tools-002",
+            "category": "terminal-output-injection",
+            "confidence": "high",
+            "findingId": "csf_1618f386730fda902325a69a",
+            "occurrenceId": "occ_b8660e519a8fdd488bd33dec",
+            "severity": "low"
+          },
+          "ruleId": "output-injection.pe-terminal-control-sequences",
+          "ruleIndex": 1
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 294,
+                  "startLine": 248
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 364,
+                  "startLine": 299
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/commands.rs"
+                },
+                "region": {
+                  "endLine": 329,
+                  "startLine": 276
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/release.yml"
+                },
+                "region": {
+                  "endLine": 235,
+                  "startLine": 202
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "counter_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/tauri.conf.json"
+                },
+                "region": {
+                  "endLine": 54,
+                  "startLine": 47
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence:portable.checksum"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 360,
+                  "startLine": 358
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "portable update \u7f3a\u5c11\u7368\u7acb publisher signature\n\nportable updater\u5f9e\u540c\u4e00GitHub release\u53d6\u5f97ZIP\u8207`.sha256`\uff0c\u4e00\u81f4\u5373\u5b89\u88dd\uff1b\u80fd\u4fee\u6539release assets\u7684actor\u53ef\u540c\u6642\u4e0a\u50b3\u60e1\u610fZIP\u8207\u914d\u5c0dchecksum\u3002installed updater\u5df2\u914d\u7f6epublic key\uff0c\u4f46custom portable path\u6c92\u6709\u4f7f\u7528\u3002\n\nSeverity: low\n\nCategory: Insufficient update authenticity\n\nWeaknesses: CWE-494\n\nRemediation:\n\u4ee5\u65e2\u6709Tauri signing key\u6216\u5c08\u7528offline key\u5c0dportable ZIP\u8207version metadata\u7c3d\u7ae0\uff0c\u5c07verification public key\u7de8\u5165application\uff1b\u7c3d\u7f72\u5167\u5bb9\u7d81\u5b9aversion\u3001asset name\u3001digest\u53carelease channel\uff0c\u7f3a\u7c3d\u7ae0\u6216rollback\u4e00\u5f8b\u62d2\u7d55\u3002\n\nRemediation tests:\n- \u5efa\u7acb\u6e2c\u8a66release metadata\u542b\u6709\u6548checksum\u4f46\u7121signature\uff0c\u78ba\u8a8dclient\u62d2\u7d55\u3002\n- \u4fee\u6539version/name/digest\u4efb\u4e00\u6b04\u4f4d\uff0c\u78ba\u8a8dsignature binding\u5931\u6557\u3002\n\nPreventive controls:\n- Independent publisher signature for every update channel\u3002\n- Rollback/version binding\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:a87e01d33ce2ed5371d897ab122579c62d2fe452a51b70aaed7f89a267e1887c"
+          },
+          "properties": {
+            "candidateId": "baseline-004",
+            "category": "insufficient-update-authenticity",
+            "confidence": "high",
+            "findingId": "csf_370c744278d1ef9231e17277",
+            "occurrenceId": "occ_c0fe56590850af7c89e6a353",
+            "severity": "low"
+          },
+          "ruleId": "update-integrity.portable-artifact-unsigned",
+          "ruleIndex": 11
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 1523,
+                  "startLine": 1501
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/process_win.rs"
+                },
+                "region": {
+                  "endLine": 149,
+                  "startLine": 140
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "production BenchmarkConfig\u53ef\u9078\u672a\u9a57\u8b49executable\n\nworkloadExePath/presentmonPath\u8986\u5beb\u5be6\u969belevated spawn\uff0cverifier\u672a\u7d81\u5b9aoverride\u3002\n\nSeverity: medium\n\nCategory: Externally controlled executable\n\nWeaknesses: CWE-73\n\nRemediation:\n\u79fb\u9664production overrides\u4e26\u9a57\u8b49\u5be6\u969bexecuted file identity\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:aee8e138a0ed6b1dfd5e1e780b538b4d3761644515a33b339e59e82e2fd28780"
+          },
+          "properties": {
+            "candidateId": "investigator-005",
+            "category": "externally-controlled-executable",
+            "confidence": "high",
+            "findingId": "csf_f7dc79ae9932c0d3d0c47377",
+            "occurrenceId": "occ_c25004a03c56e98ea0e0cc03",
+            "severity": "medium"
+          },
+          "ruleId": "privilege-escalation.benchmark-executable-overrides",
+          "ruleIndex": 3
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 1501,
+                  "startLine": 1501
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "production BenchmarkConfig\u53ef\u9078\u672a\u9a57\u8b49executable\n\nworkloadExePath/presentmonPath\u8986\u5beb\u5be6\u969belevated spawn\uff0cverifier\u672a\u7d81\u5b9aoverride\u3002\n\nSeverity: medium\n\nCategory: Privilege escalation\n\nWeaknesses: CWE-73\n\nRemediation:\n\u79fb\u9664production overrides\u4e26\u9a57\u8b49\u5be6\u969bexecuted file identity\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:0e5193aa7985ab0a0adb417d1630e71ca6a93513d788448836bc798553461d67"
+          },
+          "properties": {
+            "candidateId": "investigator-005",
+            "category": "privilege-escalation",
+            "confidence": "high",
+            "findingId": "csf_bdada8249bbcfbd1de74e859",
+            "occurrenceId": "occ_c7645eace7e8e038aebc356d",
+            "severity": "medium"
+          },
+          "ruleId": "privilege-escalation.benchmark-executable-overrides",
+          "ruleIndex": 3
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/release.yml"
+                },
+                "region": {
+                  "endLine": 122,
+                  "startLine": 122
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "mutable Action ref\u63a5\u89f8signing key\n\ntauri-action@v1\u76f4\u63a5\u63a5\u6536release token\u8207updater signing credentials\u3002\n\nSeverity: low\n\nCategory: Supply chain\n\nWeaknesses: CWE-829\n\nRemediation:\npin\u5b8c\u6574SHA\u4e26\u9694\u96e2approval-gated signing/upload\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:6cd7fa0fe73ed6e809e2863ed676a11d0577e3e0949b9d2f261818132ce7adac"
+          },
+          "properties": {
+            "candidateId": "baseline-005",
+            "category": "supply-chain",
+            "confidence": "high",
+            "findingId": "csf_6c107864e06302699d84b56f",
+            "occurrenceId": "occ_cad2533d4305edffc167d3d0",
+            "severity": "low"
+          },
+          "ruleId": "supply-chain.mutable-release-action",
+          "ruleIndex": 9
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/recovery.rs"
+                },
+                "region": {
+                  "endLine": 83,
+                  "startLine": 83
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u507d\u9020recovery/restore JSON\u9a45\u52d5HKLM GPU mutation\n\nuser-writable JSON\u672a\u8a8d\u8b49\u5373\u63a7\u5236\u5169\u500bGPU policy values\u8207adapter restart\u3002\n\nSeverity: medium\n\nCategory: Privileged state\n\nWeaknesses: CWE-15, CWE-345\n\nRemediation:\nhigh-only/MAC state\uff0c\u9650\u5236schema\u4e26\u5728write\u524d\u9a57\u8b49present adapter\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:e43528dc701400c20927e7da8412907c55f9b4f0f7f936a90f5dbc7d5269d4cb"
+          },
+          "properties": {
+            "candidateId": "investigator-009",
+            "category": "privileged-state",
+            "confidence": "high",
+            "findingId": "csf_2a2737b6c3bcf183f25dba07",
+            "occurrenceId": "occ_d0806ff2e3583602484d0b6c",
+            "severity": "medium"
+          },
+          "ruleId": "privileged-state.unauthenticated-gpu-recovery",
+          "ruleIndex": 8
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 1896,
+                  "startLine": 1893
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 2026,
+                  "startLine": 1958
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 822,
+                  "startLine": 819
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 2426,
+                  "startLine": 2338
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 2524,
+                  "startLine": 2485
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/metrics.rs"
+                },
+                "region": {
+                  "endLine": 194,
+                  "startLine": 94
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence:capture.reread"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 2419,
+                  "startLine": 2355
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "benchmark \u63a5\u53d7\u6216\u91cd\u8b80\u672a\u7d81\u5b9a\u672c\u6b21 capture identity \u7684 CSV\n\n`run_capture` \u5c0d stale CSV \u522a\u9664\u5931\u6557\u53ea\u8a18 warning\uff0c\u4e14\u8b80\u5230 PresentMon exit code\u5f8c\u4e0d\u8981\u6c42\u6210\u529f\uff1b\u56e0\u6b64\u65e2\u6709 shaped CSV \u53ef\u88ab\u8996\u70ba\u672c\u6b21 capture\u3002\u901a\u904e\u5b8c\u6574\u6027\u6aa2\u67e5\u5f8c\uff0crunner \u53ea\u4fdd\u5b58 `PathBuf`\uff0cranking\u3001confirmation\u8207final statistics\u53c8\u5f9e same-user \u53ef\u5beb\u7684 APPDATA \u91cd\u65b0\u958b\u6a94\uff0c\u8b93\u653b\u64ca\u8005\u5728\u9a57\u8b49\u5f8c\u66ff\u63db\u6709\u6548\u8cc7\u6599\u4e26\u64cd\u63a7 winner \u8207 Passed reliability\u3002\n\nSeverity: medium\n\nCategory: Benchmark evidence integrity\n\nWeaknesses: CWE-345, CWE-367\n\nRemediation:\nTreat any stale-output deletion error as fatal and require PresentMon to exit successfully. Create each capture in a random high-only directory and require the output not to exist beforehand. Read and parse exactly once from a protected handle into immutable memory; if rereads are unavoidable, bind every read to the saved Windows file ID, creation time and digest.\n\nRemediation tests:\n- Hold a valid stale CSV open with delete-deny sharing and force PresentMon output failure; verify the run rejects before parsing.\n- Replace a valid CSV after initial integrity assessment but before ranking; verify immutable in-memory results or digest/file-ID checks detect it.\n- Return a nonzero PresentMon exit with a valid stale file and verify capture fails.\n\nPreventive controls:\n- Protected per-capture working directories.\n- Producer exit-status and file-freshness binding.\n- Single-read immutable evidence pipeline."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:cb5c9f7b6eb93cffa46c34f86123c8c7d6d13907eb1ca5455dfc1fc717950a41"
+          },
+          "properties": {
+            "candidateId": "remainder-large-002",
+            "category": "benchmark-evidence-integrity",
+            "confidence": "high",
+            "findingId": "csf_c6b84b5f69354da906f01edb",
+            "occurrenceId": "occ_d89cb5b17b91b6973f344263",
+            "severity": "medium"
+          },
+          "ruleId": "benchmark-integrity.untrusted-capture-files",
+          "ruleIndex": 0
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/fetch-benchmark-assets.mjs"
+                },
+                "region": {
+                  "endLine": 64,
+                  "startLine": 59
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/fetch-benchmark-assets.mjs"
+                },
+                "region": {
+                  "endLine": 108,
+                  "startLine": 67
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "package.json"
+                },
+                "region": {
+                  "endLine": 16,
+                  "startLine": 13
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "downstream_sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/assets.rs"
+                },
+                "region": {
+                  "endLine": 96,
+                  "startLine": 71
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence:vendor.digest"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "scripts/fetch-benchmark-assets.mjs"
+                },
+                "region": {
+                  "endLine": 108,
+                  "startLine": 98
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u7b2c\u4e09\u65b9 benchmark executable \u4e0b\u8f09\u5f8c\u624d\u5f9e\u81ea\u8eab\u7522\u751f\u4fe1\u4efb digest\n\n`fetch:benchmark-assets` \u5f9eversioned URLs\u4e0b\u8f09PresentMon\u8207AutoGpuAffinity\uff0c\u50c5\u6aa2\u67e5curl\u6210\u529f/\u6a94\u6848\u5b58\u5728\uff1b\u63a5\u8457\u5c0d\u672a\u9a57\u8b49bytes\u8a08\u7b97SHA256\u4e26\u8986\u5bebmanifest\u3002\u4e0a\u6e38asset\u88ab\u66ff\u63db\u6642\uff0c\u5f8c\u7e8cbuild/runtime\u6aa2\u67e5\u53ea\u8b49\u660e\u60e1\u610fbinary\u8207\u81ea\u751fmanifest\u4e00\u81f4\u3002\n\nSeverity: low\n\nCategory: Build supply chain\n\nWeaknesses: CWE-494\n\nRemediation:\n\u5728repository\u6216\u7368\u7acb\u53d7\u5be9\u6838metadata\u4e2d\u56fa\u5b9aknown-good SHA256\u6216publisher signer identity\uff1b\u4e0b\u8f09\u5f8c\u5148\u9a57\u8b49\u518dcopy/modify\u3002digest\u66f4\u65b0\u5fc5\u9808\u7368\u7acbreview\uff0c\u4e0d\u53ef\u7531\u4e0b\u8f09script\u81ea\u52d5\u628a\u525b\u53d6\u5f97bytes\u5347\u683c\u70batrust root\uff1b\u53ef\u52a0Sigstore/Authenticode verification\u8207provenance attestation\u3002\n\nRemediation tests:\n- \u7528\u88ab\u66ff\u63db\u4f46matching\u65b0digest\u7684fixture\u6a21\u64ecupstream\uff0c\u78ba\u8a8drefresh\u5728known-good verification\u968e\u6bb5\u62d2\u7d55\u3002\n- \u9a57\u8b49\u66f4\u65b0known-good digest\u9700\u8981\u7368\u7acbreview/approval\u3002\n\nPreventive controls:\n- Pretrusted digest or signer verification before vendoring\u3002\n- Reproducible/provenance-attested third-party binaries\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:e2d52d729ce572a4567ddc6495c0534ed5dc7c182372fe96818f9ca7c803cbd3"
+          },
+          "properties": {
+            "candidateId": "baseline-007",
+            "category": "build-supply-chain",
+            "confidence": "high",
+            "findingId": "csf_ea13120aa609640734f4ac88",
+            "occurrenceId": "occ_da9b653f46b00e95b0314c9f",
+            "severity": "low"
+          },
+          "ruleId": "supply-chain.unverified-benchmark-refresh",
+          "ruleIndex": 10
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/recovery.rs"
+                },
+                "region": {
+                  "endLine": 91,
+                  "startLine": 83
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 365,
+                  "startLine": 341
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 388,
+                  "startLine": 380
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 338,
+                  "startLine": 328
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/gpu.rs"
+                },
+                "region": {
+                  "endLine": 312,
+                  "startLine": 286
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/gpu.rs"
+                },
+                "region": {
+                  "endLine": 539,
+                  "startLine": 513
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/main.rs"
+                },
+                "region": {
+                  "endLine": 100,
+                  "startLine": 97
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "source"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/storage.rs"
+                },
+                "region": {
+                  "endLine": 112,
+                  "startLine": 99
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 141,
+                  "startLine": 82
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 591,
+                  "startLine": 573
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence:recovery.write"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/gpu.rs"
+                },
+                "region": {
+                  "endLine": 588,
+                  "startLine": 574
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence:gpu-state.session-load"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/storage.rs"
+                },
+                "region": {
+                  "endLine": 110,
+                  "startLine": 104
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence:gpu-state.apply-best"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/manager.rs"
+                },
+                "region": {
+                  "endLine": 140,
+                  "startLine": 93
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u53ef\u507d\u9020\u7684 APPDATA state \u9a45\u52d5 elevated GPU policy mutation\n\n`benchmark-recovery.json`\u3001`gpu-restore.json` \u8207 benchmark `session.json` \u90fd\u4f4d\u65bc same-user \u53ef\u5beb\u7684 APPDATA\uff0c\u537b\u88ab\u63d0\u5347\u5f8c\u7aef\u7576\u4f5c\u53ef\u4fe1 privileged state\u3002\u524d\u5169\u8005\u53ef\u63d0\u4f9b\u4efb\u610f registry value type/bytes\uff1bsession \u53ef\u507d\u9020 Passed/bestLp\u3002\u8cc7\u6599\u5206\u5225\u6d41\u5165 startup/manual restore \u6216 apply_best\uff0c\u6539\u5beb HKLM GPU interrupt policy\u4e26\u53ef\u91cd\u555f\u986f\u793a\u88dd\u7f6e\u3002\n\nSeverity: medium\n\nCategory: External control of system setting\n\nWeaknesses: CWE-15, CWE-345\n\nRemediation:\nStore recovery, restore and benchmark evidence where medium-integrity processes cannot write, or authenticate complete payloads with a key only available to the elevated component. Bound file sizes and registry value types/lengths; require journal/snapshot IDs to agree; verify a present display adapter before any write. For session apply, MAC the config, results, reliability, CPU/GPU identity and selected LP, and apply exactly the verified in-memory snapshot.\n\nRemediation tests:\n- \u4ee5medium-integrity\u5efa\u7acbPolicyApplied journal\u8207present GPU fixture\uff0c\u78ba\u8a8d\u65b0\u7248\u672c\u5728\u4efb\u4f55registry write\u524d\u62d2\u7d55\u3002\n- \u6e2c\u8a66oversized bytes\u3001\u975eDWORD DevicePolicy\u3001>8-byte mask\u3001mismatched IDs\u3001unknown adapter\u8207forged gpu-restore.json\u3002\n- Clone a valid Passed session, change bestLp to another in-range LP and verify apply_best rejects the altered MAC before any registry mutation.\n- Create forged recovery/restore JSON with mismatched IDs, arbitrary REG types, oversized bytes and an unknown adapter; verify all fail before RegCreateKeyExW.\n\nPreventive controls:\n- Authenticate privileged transaction journals\u3002\n- Validate target membership and exact schema before side effects\u3002\n- Bound untrusted persisted data sizes\u3002\n- Authenticate all privileged persisted state end to end.\n- Use a protected high-integrity state directory with verified owner/DACL/MIC."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:65ac990478a1fe2ee1d0b97db16b67d94a6bfdb6b3bf4e1b34a7cae3603a7aef"
+          },
+          "properties": {
+            "candidateId": "investigator-009",
+            "category": "external-control-of-system-setting",
+            "confidence": "high",
+            "findingId": "csf_865a8e02ddeba4c842ccfea9",
+            "occurrenceId": "occ_e3267eb878c9d055144d8776",
+            "severity": "medium"
+          },
+          "ruleId": "privileged-state.unauthenticated-gpu-recovery",
+          "ruleIndex": 8
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 248,
+                  "startLine": 248
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "portable update\u7f3a\u7368\u7acbpublisher signature\n\nsame-release ZIP/checksum\u53ef\u7531publisher-side actor\u4e00\u8d77\u66ff\u63db\u3002\n\nSeverity: low\n\nCategory: Update integrity\n\nWeaknesses: CWE-494\n\nRemediation:\n\u4ee5embedded public key\u9a57\u8b49portable artifact\u8207metadata signature\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:598cc334abcb9fab9c4d6b996cfdbdf0540d8afb102ee62a944a023378350c4d"
+          },
+          "properties": {
+            "candidateId": "baseline-004",
+            "category": "update-integrity",
+            "confidence": "high",
+            "findingId": "csf_5facc4e5ca364af187533986",
+            "occurrenceId": "occ_e36ba9484f67cd9fde9cdb88",
+            "severity": "low"
+          },
+          "ruleId": "update-integrity.portable-artifact-unsigned",
+          "ruleIndex": 11
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/assets.rs"
+                },
+                "region": {
+                  "endLine": 96,
+                  "startLine": 71
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/assets.rs"
+                },
+                "region": {
+                  "endLine": 128,
+                  "startLine": 99
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/runner.rs"
+                },
+                "region": {
+                  "endLine": 1816,
+                  "startLine": 1782
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/benchmark/process_win.rs"
+                },
+                "region": {
+                  "endLine": 149,
+                  "startLine": 140
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u53ef\u4fee\u6539\u540c\u76ee\u9304 manifest \u8207\u672a\u9a57\u8b49 D3D9 \u7121\u6cd5\u4fdd\u8b77 elevated sidecars\n\nSHA256SUMS\u8207sidecars\u5171\u7f6e\u4e14parser\u4e0d\u8981\u6c42\u56fa\u5b9aentries\uff0cD3D9\u53eaexists\uff1b\u53ef\u5bebresource tree\u7684attacker\u53ef\u5728benchmark trigger\u57f7\u884cadministrator code\u3002\n\nSeverity: medium\n\nCategory: Missing executable integrity\n\nWeaknesses: CWE-353\n\nRemediation:\n\u628a\u56fa\u5b9adigests/public key\u5d4c\u5165trusted main binary\uff0c\u9a57\u8b49\u5168\u90e8\u4e09\u500b\u5be6\u969bfile identities\u4e26\u4fdd\u8b77resource ACL\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:edb516e9a3b7ef13044e4e13dada3a351f63cc4b191bdcd07b7ed2a10655192e"
+          },
+          "properties": {
+            "candidateId": "investigator-007",
+            "category": "missing-executable-integrity",
+            "confidence": "high",
+            "findingId": "csf_b4f223a6980266b395b88455",
+            "occurrenceId": "occ_e8b28ff27a01379d0337a97e",
+            "severity": "medium"
+          },
+          "ruleId": "privilege-escalation.mutable-benchmark-sidecars",
+          "ruleIndex": 4
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/autostart.rs"
+                },
+                "region": {
+                  "endLine": 59,
+                  "startLine": 54
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/tray.rs"
+                },
+                "region": {
+                  "endLine": 90,
+                  "startLine": 79
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/update.rs"
+                },
+                "region": {
+                  "endLine": 706,
+                  "startLine": 695
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/src/commands.rs"
+                },
+                "region": {
+                  "endLine": 162,
+                  "startLine": 154
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src-tauri/build.rs"
+                },
+                "region": {
+                  "endLine": 31,
+                  "startLine": 27
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "\u672a\u9650\u5b9a\u7cfb\u7d71\u5de5\u5177\u8def\u5f91\u53ef\u5728\u63d0\u5347\u5f8c\u555f\u52d5\u653b\u64ca\u8005 binary\n\n\u63d0\u5347\u6b0a\u9650\u7684 host \u4ee5\u88f8\u540d\u7a31\u555f\u52d5 schtasks\u3001powershell \u8207 explorer\uff1btray \u521d\u59cb\u5316\u6703\u7121\u689d\u4ef6\u67e5\u8a62 schtasks\u3002\u82e5 application/current/search directory \u53ef\u5beb\uff0c\u653b\u64ca\u8005\u653e\u7f6e\u7684\u540c\u540d executable \u53ef\u5148\u65bc\u771f\u6b63\u7cfb\u7d71\u5de5\u5177\u88ab\u89e3\u6790\u4e26\u7e7c\u627f administrator token\u3002\n\nSeverity: high\n\nCategory: Untrusted search path\n\nWeaknesses: CWE-426\n\nRemediation:\n\u4ee5 GetSystemDirectoryW \u7b49\u53ef\u4fe1 API \u7d44\u51fa `%SystemRoot%\\System32\\schtasks.exe`\u3001`explorer.exe` \u8207 Windows PowerShell \u7684\u7d55\u5c0d\u8def\u5f91\uff0c\u56fa\u5b9a child current directory \u5230\u53d7\u4fdd\u8b77\u4f4d\u7f6e\uff1b\u53ef\u884c\u6642\u6539\u7528 Windows API\uff0c\u4e0d\u4f9d\u8cf4 PATH/PATHEXT/application/current directory\u3002\n\nRemediation tests:\n- \u5728\u6e2c\u8a66 PATH/current/application directory \u653e\u7f6e\u540c\u540d fixture\uff0c\u78ba\u8a8d\u65b0\u7248\u672c\u4ecd\u53ea\u57f7\u884c\u89e3\u6790\u5f8c\u7684 System32 file ID\u3002\n- \u6e2c\u8a66 WOW64/System32 \u8def\u5f91\u89e3\u6790\u8207\u4e0d\u5b58\u5728\u6642 fail closed\u3002\n\nPreventive controls:\n- \u6240\u6709 privileged child selectors \u4f7f\u7528 validated absolute paths\u3002\n- \u4e0d\u8981\u7e7c\u627f\u4e0d\u53ef\u4fe1 child CWD/PATH\u3002"
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:3219eee6ede0fae731d5d367c43eab1d7f5304880b5eddce7a0536cc939aa901"
+          },
+          "properties": {
+            "candidateId": "investigator-003",
+            "category": "untrusted-search-path",
+            "confidence": "high",
+            "findingId": "csf_71b00bbf92891596f7466e5d",
+            "occurrenceId": "occ_ec3bc51ad35a7e221b38c2f1",
+            "severity": "high"
+          },
+          "ruleId": "privilege-escalation.untrusted-system-tool-search",
+          "ruleIndex": 6
+        }
+      ],
+      "tool": {
+        "driver": {
+          "name": "Codex Security",
+          "rules": [
+            {
+              "fullDescription": {
+                "text": "Benchmark integrity: Untrusted capture files. Categories: Benchmark evidence integrity. Weaknesses: CWE-345, CWE-367."
+              },
+              "help": {
+                "markdown": "Benchmark integrity: Untrusted capture files. Categories: Benchmark evidence integrity. Weaknesses: CWE-345, CWE-367.\n\n## Remediation\n\nTreat any stale-output deletion error as fatal and require PresentMon to exit successfully. Create each capture in a random high-only directory and require the output not to exist beforehand. Read and parse exactly once from a protected handle into immutable memory; if rereads are unavoidable, bind every read to the saved Windows file ID, creation time and digest.\n\nstale delete\u5931\u6557\u5373fail closed\uff0c\u8981\u6c42PresentMon\u6210\u529f\uff1b\u5f9e\u53d7\u4fdd\u8b77handle\u53ea\u89e3\u6790\u4e00\u6b21\u4e26\u5728\u8a18\u61b6\u9ad4\u4fdd\u5b58immutable results\uff0c\u6216\u4fdd\u5b58/\u9a57\u8b49file ID\u8207digest\uff1b\u4f7f\u7528high-only\u96a8\u6a5fcapture directory\u3002\n\nstale delete\u5931\u6557\u5373fail closed\uff0c\u8981\u6c42PresentMon\u6210\u529f\uff1b\u6bcf\u6b21capture\u7528high-only\u96a8\u6a5fdirectory\u4e26\u7d81\u5b9a\u65b0file identity/creation\u3002",
+                "text": "Benchmark integrity: Untrusted capture files. Categories: Benchmark evidence integrity. Weaknesses: CWE-345, CWE-367.\n\nRemediation:\n\nTreat any stale-output deletion error as fatal and require PresentMon to exit successfully. Create each capture in a random high-only directory and require the output not to exist beforehand. Read and parse exactly once from a protected handle into immutable memory; if rereads are unavoidable, bind every read to the saved Windows file ID, creation time and digest.\n\nstale delete\u5931\u6557\u5373fail closed\uff0c\u8981\u6c42PresentMon\u6210\u529f\uff1b\u5f9e\u53d7\u4fdd\u8b77handle\u53ea\u89e3\u6790\u4e00\u6b21\u4e26\u5728\u8a18\u61b6\u9ad4\u4fdd\u5b58immutable results\uff0c\u6216\u4fdd\u5b58/\u9a57\u8b49file ID\u8207digest\uff1b\u4f7f\u7528high-only\u96a8\u6a5fcapture directory\u3002\n\nstale delete\u5931\u6557\u5373fail closed\uff0c\u8981\u6c42PresentMon\u6210\u529f\uff1b\u6bcf\u6b21capture\u7528high-only\u96a8\u6a5fdirectory\u4e26\u7d81\u5b9a\u65b0file identity/creation\u3002"
+              },
+              "id": "benchmark-integrity.untrusted-capture-files",
+              "name": "Benchmark integrity: Untrusted capture files",
+              "properties": {
+                "security-severity": "5.0",
+                "tags": [
+                  "benchmark-evidence-integrity",
+                  "external/cwe/cwe-345",
+                  "external/cwe/cwe-367",
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "Benchmark integrity: Untrusted capture files"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Output injection: Pe terminal control sequences. Categories: Terminal output injection. Weaknesses: CWE-150."
+              },
+              "help": {
+                "markdown": "Output injection: Pe terminal control sequences. Categories: Terminal output injection. Weaknesses: CWE-150.\n\n## Remediation\n\nEmit structured JSON or a visible escaped representation. Replace C0/C1 controls, DEL, ESC, newline, carriage return, backspace and terminal-sensitive Unicode with `\\xNN`/`\\uNNNN` before display.\n\n\u5c07untrusted names\u8f38\u51fa\u70baJSON\u6216visible escaped representation\uff1b\u628aC0/C1/DEL/ESC/newline/CR\u53caterminal-sensitive Unicode\u8f49\u70ba\\xNN/\\uNNNN\u3002",
+                "text": "Output injection: Pe terminal control sequences. Categories: Terminal output injection. Weaknesses: CWE-150.\n\nRemediation:\n\nEmit structured JSON or a visible escaped representation. Replace C0/C1 controls, DEL, ESC, newline, carriage return, backspace and terminal-sensitive Unicode with `\\xNN`/`\\uNNNN` before display.\n\n\u5c07untrusted names\u8f38\u51fa\u70baJSON\u6216visible escaped representation\uff1b\u628aC0/C1/DEL/ESC/newline/CR\u53caterminal-sensitive Unicode\u8f49\u70ba\\xNN/\\uNNNN\u3002"
+              },
+              "id": "output-injection.pe-terminal-control-sequences",
+              "name": "Output injection: Pe terminal control sequences",
+              "properties": {
+                "security-severity": "2.0",
+                "tags": [
+                  "external/cwe/cwe-150",
+                  "security",
+                  "terminal-output-injection"
+                ]
+              },
+              "shortDescription": {
+                "text": "Output injection: Pe terminal control sequences"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Parser dos: Pe unterminated cstring. Categories: Parser denial of service. Weaknesses: CWE-835."
+              },
+              "help": {
+                "markdown": "Parser dos: Pe unterminated cstring. Categories: Parser denial of service. Weaknesses: CWE-835.\n\n## Remediation\n\nValidate DOS/PE/optional-header/section/RVA/raw-file bounds before every read. Implement cstr with bounded `buf.indexOf(0, offset)` and reject missing terminators or excessive length. Cap section, export-name, import-descriptor and thunk counts.\n\n\u6240\u6709PE offsets/counts\u5148\u505abounds checks\uff1bcstr\u7528bounded indexOf\u4e26\u62d2\u7d55missing NUL/\u8d85\u9577string\uff1b\u9650\u5236section/name/descriptor/thunk counts\u3002",
+                "text": "Parser dos: Pe unterminated cstring. Categories: Parser denial of service. Weaknesses: CWE-835.\n\nRemediation:\n\nValidate DOS/PE/optional-header/section/RVA/raw-file bounds before every read. Implement cstr with bounded `buf.indexOf(0, offset)` and reject missing terminators or excessive length. Cap section, export-name, import-descriptor and thunk counts.\n\n\u6240\u6709PE offsets/counts\u5148\u505abounds checks\uff1bcstr\u7528bounded indexOf\u4e26\u62d2\u7d55missing NUL/\u8d85\u9577string\uff1b\u9650\u5236section/name/descriptor/thunk counts\u3002"
+              },
+              "id": "parser-dos.pe-unterminated-cstring",
+              "name": "Parser dos: Pe unterminated cstring",
+              "properties": {
+                "security-severity": "2.0",
+                "tags": [
+                  "external/cwe/cwe-835",
+                  "parser-denial-of-service",
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "Parser dos: Pe unterminated cstring"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Privilege escalation: Benchmark executable overrides. Categories: Externally controlled executable, Privilege escalation. Weaknesses: CWE-73."
+              },
+              "help": {
+                "markdown": "Privilege escalation: Benchmark executable overrides. Categories: Externally controlled executable, Privilege escalation. Weaknesses: CWE-73.\n\n## Remediation\n\n\u5f9e production IPC\u8207persisted schema\u79fb\u9664 executable override\uff0c\u50c5\u7528 `cfg(test)`/test dependency injection\u3002\u5f8c\u7aef\u56fa\u5b9a\u89e3\u6790\u53d7\u4fdd\u8b77root\u4e0b\u7684sidecars\uff0c\u4e26\u5c0drunner\u5be6\u969b\u8981spawn\u7684\u540c\u4e00file identity\u9a57\u8b49 embedded digest/signature\u3002\u82e5\u7522\u54c1\u78ba\u9700custom workload\uff0c\u4e0d\u5f97\u4ee5host administrator token\u57f7\u884c\u3002\n\n\u79fb\u9664production overrides\u4e26\u9a57\u8b49\u5be6\u969bexecuted file identity\u3002\n\n\u79fb\u9664production overrides\uff1b\u56fa\u5b9a\u53d7\u4fdd\u8b77\u8def\u5f91\u4e26\u9a57\u8b49\u5be6\u969bfile identity\u3002",
+                "text": "Privilege escalation: Benchmark executable overrides. Categories: Externally controlled executable, Privilege escalation. Weaknesses: CWE-73.\n\nRemediation:\n\n\u5f9e production IPC\u8207persisted schema\u79fb\u9664 executable override\uff0c\u50c5\u7528 `cfg(test)`/test dependency injection\u3002\u5f8c\u7aef\u56fa\u5b9a\u89e3\u6790\u53d7\u4fdd\u8b77root\u4e0b\u7684sidecars\uff0c\u4e26\u5c0drunner\u5be6\u969b\u8981spawn\u7684\u540c\u4e00file identity\u9a57\u8b49 embedded digest/signature\u3002\u82e5\u7522\u54c1\u78ba\u9700custom workload\uff0c\u4e0d\u5f97\u4ee5host administrator token\u57f7\u884c\u3002\n\n\u79fb\u9664production overrides\u4e26\u9a57\u8b49\u5be6\u969bexecuted file identity\u3002\n\n\u79fb\u9664production overrides\uff1b\u56fa\u5b9a\u53d7\u4fdd\u8b77\u8def\u5f91\u4e26\u9a57\u8b49\u5be6\u969bfile identity\u3002"
+              },
+              "id": "privilege-escalation.benchmark-executable-overrides",
+              "name": "Privilege escalation: Benchmark executable overrides",
+              "properties": {
+                "security-severity": "5.0",
+                "tags": [
+                  "external/cwe/cwe-073",
+                  "externally-controlled-executable",
+                  "privilege-escalation",
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "Privilege escalation: Benchmark executable overrides"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Privilege escalation: Mutable benchmark sidecars. Categories: Missing executable integrity, Privilege escalation. Weaknesses: CWE-353."
+              },
+              "help": {
+                "markdown": "Privilege escalation: Mutable benchmark sidecars. Categories: Missing executable integrity, Privilege escalation. Weaknesses: CWE-353.\n\n## Remediation\n\n\u5d4c\u5165trust root\u3001\u9a57\u8b49\u56fa\u5b9a\u4e09\u500bsidecars\u4e26\u4fdd\u8b77resource tree\u3002\n\n\u628a\u56fa\u5b9adigests/public key\u5d4c\u5165trusted main binary\uff0c\u9a57\u8b49\u5168\u90e8\u4e09\u500b\u5be6\u969bfile identities\u4e26\u4fdd\u8b77resource ACL\u3002\n\n\u628a\u6bcf\u500b\u6b63\u5f0fsidecar\u7684digest\u6216verification public key\u5d4c\u5165\u53d7\u4fe1\u4efbmain executable\uff0c\u660e\u78ba\u8981\u6c42\u4e26\u9a57\u8b49\u56fa\u5b9a\u4e09\u500b\u540d\u7a31\u3001protected absolute paths\u53ca\u540c\u4e00file identity\uff1b\u70baD3D9\u7522\u751fper-build digest/signature\u3002\u5c07app/resources\u5b89\u88dd\u5230medium-integrity\u4e0d\u53ef\u5beb\u4f4d\u7f6e\uff0c\u62d2\u7d55reparse points\u4e26\u5728spawn\u524d\u6700\u5f8c\u9a57\u8b49\u3002",
+                "text": "Privilege escalation: Mutable benchmark sidecars. Categories: Missing executable integrity, Privilege escalation. Weaknesses: CWE-353.\n\nRemediation:\n\n\u5d4c\u5165trust root\u3001\u9a57\u8b49\u56fa\u5b9a\u4e09\u500bsidecars\u4e26\u4fdd\u8b77resource tree\u3002\n\n\u628a\u56fa\u5b9adigests/public key\u5d4c\u5165trusted main binary\uff0c\u9a57\u8b49\u5168\u90e8\u4e09\u500b\u5be6\u969bfile identities\u4e26\u4fdd\u8b77resource ACL\u3002\n\n\u628a\u6bcf\u500b\u6b63\u5f0fsidecar\u7684digest\u6216verification public key\u5d4c\u5165\u53d7\u4fe1\u4efbmain executable\uff0c\u660e\u78ba\u8981\u6c42\u4e26\u9a57\u8b49\u56fa\u5b9a\u4e09\u500b\u540d\u7a31\u3001protected absolute paths\u53ca\u540c\u4e00file identity\uff1b\u70baD3D9\u7522\u751fper-build digest/signature\u3002\u5c07app/resources\u5b89\u88dd\u5230medium-integrity\u4e0d\u53ef\u5beb\u4f4d\u7f6e\uff0c\u62d2\u7d55reparse points\u4e26\u5728spawn\u524d\u6700\u5f8c\u9a57\u8b49\u3002"
+              },
+              "id": "privilege-escalation.mutable-benchmark-sidecars",
+              "name": "Privilege escalation: Mutable benchmark sidecars",
+              "properties": {
+                "security-severity": "5.0",
+                "tags": [
+                  "external/cwe/cwe-353",
+                  "missing-executable-integrity",
+                  "privilege-escalation",
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "Privilege escalation: Mutable benchmark sidecars"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Privilege escalation: Portable update staging race. Categories: Insecure temporary file, Privilege escalation. Weaknesses: CWE-367, CWE-377."
+              },
+              "help": {
+                "markdown": "Privilege escalation: Portable update staging race. Categories: Insecure temporary file, Privilege escalation. Weaknesses: CWE-367, CWE-377.\n\n## Remediation\n\n\u4e0d\u8981\u5f9e\u5171\u4eab user TEMP \u4f9d\u540d\u7a31\u57f7\u884c\u8173\u672c\u3002\u4f7f\u7528\u53d7\u4fdd\u8b77\u3001\u6bcf\u6b21\u4e0d\u53ef\u9810\u6e2c\u7684 high-only staging directory\uff0cexclusive/create-new \u4e14\u62d2\u7d55 reparse point\uff1b\u7528\u6301\u7e8c\u6301\u6709\u7684 handle \u6216 file ID \u628a\u9a57\u8b49\u3001\u7f6e\u63db\u8207\u57f7\u884c\u7d81\u5230\u540c\u4e00\u7269\u4ef6\uff0c\u4e26\u5728\u4ea4\u63db\u524d\u9a57\u8b49 executable signature\u3002\u8f03\u4f73\u65b9\u6848\u662f\u53d7\u4fdd\u8b77\u4e14\u5df2\u7c3d\u7f72\u7684 native updater/helper\u3002\n\n\u4f7f\u7528high-only\u96a8\u6a5fno-reparse staging\u8207handle/file-ID binding\u3002\n\n\u4f7f\u7528high-only\u96a8\u6a5fstaging\u3001exclusive no-reparse creation\u3001file-ID/handle binding\u8207protected signed helper\u3002",
+                "text": "Privilege escalation: Portable update staging race. Categories: Insecure temporary file, Privilege escalation. Weaknesses: CWE-367, CWE-377.\n\nRemediation:\n\n\u4e0d\u8981\u5f9e\u5171\u4eab user TEMP \u4f9d\u540d\u7a31\u57f7\u884c\u8173\u672c\u3002\u4f7f\u7528\u53d7\u4fdd\u8b77\u3001\u6bcf\u6b21\u4e0d\u53ef\u9810\u6e2c\u7684 high-only staging directory\uff0cexclusive/create-new \u4e14\u62d2\u7d55 reparse point\uff1b\u7528\u6301\u7e8c\u6301\u6709\u7684 handle \u6216 file ID \u628a\u9a57\u8b49\u3001\u7f6e\u63db\u8207\u57f7\u884c\u7d81\u5230\u540c\u4e00\u7269\u4ef6\uff0c\u4e26\u5728\u4ea4\u63db\u524d\u9a57\u8b49 executable signature\u3002\u8f03\u4f73\u65b9\u6848\u662f\u53d7\u4fdd\u8b77\u4e14\u5df2\u7c3d\u7f72\u7684 native updater/helper\u3002\n\n\u4f7f\u7528high-only\u96a8\u6a5fno-reparse staging\u8207handle/file-ID binding\u3002\n\n\u4f7f\u7528high-only\u96a8\u6a5fstaging\u3001exclusive no-reparse creation\u3001file-ID/handle binding\u8207protected signed helper\u3002"
+              },
+              "id": "privilege-escalation.portable-update-staging-race",
+              "name": "Privilege escalation: Portable update staging race",
+              "properties": {
+                "security-severity": "8.0",
+                "tags": [
+                  "external/cwe/cwe-367",
+                  "external/cwe/cwe-377",
+                  "insecure-temporary-file",
+                  "privilege-escalation",
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "Privilege escalation: Portable update staging race"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Privilege escalation: Untrusted system tool search. Categories: Privilege escalation, Untrusted search path. Weaknesses: CWE-426."
+              },
+              "help": {
+                "markdown": "Privilege escalation: Untrusted system tool search. Categories: Privilege escalation, Untrusted search path. Weaknesses: CWE-426.\n\n## Remediation\n\n\u4ee5 GetSystemDirectoryW \u7b49\u53ef\u4fe1 API \u7d44\u51fa `%SystemRoot%\\System32\\schtasks.exe`\u3001`explorer.exe` \u8207 Windows PowerShell \u7684\u7d55\u5c0d\u8def\u5f91\uff0c\u56fa\u5b9a child current directory \u5230\u53d7\u4fdd\u8b77\u4f4d\u7f6e\uff1b\u53ef\u884c\u6642\u6539\u7528 Windows API\uff0c\u4e0d\u4f9d\u8cf4 PATH/PATHEXT/application/current directory\u3002\n\n\u4f7f\u7528System32\u53ef\u4fe1\u7d55\u5c0d\u8def\u5f91\u6216Windows API\u3002\n\n\u4f7f\u7528System32\u53ef\u4fe1\u7d55\u5c0d\u8def\u5f91\u8207\u53d7\u4fdd\u8b77child CWD\uff0c\u6216\u76f4\u63a5Windows API\u3002",
+                "text": "Privilege escalation: Untrusted system tool search. Categories: Privilege escalation, Untrusted search path. Weaknesses: CWE-426.\n\nRemediation:\n\n\u4ee5 GetSystemDirectoryW \u7b49\u53ef\u4fe1 API \u7d44\u51fa `%SystemRoot%\\System32\\schtasks.exe`\u3001`explorer.exe` \u8207 Windows PowerShell \u7684\u7d55\u5c0d\u8def\u5f91\uff0c\u56fa\u5b9a child current directory \u5230\u53d7\u4fdd\u8b77\u4f4d\u7f6e\uff1b\u53ef\u884c\u6642\u6539\u7528 Windows API\uff0c\u4e0d\u4f9d\u8cf4 PATH/PATHEXT/application/current directory\u3002\n\n\u4f7f\u7528System32\u53ef\u4fe1\u7d55\u5c0d\u8def\u5f91\u6216Windows API\u3002\n\n\u4f7f\u7528System32\u53ef\u4fe1\u7d55\u5c0d\u8def\u5f91\u8207\u53d7\u4fdd\u8b77child CWD\uff0c\u6216\u76f4\u63a5Windows API\u3002"
+              },
+              "id": "privilege-escalation.untrusted-system-tool-search",
+              "name": "Privilege escalation: Untrusted system tool search",
+              "properties": {
+                "security-severity": "8.0",
+                "tags": [
+                  "external/cwe/cwe-426",
+                  "privilege-escalation",
+                  "security",
+                  "untrusted-search-path"
+                ]
+              },
+              "shortDescription": {
+                "text": "Privilege escalation: Untrusted system tool search"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Privilege escalation: Writable scheduled task target. Categories: Privilege escalation. Weaknesses: CWE-732."
+              },
+              "help": {
+                "markdown": "Privilege escalation: Writable scheduled task target. Categories: Privilege escalation. Weaknesses: CWE-732.\n\n## Remediation\n\n\u4e0d\u5f97\u70ba medium-integrity \u53ef\u5beb\u4f4d\u7f6e\u5efa\u7acb HIGHEST task\u3002\u5c07\u4e3b\u7a0b\u5f0f\u6216\u6700\u5c0f signed launcher \u5b89\u88dd\u5230 machine-wide\u3001Administrators/SYSTEM \u624d\u53ef\u4fee\u6539\u7684\u76ee\u9304\uff1b\u5efa\u7acb\u53ca\u6bcf\u6b21\u66f4\u65b0\u5f8c\u9a57\u8b49\u6240\u6709\u7236\u76ee\u9304\u8207\u6a94\u6848\u7684 DACL\u3001owner\u3001reparse \u72c0\u614b\u53ca\u7c3d\u7ae0\u3002\u82e5\u505a\u4e0d\u5230\uff0c\u5c07 task \u964d\u70ba LIMITED \u6216\u62d2\u7d55\u555f\u7528\u3002\n\n\u4f7f\u7528\u53d7\u4fdd\u8b77signed machine-wide target\u4e26\u9a57\u8b49\u5b8c\u6574path ACL/owner/reparse\u3002\n\n\u53ea\u5141\u8a31\u53d7\u4fdd\u8b77\u3001\u5df2\u9a57\u8b49\u7684 machine-wide executable/stub \u4f5c\u70ba HIGHEST task target\uff1b\u9a57\u8b49\u5b8c\u6574\u8def\u5f91 DACL/owner/reparse/signature\u3002",
+                "text": "Privilege escalation: Writable scheduled task target. Categories: Privilege escalation. Weaknesses: CWE-732.\n\nRemediation:\n\n\u4e0d\u5f97\u70ba medium-integrity \u53ef\u5beb\u4f4d\u7f6e\u5efa\u7acb HIGHEST task\u3002\u5c07\u4e3b\u7a0b\u5f0f\u6216\u6700\u5c0f signed launcher \u5b89\u88dd\u5230 machine-wide\u3001Administrators/SYSTEM \u624d\u53ef\u4fee\u6539\u7684\u76ee\u9304\uff1b\u5efa\u7acb\u53ca\u6bcf\u6b21\u66f4\u65b0\u5f8c\u9a57\u8b49\u6240\u6709\u7236\u76ee\u9304\u8207\u6a94\u6848\u7684 DACL\u3001owner\u3001reparse \u72c0\u614b\u53ca\u7c3d\u7ae0\u3002\u82e5\u505a\u4e0d\u5230\uff0c\u5c07 task \u964d\u70ba LIMITED \u6216\u62d2\u7d55\u555f\u7528\u3002\n\n\u4f7f\u7528\u53d7\u4fdd\u8b77signed machine-wide target\u4e26\u9a57\u8b49\u5b8c\u6574path ACL/owner/reparse\u3002\n\n\u53ea\u5141\u8a31\u53d7\u4fdd\u8b77\u3001\u5df2\u9a57\u8b49\u7684 machine-wide executable/stub \u4f5c\u70ba HIGHEST task target\uff1b\u9a57\u8b49\u5b8c\u6574\u8def\u5f91 DACL/owner/reparse/signature\u3002"
+              },
+              "id": "privilege-escalation.writable-scheduled-task-target",
+              "name": "Privilege escalation: Writable scheduled task target",
+              "properties": {
+                "security-severity": "8.0",
+                "tags": [
+                  "external/cwe/cwe-732",
+                  "privilege-escalation",
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "Privilege escalation: Writable scheduled task target"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Privileged state: Unauthenticated gpu recovery. Categories: External control of system setting, Privileged state. Weaknesses: CWE-15, CWE-345."
+              },
+              "help": {
+                "markdown": "Privileged state: Unauthenticated gpu recovery. Categories: External control of system setting, Privileged state. Weaknesses: CWE-15, CWE-345.\n\n## Remediation\n\nStore recovery, restore and benchmark evidence where medium-integrity processes cannot write, or authenticate complete payloads with a key only available to the elevated component. Bound file sizes and registry value types/lengths; require journal/snapshot IDs to agree; verify a present display adapter before any write. For session apply, MAC the config, results, reliability, CPU/GPU identity and selected LP, and apply exactly the verified in-memory snapshot.\n\nhigh-only/MAC state\uff0c\u9650\u5236schema\u4e26\u5728write\u524d\u9a57\u8b49present adapter\u3002\n\n\u4ee5high-only storage\u6216MAC\u4fdd\u8b77\u5b8c\u6574recovery/restore/session payload\uff1b\u9650\u5236schema\uff0c\u4e26\u5728\u540c\u4e00\u9a57\u8b49snapshot\u4e0a\u57f7\u884ctarget checks\u8207mutation\u3002\n\n\u4ee5high-only storage\u6216MAC\u4fdd\u8b77\uff1b\u9650\u5236size/type/length\uff0c\u9a57\u8b49ID\u4e00\u81f4\u53capresent adapter\u5f8c\u624d\u5beb\u3002\n\n\u5c07 recovery/restore state \u5b58\u65bc medium-integrity \u4e0d\u53ef\u5beb\u7684 ACL/MIC \u4f4d\u7f6e\uff0c\u6216\u4ee5 only-elevated key \u5c0d\u5167\u5bb9\u505a MAC\uff1b\u8b80\u53d6\u524d\u9650\u5236\u6a94\u6848\u5927\u5c0f\u3002\u8981\u6c42 journal \u8207 snapshot instance ID \u76f8\u7b49\uff0c\u5728\u4efb\u4f55 registry write \u524d\u9a57\u8b49\u76ee\u524d present display adapter\uff1b\u9650\u5236 DevicePolicy/AssignmentSetOverride type\u3001\u9577\u5ea6\u53ca\u8a9e\u610f\uff0c\u4e26\u628a restore record \u7d81\u5b9a\u6700\u8fd1\u4e00\u6b21\u53ef\u4fe1 mutation\u3002",
+                "text": "Privileged state: Unauthenticated gpu recovery. Categories: External control of system setting, Privileged state. Weaknesses: CWE-15, CWE-345.\n\nRemediation:\n\nStore recovery, restore and benchmark evidence where medium-integrity processes cannot write, or authenticate complete payloads with a key only available to the elevated component. Bound file sizes and registry value types/lengths; require journal/snapshot IDs to agree; verify a present display adapter before any write. For session apply, MAC the config, results, reliability, CPU/GPU identity and selected LP, and apply exactly the verified in-memory snapshot.\n\nhigh-only/MAC state\uff0c\u9650\u5236schema\u4e26\u5728write\u524d\u9a57\u8b49present adapter\u3002\n\n\u4ee5high-only storage\u6216MAC\u4fdd\u8b77\u5b8c\u6574recovery/restore/session payload\uff1b\u9650\u5236schema\uff0c\u4e26\u5728\u540c\u4e00\u9a57\u8b49snapshot\u4e0a\u57f7\u884ctarget checks\u8207mutation\u3002\n\n\u4ee5high-only storage\u6216MAC\u4fdd\u8b77\uff1b\u9650\u5236size/type/length\uff0c\u9a57\u8b49ID\u4e00\u81f4\u53capresent adapter\u5f8c\u624d\u5beb\u3002\n\n\u5c07 recovery/restore state \u5b58\u65bc medium-integrity \u4e0d\u53ef\u5beb\u7684 ACL/MIC \u4f4d\u7f6e\uff0c\u6216\u4ee5 only-elevated key \u5c0d\u5167\u5bb9\u505a MAC\uff1b\u8b80\u53d6\u524d\u9650\u5236\u6a94\u6848\u5927\u5c0f\u3002\u8981\u6c42 journal \u8207 snapshot instance ID \u76f8\u7b49\uff0c\u5728\u4efb\u4f55 registry write \u524d\u9a57\u8b49\u76ee\u524d present display adapter\uff1b\u9650\u5236 DevicePolicy/AssignmentSetOverride type\u3001\u9577\u5ea6\u53ca\u8a9e\u610f\uff0c\u4e26\u628a restore record \u7d81\u5b9a\u6700\u8fd1\u4e00\u6b21\u53ef\u4fe1 mutation\u3002"
+              },
+              "id": "privileged-state.unauthenticated-gpu-recovery",
+              "name": "Privileged state: Unauthenticated gpu recovery",
+              "properties": {
+                "security-severity": "5.0",
+                "tags": [
+                  "external-control-of-system-setting",
+                  "external/cwe/cwe-015",
+                  "external/cwe/cwe-345",
+                  "privileged-state",
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "Privileged state: Unauthenticated gpu recovery"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Supply chain: Mutable release action. Categories: Ci supply chain, Supply chain. Weaknesses: CWE-829."
+              },
+              "help": {
+                "markdown": "Supply chain: Mutable release action. Categories: Ci supply chain, Supply chain. Weaknesses: CWE-829.\n\n## Remediation\n\npin full SHAs\uff1b\u9694\u96e2approval-gated signing/upload job\u8207least-privilege credentials\u3002\n\npin\u5b8c\u6574SHA\u4e26\u9694\u96e2approval-gated signing/upload\u3002\n\n\u5c07\u6240\u6709Actions\u56fa\u5b9a\u5230\u7d93\u5be9\u6838\u5b8c\u6574commit SHA\u4e26\u7528Dependabot/\u4eba\u5de5review\u66f4\u65b0\uff1b\u628auntrusted build/test\u8207sign/upload\u62c6\u6210jobs\uff0c\u53ea\u6709environment-approved\u6700\u7d42job\u53ef\u53d6\u5f97private key\u8207least-privilege release token\uff1b\u512a\u5148\u4f7f\u7528\u77ed\u671f/\u786c\u9ad4\u6216\u53d7\u63a7signing service\u3002",
+                "text": "Supply chain: Mutable release action. Categories: Ci supply chain, Supply chain. Weaknesses: CWE-829.\n\nRemediation:\n\npin full SHAs\uff1b\u9694\u96e2approval-gated signing/upload job\u8207least-privilege credentials\u3002\n\npin\u5b8c\u6574SHA\u4e26\u9694\u96e2approval-gated signing/upload\u3002\n\n\u5c07\u6240\u6709Actions\u56fa\u5b9a\u5230\u7d93\u5be9\u6838\u5b8c\u6574commit SHA\u4e26\u7528Dependabot/\u4eba\u5de5review\u66f4\u65b0\uff1b\u628auntrusted build/test\u8207sign/upload\u62c6\u6210jobs\uff0c\u53ea\u6709environment-approved\u6700\u7d42job\u53ef\u53d6\u5f97private key\u8207least-privilege release token\uff1b\u512a\u5148\u4f7f\u7528\u77ed\u671f/\u786c\u9ad4\u6216\u53d7\u63a7signing service\u3002"
+              },
+              "id": "supply-chain.mutable-release-action",
+              "name": "Supply chain: Mutable release action",
+              "properties": {
+                "security-severity": "2.0",
+                "tags": [
+                  "ci-supply-chain",
+                  "external/cwe/cwe-829",
+                  "security",
+                  "supply-chain"
+                ]
+              },
+              "shortDescription": {
+                "text": "Supply chain: Mutable release action"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Supply chain: Unverified benchmark refresh. Categories: Build supply chain, Supply chain. Weaknesses: CWE-494."
+              },
+              "help": {
+                "markdown": "Supply chain: Unverified benchmark refresh. Categories: Build supply chain, Supply chain. Weaknesses: CWE-494.\n\n## Remediation\n\n\u4e0b\u8f09\u5f8c\u5148\u5c0dpretrusted digest\u6216publisher identity\u9a57\u8b49\uff1bdigest\u66f4\u65b0\u7368\u7acbreview\u3002\n\n\u4e0b\u8f09\u5f8c\u5148\u9a57\u8b49known-good digest/publisher identity\u3002\n\n\u5728repository\u6216\u7368\u7acb\u53d7\u5be9\u6838metadata\u4e2d\u56fa\u5b9aknown-good SHA256\u6216publisher signer identity\uff1b\u4e0b\u8f09\u5f8c\u5148\u9a57\u8b49\u518dcopy/modify\u3002digest\u66f4\u65b0\u5fc5\u9808\u7368\u7acbreview\uff0c\u4e0d\u53ef\u7531\u4e0b\u8f09script\u81ea\u52d5\u628a\u525b\u53d6\u5f97bytes\u5347\u683c\u70batrust root\uff1b\u53ef\u52a0Sigstore/Authenticode verification\u8207provenance attestation\u3002",
+                "text": "Supply chain: Unverified benchmark refresh. Categories: Build supply chain, Supply chain. Weaknesses: CWE-494.\n\nRemediation:\n\n\u4e0b\u8f09\u5f8c\u5148\u5c0dpretrusted digest\u6216publisher identity\u9a57\u8b49\uff1bdigest\u66f4\u65b0\u7368\u7acbreview\u3002\n\n\u4e0b\u8f09\u5f8c\u5148\u9a57\u8b49known-good digest/publisher identity\u3002\n\n\u5728repository\u6216\u7368\u7acb\u53d7\u5be9\u6838metadata\u4e2d\u56fa\u5b9aknown-good SHA256\u6216publisher signer identity\uff1b\u4e0b\u8f09\u5f8c\u5148\u9a57\u8b49\u518dcopy/modify\u3002digest\u66f4\u65b0\u5fc5\u9808\u7368\u7acbreview\uff0c\u4e0d\u53ef\u7531\u4e0b\u8f09script\u81ea\u52d5\u628a\u525b\u53d6\u5f97bytes\u5347\u683c\u70batrust root\uff1b\u53ef\u52a0Sigstore/Authenticode verification\u8207provenance attestation\u3002"
+              },
+              "id": "supply-chain.unverified-benchmark-refresh",
+              "name": "Supply chain: Unverified benchmark refresh",
+              "properties": {
+                "security-severity": "2.0",
+                "tags": [
+                  "build-supply-chain",
+                  "external/cwe/cwe-494",
+                  "security",
+                  "supply-chain"
+                ]
+              },
+              "shortDescription": {
+                "text": "Supply chain: Unverified benchmark refresh"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Update integrity: Portable artifact unsigned. Categories: Insufficient update authenticity, Update integrity. Weaknesses: CWE-494."
+              },
+              "help": {
+                "markdown": "Update integrity: Portable artifact unsigned. Categories: Insufficient update authenticity, Update integrity. Weaknesses: CWE-494.\n\n## Remediation\n\n\u4ee5embedded public key\u9a57\u8b49portable artifact\u53caversion metadata signature\u3002\n\n\u4ee5embedded public key\u9a57\u8b49portable artifact\u8207metadata signature\u3002\n\n\u4ee5\u65e2\u6709Tauri signing key\u6216\u5c08\u7528offline key\u5c0dportable ZIP\u8207version metadata\u7c3d\u7ae0\uff0c\u5c07verification public key\u7de8\u5165application\uff1b\u7c3d\u7f72\u5167\u5bb9\u7d81\u5b9aversion\u3001asset name\u3001digest\u53carelease channel\uff0c\u7f3a\u7c3d\u7ae0\u6216rollback\u4e00\u5f8b\u62d2\u7d55\u3002",
+                "text": "Update integrity: Portable artifact unsigned. Categories: Insufficient update authenticity, Update integrity. Weaknesses: CWE-494.\n\nRemediation:\n\n\u4ee5embedded public key\u9a57\u8b49portable artifact\u53caversion metadata signature\u3002\n\n\u4ee5embedded public key\u9a57\u8b49portable artifact\u8207metadata signature\u3002\n\n\u4ee5\u65e2\u6709Tauri signing key\u6216\u5c08\u7528offline key\u5c0dportable ZIP\u8207version metadata\u7c3d\u7ae0\uff0c\u5c07verification public key\u7de8\u5165application\uff1b\u7c3d\u7f72\u5167\u5bb9\u7d81\u5b9aversion\u3001asset name\u3001digest\u53carelease channel\uff0c\u7f3a\u7c3d\u7ae0\u6216rollback\u4e00\u5f8b\u62d2\u7d55\u3002"
+              },
+              "id": "update-integrity.portable-artifact-unsigned",
+              "name": "Update integrity: Portable artifact unsigned",
+              "properties": {
+                "security-severity": "2.0",
+                "tags": [
+                  "external/cwe/cwe-494",
+                  "insufficient-update-authenticity",
+                  "security",
+                  "update-integrity"
+                ]
+              },
+              "shortDescription": {
+                "text": "Update integrity: Portable artifact unsigned"
+              }
+            }
+          ],
+          "version": "0.1.22"
+        }
+      }
+    }
+  ],
+  "version": "2.1.0"
+}

@@ -1,0 +1,307 @@
+{
+  "completeness": "complete",
+  "deferred": [],
+  "documentType": "codex-security.coverage",
+  "excludePaths": [],
+  "explicitExclusions": [
+    {
+      "pattern": "src-tauri/gen/schemas/**",
+      "reason": "Generated Tauri dependency schemas are not the application-owned enforcement implementation; the actual capability manifest and consuming configuration were reviewed."
+    },
+    {
+      "pattern": "src-tauri/icons/** and src/assets/fonts/*.woff2",
+      "reason": "Static visual/font assets have no executable application behavior; their loaders and generated/embedded usage were reviewed."
+    },
+    {
+      "pattern": "LICENSE, src-tauri/resources/benchmark/LICENSE-*.txt, src/assets/fonts/*-LICENSE.txt",
+      "reason": "License texts are non-executable and do not define security controls."
+    },
+    {
+      "pattern": "src-tauri/resources/benchmark/*.exe",
+      "reason": "Opaque third-party PE internals were not reverse engineered. Hashes, Authenticode status, manifest trust and every application execution path were reviewed."
+    }
+  ],
+  "includePaths": [
+    "."
+  ],
+  "inventoryStrategy": "repository",
+  "mode": "repository",
+  "openQuestions": [
+    {
+      "followUpPrompt": "Use a Windows stress harness that binds authorization and image/creation-time reads to one handle, then attempt controlled PID reuse against a benign protected fixture.",
+      "question": "Can a local process reliably win the first-open PID reuse window between watcher rule/blacklist checks and OpenProcess, producing a meaningful protected-process impact?"
+    },
+    {
+      "followUpPrompt": "Instrument a representative Windows 11 deployment and compare path-query and set-information access outcomes across protected process classes.",
+      "question": "Can any concrete protected process have QueryFullProcessImageName fail while PROCESS_SET_INFORMATION succeeds, allowing FileName matching to bypass the intended System32 exclusion?"
+    }
+  ],
+  "scanId": "5368af66-9b97-4b2c-b045-be441c58cc6d",
+  "schemaVersion": "1.0",
+  "surfaces": [
+    {
+      "disposition": "reported",
+      "id": "surface_executable-2",
+      "label": "\u6700\u9ad8\u6b0a\u9650\u6392\u7a0b\u5de5\u4f5c\u6307\u5411\u53ef\u7531\u672a\u63d0\u5347\u7a0b\u5e8f\u7f6e\u63db\u7684 executable",
+      "notes": "Validated source-to-sink path; represented by privilege-escalation.writable-scheduled-task-target.",
+      "receiptRefs": [],
+      "riskArea": "privilege-escalation"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_binary-2",
+      "label": "\u672a\u9650\u5b9a\u7cfb\u7d71\u5de5\u5177\u8def\u5f91\u53ef\u5728\u63d0\u5347\u5f8c\u555f\u52d5\u653b\u64ca\u8005 binary",
+      "notes": "Validated source-to-sink path; represented by privilege-escalation.untrusted-system-tool-search.",
+      "receiptRefs": [],
+      "riskArea": "untrusted-search-path"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_temp-staging-executable",
+      "label": "\u56fa\u5b9a\u4f7f\u7528\u8005 TEMP staging \u5141\u8a31\u5728\u9a57\u8b49\u5f8c\u7f6e\u63db\u66f4\u65b0\u8173\u672c\u8207 executable",
+      "notes": "Validated source-to-sink path; represented by privilege-escalation.portable-update-staging-race.",
+      "receiptRefs": [],
+      "riskArea": "insecure-temporary-file"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_appdata-state-elevated-gpu-policy-mutation",
+      "label": "\u53ef\u507d\u9020\u7684 APPDATA state \u9a45\u52d5 elevated GPU policy mutation",
+      "notes": "Validated source-to-sink path; represented by privileged-state.unauthenticated-gpu-recovery.",
+      "receiptRefs": [],
+      "riskArea": "external-control-of-system-setting"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_production-benchmarkconfig-executable-elevated-runner",
+      "label": "production BenchmarkConfig \u53ef\u9078\u53d6\u672a\u9a57\u8b49 executable \u4f9b elevated runner \u57f7\u884c",
+      "notes": "Validated source-to-sink path; represented by privilege-escalation.benchmark-executable-overrides.",
+      "receiptRefs": [],
+      "riskArea": "externally-controlled-executable"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_manifest-d3d9-elevated-benchmark-sidecars",
+      "label": "\u53ef\u4fee\u6539\u7684\u540c\u76ee\u9304 manifest \u8207\u672a\u9a57\u8b49 D3D9 \u7121\u6cd5\u4fdd\u8b77 elevated benchmark sidecars",
+      "notes": "Validated source-to-sink path; represented by privilege-escalation.mutable-benchmark-sidecars.",
+      "receiptRefs": [],
+      "riskArea": "missing-executable-integrity"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_portable-update-publisher-signature-2",
+      "label": "portable update \u7f3a\u5c11\u7368\u7acb publisher signature",
+      "notes": "Validated source-to-sink path; represented by update-integrity.portable-artifact-unsigned.",
+      "receiptRefs": [],
+      "riskArea": "insufficient-update-authenticity"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_github-action-ref-updater-signing-key-release-token",
+      "label": "\u53ef\u8b8a GitHub Action ref \u76f4\u63a5\u63a5\u89f8 updater signing key \u8207 release token",
+      "notes": "Validated source-to-sink path; represented by supply-chain.mutable-release-action.",
+      "receiptRefs": [],
+      "riskArea": "ci-supply-chain"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_benchmark-executable-digest",
+      "label": "\u7b2c\u4e09\u65b9 benchmark executable \u4e0b\u8f09\u5f8c\u624d\u5f9e\u81ea\u8eab\u7522\u751f\u4fe1\u4efb digest",
+      "notes": "Validated source-to-sink path; represented by supply-chain.unverified-benchmark-refresh.",
+      "receiptRefs": [],
+      "riskArea": "build-supply-chain"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_benchmark-capture-identity-csv-2",
+      "label": "benchmark \u63a5\u53d7\u6216\u91cd\u8b80\u672a\u7d81\u5b9a\u672c\u6b21 capture identity \u7684 CSV",
+      "notes": "Validated source-to-sink path; represented by benchmark-integrity.untrusted-capture-files.",
+      "receiptRefs": [],
+      "riskArea": "benchmark-evidence-integrity"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_pe-parser-2",
+      "label": "PE \u8a3a\u65b7 parser \u53ef\u56e0\u672a\u7d42\u6b62\u540d\u7a31\u9032\u5165\u7121\u9650\u8ff4\u5708",
+      "notes": "Validated source-to-sink path; represented by parser-dos.pe-unterminated-cstring.",
+      "receiptRefs": [],
+      "riskArea": "parser-denial-of-service"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_pe-terminal-control-sequences-2",
+      "label": "PE \u8a3a\u65b7\u5de5\u5177\u672a\u4e2d\u548c\u540d\u7a31\u4e2d\u7684 terminal control sequences",
+      "notes": "Validated source-to-sink path; represented by output-injection.pe-terminal-control-sequences.",
+      "receiptRefs": [],
+      "riskArea": "terminal-output-injection"
+    },
+    {
+      "disposition": "no_issue_found",
+      "id": "surface_frontend-rendering-origins-and-privileged-ipc-reachability",
+      "label": "Frontend rendering, origins and privileged IPC reachability",
+      "notes": "No {@html}, innerHTML, eval, remote iframe/navigation/fetch/WebSocket or attacker-controlled renderer entry was found; backend-derived strings use Svelte text/attribute interpolation. CSP null remains defense-in-depth hardening, not a demonstrated exploit path.",
+      "receiptRefs": [],
+      "riskArea": "xss-and-renderer-boundary"
+    },
+    {
+      "disposition": "not_applicable",
+      "id": "surface_database-server-upload-and-xml-surfaces",
+      "label": "Database, server, upload and XML surfaces",
+      "notes": "Repository contains no database, HTTP server, upload endpoint or XML parser; SQL/NoSQL injection, request smuggling, SSRF upload paths and XXE are not applicable to the product source.",
+      "receiptRefs": [],
+      "riskArea": "server-side-injection"
+    },
+    {
+      "disposition": "no_issue_found",
+      "id": "surface_archive-extraction-and-session-path-containment",
+      "label": "Archive extraction and session path containment",
+      "notes": "Session directories require a UUID. Portable ZIP extraction rejects `..`, backslashes, nested/unexpected resources, duplicates and missing required entries. The reported update issue is post-extraction local object integrity, not archive-member traversal.",
+      "receiptRefs": [],
+      "riskArea": "path-traversal"
+    },
+    {
+      "disposition": "no_issue_found",
+      "id": "surface_process-rule-targeting-and-pid-lifecycle-controls",
+      "label": "Process rule targeting and PID lifecycle controls",
+      "notes": "FullPath and explicit FileName modes, fixed/System32 blacklist, PID creation-time tracking and affinity readback were reviewed. Two unproven race/path-unknown questions remain documented separately.",
+      "receiptRefs": [],
+      "riskArea": "process-authorization-controls"
+    },
+    {
+      "disposition": "no_issue_found",
+      "id": "surface_gpu-interactive-mutation-transaction-controls",
+      "label": "GPU interactive mutation transaction controls",
+      "notes": "Normal apply validates LP, present adapter and BasicDisplay; CAS reservation, pre-write snapshot, readback, rollback and recoveryRequired controls prevent concurrent or silently partial mutations. Reported findings concern unauthenticated persisted state and benchmark evidence.",
+      "receiptRefs": [],
+      "riskArea": "privileged-gpu-controls"
+    },
+    {
+      "disposition": "no_issue_found",
+      "id": "surface_unsafe-win32-memory-boundaries",
+      "label": "Unsafe Win32 memory boundaries",
+      "notes": "Reviewed production unsafe blocks for buffer sizing, handles, callbacks and SetupAPI/registry structs; no attacker-reachable out-of-bounds, UAF or type confusion was established.",
+      "receiptRefs": [],
+      "riskArea": "memory-safety"
+    },
+    {
+      "disposition": "no_issue_found",
+      "id": "surface_secrets-and-credential-material",
+      "label": "Secrets and credential material",
+      "notes": "No private keys, API tokens or passwords were found. Updater pubkey and Windows publicKeyToken are public verification/identity values.",
+      "receiptRefs": [],
+      "riskArea": "secret-exposure"
+    },
+    {
+      "disposition": "no_issue_found",
+      "id": "surface_dependency-lock-integrity",
+      "label": "Dependency lock integrity",
+      "notes": "npm lockfile v3 entries have resolved URLs and integrity fields; Cargo locks contain registry checksums and no git/path sources. Current advisory/CVE matching was not performed offline.",
+      "receiptRefs": [],
+      "riskArea": "dependency-integrity"
+    },
+    {
+      "disposition": "no_issue_found",
+      "id": "surface_bundled-benchmark-binary-metadata",
+      "label": "Bundled benchmark binary metadata",
+      "notes": "Tracked PresentMon/lava hashes match SHA256SUMS; PresentMon Authenticode is valid (Intel), lava is unsigned. Opaque binary internals were not reverse engineered; trust-root/runtime weaknesses are reported separately.",
+      "receiptRefs": [],
+      "riskArea": "binary-provenance"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_executable",
+      "label": "\u6700\u9ad8\u6b0a\u9650\u6392\u7a0b\u5de5\u4f5c\u6307\u5411\u53ef\u7f6e\u63db executable",
+      "notes": "Validated privilege-escalation.writable-scheduled-task-target.",
+      "receiptRefs": [],
+      "riskArea": "privilege-escalation"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_binary",
+      "label": "\u672a\u9650\u5b9a\u7cfb\u7d71\u5de5\u5177\u8def\u5f91\u53ef\u555f\u52d5\u653b\u64ca\u8005 binary",
+      "notes": "Validated privilege-escalation.untrusted-system-tool-search.",
+      "receiptRefs": [],
+      "riskArea": "untrusted-search-path"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_temp-staging-update-script-executable",
+      "label": "\u56fa\u5b9a TEMP staging \u5141\u8a31\u7f6e\u63db update script \u8207 executable",
+      "notes": "Validated privilege-escalation.portable-update-staging-race.",
+      "receiptRefs": [],
+      "riskArea": "insecure-temporary-file"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_appdata-state-elevated-gpu-mutation",
+      "label": "\u53ef\u507d\u9020\u7684 APPDATA state \u9a45\u52d5 elevated GPU mutation",
+      "notes": "Validated privileged-state.unauthenticated-gpu-recovery.",
+      "receiptRefs": [],
+      "riskArea": "external-control-of-system-setting"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_production-benchmarkconfig-executable",
+      "label": "production BenchmarkConfig \u53ef\u9078\u672a\u9a57\u8b49 executable",
+      "notes": "Validated privilege-escalation.benchmark-executable-overrides.",
+      "receiptRefs": [],
+      "riskArea": "externally-controlled-executable"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_manifest-d3d9-exists-only-elevated-sidecars",
+      "label": "\u53ef\u5beb manifest \u8207 D3D9 exists-only \u7121\u6cd5\u4fdd\u8b77 elevated sidecars",
+      "notes": "Validated privilege-escalation.mutable-benchmark-sidecars.",
+      "receiptRefs": [],
+      "riskArea": "missing-executable-integrity"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_benchmark-capture-identity-csv",
+      "label": "benchmark \u63a5\u53d7\u6216\u91cd\u8b80\u672a\u7d81\u5b9a\u672c\u6b21 capture identity \u7684 CSV",
+      "notes": "Validated benchmark-integrity.untrusted-capture-files.",
+      "receiptRefs": [],
+      "riskArea": "benchmark-evidence-integrity"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_portable-update-publisher-signature",
+      "label": "portable update \u7f3a\u5c11\u7368\u7acb publisher signature",
+      "notes": "Validated update-integrity.portable-artifact-unsigned.",
+      "receiptRefs": [],
+      "riskArea": "insufficient-update-authenticity"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_mutable-action-ref-signing-key-release-token",
+      "label": "mutable Action ref \u63a5\u89f8 signing key \u8207 release token",
+      "notes": "Validated supply-chain.mutable-release-action.",
+      "receiptRefs": [],
+      "riskArea": "ci-supply-chain"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_binary-digest",
+      "label": "\u7b2c\u4e09\u65b9 binary \u4e0b\u8f09\u5f8c\u624d\u81ea\u751f digest",
+      "notes": "Validated supply-chain.unverified-benchmark-refresh.",
+      "receiptRefs": [],
+      "riskArea": "build-supply-chain"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_pe-parser",
+      "label": "PE \u8a3a\u65b7 parser \u53ef\u56e0\u672a\u7d42\u6b62\u540d\u7a31\u9032\u5165\u7121\u9650\u8ff4\u5708",
+      "notes": "Validated parser-dos.pe-unterminated-cstring.",
+      "receiptRefs": [],
+      "riskArea": "parser-denial-of-service"
+    },
+    {
+      "disposition": "reported",
+      "id": "surface_pe-terminal-control-sequences",
+      "label": "PE \u8a3a\u65b7\u5de5\u5177\u672a\u4e2d\u548c terminal control sequences",
+      "notes": "Validated output-injection.pe-terminal-control-sequences.",
+      "receiptRefs": [],
+      "riskArea": "terminal-output-injection"
+    }
+  ]
+}
