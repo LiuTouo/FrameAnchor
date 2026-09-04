@@ -4151,9 +4151,11 @@ mod tests {
         }
     }
 
-    /// 建立可通過 assets::verify 的暫存資源:從 vendored 資源目錄連結真實檔案。
-    /// verify 以內嵌 digest 比對,偽造內容無法通過;測試不會寫入這些檔,
+    /// 建立可通過 assets::verify 的暫存資源：從 vendored 資源目錄連結真實檔案。
+    /// verify 以內嵌 digest 比對，偽造內容無法通過；測試不會寫入這些檔，
     /// hard link 安全（跨磁碟時退回 copy）。
+    /// d3d9-workload.exe 是 build 產物、不在 git 內：CI checkout 缺檔時以假內容
+    /// 補位（該環境 D3D9 digest 為 None，verify 僅檢查存在）。
     fn make_assets(dir: &std::path::Path) -> BenchmarkAssets {
         std::fs::create_dir_all(dir).unwrap();
         let vendored =
@@ -4164,10 +4166,16 @@ mod tests {
             assets::D3D9_WORKLOAD_FILE,
         ] {
             let dst = dir.join(file);
-            if !dst.exists() {
-                std::fs::hard_link(vendored.join(file), &dst)
-                    .or_else(|_| std::fs::copy(vendored.join(file), &dst).map(|_| ()))
+            if dst.exists() {
+                continue;
+            }
+            let src = vendored.join(file);
+            if src.exists() {
+                std::fs::hard_link(&src, &dst)
+                    .or_else(|_| std::fs::copy(&src, &dst).map(|_| ()))
                     .unwrap();
+            } else {
+                std::fs::write(&dst, b"placeholder-d3d9-not-vendored").unwrap();
             }
         }
         assets::load(dir)

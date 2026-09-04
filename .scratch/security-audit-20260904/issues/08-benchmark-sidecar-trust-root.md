@@ -19,6 +19,9 @@
 
 ## 殘餘(記錄,不阻塞)
 
+- `d3d9-workload.exe` 為 build 產物、不在 git 內(gitignore):CI checkout 缺此檔,
+  build.rs 生成 `D3D9_WORKLOAD_DIGEST = None`,runtime 退回存在檢查;本機/release
+  build（先跑 `npm run build:benchmark-assets`）才有 per-build digest。
 - pre_flight 驗證到 spawn 之間仍有秒級 TOCTOU 窗口;完整關閉需 protected
   resource tree(ACL/MIC)或 verify-to-use file identity binding。攻擊者已無法
   透過改 manifest 過驗,窗口僅剩直接替換 sidecar 並命中時序,風險大幅縮小。
