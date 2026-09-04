@@ -209,6 +209,7 @@ jobs:
           # publisher 簽章：以 updater 簽署 key 簽署 metadata（綁 version/asset/sha256）。
           # 可攜版 client 以內嵌 public key 驗證，缺簽章即拒絕更新（同一信任根。
           # TAURI_SIGNING_PRIVATE_KEY 需以 base64 編碼的 key 內容提供）。
+          $tag = "$env:GITHUB_REF_NAME"
           $meta = [ordered]@{
             schema  = 1
             version = $tag.Substring(1)
